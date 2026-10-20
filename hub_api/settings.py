@@ -63,10 +63,14 @@ class HubSettings(BaseSettings):
     # Allow PATCH /plugins/{name}/settings to change endpoint/TLS keys (base_url, verify_tls ...).
     allow_endpoint_settings: bool = False
 
+    # MCP endpoint (/mcp): Host header allow-list for DNS-rebinding protection (CSV in env, "host:*" wildcards
+    # the port). Empty = no Host check (bearer auth and the Origin check against cors_origins still apply).
+    mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
     # Run a background health sweep every core Settings.health_interval_s (0 disables).
     background_health: bool = True
 
-    @field_validator("ws_default_types", mode="before")
+    @field_validator("ws_default_types", "mcp_allowed_hosts", mode="before")
     @classmethod
     def _split_types(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip().startswith("["):

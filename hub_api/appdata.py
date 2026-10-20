@@ -23,12 +23,13 @@ from typing import Any, Protocol
 from fastapi import HTTPException, Request, UploadFile
 
 from core.interfaces import QueryResult
-from hub_api.state import HubState, get_state
+from hub_api.state import HubState
 
 __all__ = [
     "AppDB",
     "SQLAdapter",
     "get_appdb",
+    "appdb_for",
     "new_id",
     "random_code",
     "now_iso",
@@ -100,18 +101,26 @@ class AppDB:
         return int(result.affected_rows or 0)
 
 
-def get_appdb(request: Request) -> AppDB:
-    """FastAPI dependency: one AppDB per app (override with ``app.dependency_overrides``)."""
-    db: AppDB | None = getattr(request.app.state, "appdb", None)
+def appdb_for(app: Any) -> AppDB:
+    """The app-wide AppDB (created on first use and kept on ``app.state.appdb``).
+
+    Shared by the HTTP dependency below and by callers outside a request (the MCP server).
+    """
+    db: AppDB | None = getattr(app.state, "appdb", None)
     if db is None:
-        state: HubState = get_state(request)
+        state: HubState = app.state.hub
 
         async def source() -> SQLAdapter:
             return await state.router.adapter(state.hub.apps_db_provider)  # type: ignore[return-value]
 
         db = AppDB(source, timeout_s=state.hub.db_timeout_s)
-        request.app.state.appdb = db
+        app.state.appdb = db
     return db
+
+
+def get_appdb(request: Request) -> AppDB:
+    """FastAPI dependency: one AppDB per app (override with ``app.dependency_overrides``)."""
+    return appdb_for(request.app)
 
 
 # --------------------------------------------------------------------------- ids and time

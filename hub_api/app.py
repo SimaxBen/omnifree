@@ -19,6 +19,7 @@ from core.registry import PluginRegistry
 from core.router import SmartRouter
 from hub_api.auth import require_token
 from hub_api.errors import install_error_handlers
+from hub_api.mcp_server import mount_mcp
 from hub_api.routers import agent, compute, cron, db, dns, drive, expenses, links, llm, notes, plugins, ws
 from hub_api.routers import budget as budget_router
 from hub_api.routers import rag as rag_router
@@ -121,8 +122,11 @@ def create_app(
         allow_origins=settings.cors_origins,
         allow_credentials=False,  # bearer tokens, no cookies
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
-        expose_headers=[ROUTED_VIA_HEADER, "X-Storage-Backend", "Retry-After", "Content-Disposition"],
+        # Mcp-Protocol-Version / Mcp-Session-Id: browser-based MCP clients (e.g. the MCP Inspector) on /mcp.
+        allow_headers=["Authorization", "Content-Type", "Mcp-Protocol-Version", "Mcp-Session-Id"],
+        expose_headers=[
+            ROUTED_VIA_HEADER, "X-Storage-Backend", "Retry-After", "Content-Disposition", "WWW-Authenticate",
+        ],
         max_age=600,
     )
     install_error_handlers(app)
@@ -158,4 +162,5 @@ def create_app(
             return response
 
     app.include_router(ws.router)  # authenticates itself (query token / subprotocol)
+    mount_mcp(app, version=VERSION)  # /mcp: MCP server for agents, authenticates itself (hub or MCP token)
     return app

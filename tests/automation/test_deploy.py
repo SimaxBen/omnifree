@@ -467,7 +467,7 @@ def test_cli_status_and_missing_hub(tmp_path: Path, capsys: pytest.CaptureFixtur
 def test_hub_secret_names_cover_enabled_plugins_and_skip_human_passwords(tmp_path: Path) -> None:
     d, _ = _deployer(tmp_path, {})
     names = d.hub_secret_names()
-    assert names[:2] == ["HUB_API_TOKEN", "INSTINCT_API_TOKEN"]
+    assert names[:3] == ["HUB_API_TOKEN", "INSTINCT_API_TOKEN", "MCP_API_TOKEN"]
     assert {"GROQ_API_KEY", "NEON_DATABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"} <= set(names)
     assert "MISTRAL_API_KEY" not in names and "SAMBANOVA_API_KEY" not in names  # disabled plugins
     assert not {"HF_TOKEN", "B2_ACCOUNT_PASSWORD", "OCI_CONSOLE_PASSWORD", "SUPABASE_DB_PASSWORD"} & set(names)

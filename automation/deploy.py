@@ -675,8 +675,8 @@ chown {q(user)}:{q(user)} {q(mount_path)}
     })
 
     def hub_secret_names(self, providers: dict[str, Any] | None = None) -> list[str]:
-        """Vault keys the hub can use: secrets of enabled plugins plus the hub/instinct tokens."""
-        names: dict[str, None] = {"HUB_API_TOKEN": None, "INSTINCT_API_TOKEN": None}
+        """Vault keys the hub can use: secrets of enabled plugins plus the hub/instinct/MCP tokens."""
+        names: dict[str, None] = {"HUB_API_TOKEN": None, "INSTINCT_API_TOKEN": None, "MCP_API_TOKEN": None}
         for spec in ((providers or self.cfg.providers).get("plugins") or {}).values():
             if not isinstance(spec, dict) or not spec.get("enabled", True):
                 continue
