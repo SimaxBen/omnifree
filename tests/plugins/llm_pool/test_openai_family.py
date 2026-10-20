@@ -198,6 +198,9 @@ async def test_groq_transcription_multipart(mock: respx.MockRouter) -> None:
     assert request.headers["content-type"].startswith("multipart/form-data")
     raw = request.content
     assert b'name="model"' in raw and b"whisper-large-v3" in raw and b'filename="a.wav"' in raw and b"fr" in raw
+    assert b'name="prompt"' not in raw
+    await adapter.transcribe(TranscriptionRequest(audio=b"RIFF", prompt="OmniFree, Upstash"))
+    assert b'name="prompt"' in route.calls.last.request.content and b"OmniFree, Upstash" in route.calls.last.request.content
 
 
 @pytest.mark.parametrize(

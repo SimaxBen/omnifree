@@ -47,6 +47,8 @@ class GroqAdapter(PooledOpenAIAdapter):
             data: dict[str, str] = {"model": model, "response_format": "json"}
             if request.language:
                 data["language"] = request.language
+            if request.prompt:
+                data["prompt"] = request.prompt
             headers = {k: v for k, v in self.headers().items() if k.lower() != "content-type"}
             response = await self.request(
                 "POST",

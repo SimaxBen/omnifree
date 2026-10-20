@@ -13,10 +13,12 @@ Settings:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from typing import ClassVar
 
 from core.interfaces import (
     Capability,
+    DirectUpload,
     HealthStatus,
     PluginMeta,
     QuotaInfo,
@@ -27,7 +29,7 @@ from plugins._s3 import S3Client, SigV4Signer
 
 
 class R2StorageAdapter(StorageAdapter):
-    capabilities: ClassVar[frozenset[str]] = frozenset({Capability.PRESIGN})
+    capabilities: ClassVar[frozenset[str]] = frozenset({Capability.PRESIGN, Capability.DIRECT_UPLOAD})
     meta: ClassVar[PluginMeta] = PluginMeta(
         display_name="Cloudflare R2",
         description="S3-compatible object storage, 10GB free, zero egress.",
@@ -84,6 +86,19 @@ class R2StorageAdapter(StorageAdapter):
 
     async def presign(self, key: str, expires_s: int = 3600, method: str = "GET") -> str:
         return self._client().presign(key, expires_s, method)
+
+    async def upload_target(
+        self, key: str, content_type: str, size: int | None = None, expires_s: int = 3600
+    ) -> DirectUpload:
+        """Presigned PUT (only ``host`` is signed, so the Content-Type header is free to send)."""
+        ttl = max(1, min(int(expires_s), 604800))
+        url = await self.presign(key, ttl, "PUT")
+        self._usage_cache = None
+        return DirectUpload(
+            provider=self.name, key=key, method="PUT", url=url,
+            headers={"Content-Type": content_type or "application/octet-stream"},
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+        )
 
     async def quota(self) -> QuotaInfo:
         ttl = float(self.setting("usage_scan_ttl_s", 900))

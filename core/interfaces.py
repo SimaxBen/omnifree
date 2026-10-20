@@ -47,6 +47,7 @@ __all__ = [
     "TranscriptionRequest",
     "TranscriptionResponse",
     "StoredObject",
+    "DirectUpload",
     "ColumnInfo",
     "TableInfo",
     "QueryResult",
@@ -107,6 +108,7 @@ class Capability(StrEnum):
     VISION = "vision"
     # Storage
     PRESIGN = "presign"
+    DIRECT_UPLOAD = "direct_upload"  # upload_target(): client uploads straight to the backend
     # DB
     SQL = "sql"  # query()/execute() accept SQL text (otherwise a provider-native command/JSON)
     # Compute
@@ -297,6 +299,7 @@ class TranscriptionRequest(BaseModel):
     filename: str = "audio.wav"
     model: str | None = None
     language: str | None = None
+    prompt: str | None = None  # optional context/spelling hint (Whisper ``prompt``)
     provider: str | None = None
 
 
@@ -318,6 +321,21 @@ class StoredObject(BaseModel):
     backend: str = ""  # provider name holding the object
     url: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class DirectUpload(BaseModel):
+    """Instructions for a client to upload bytes straight to a storage backend.
+
+    The client sends the file body with ``method`` to ``url`` adding exactly ``headers``
+    (they may carry a short-lived upload credential, never a long-lived secret).
+    """
+
+    provider: str
+    key: str
+    method: str
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_at: datetime | None = None
 
 
 class ColumnInfo(BaseModel):
@@ -705,6 +723,12 @@ class StorageAdapter(ProviderAdapter):
     async def presign(self, key: str, expires_s: int = 3600, method: str = "GET") -> str:
         """Optional: requires Capability.PRESIGN."""
         raise self._unsupported(Capability.PRESIGN)
+
+    async def upload_target(
+        self, key: str, content_type: str, size: int | None = None, expires_s: int = 3600
+    ) -> DirectUpload:
+        """Optional: requires Capability.DIRECT_UPLOAD (presigned PUT, B2 upload URL ...)."""
+        raise self._unsupported(Capability.DIRECT_UPLOAD)
 
     async def quota(self) -> QuotaInfo:
         """Storage adapters SHOULD override with unit='bytes' (used/limit capacity)."""
