@@ -114,7 +114,16 @@ jobs:
             echo "::notice::Vercel hub not redeployed: add the OMNIFREE_ENV_VAULT_B64 and OMNIFREE_VAULT_PASSPHRASE secrets"
             echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          echo "$VAULT_B64" | base64 -d > .env.vault && echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "$VAULT_B64" | tr -d ' \r\n' | base64 -d > .env.vault
+          # Secrets pasted from a file often carry a trailing newline: strip it before using the passphrase.
+          pass="$(printf %s "$OMNIFREE_VAULT_PASSPHRASE" | tr -d '\r\n')"
+          echo "::add-mask::$pass"
+          echo "OMNIFREE_VAULT_PASSPHRASE=$pass" >> "$GITHUB_ENV"
+          if ! OMNIFREE_VAULT_PASSPHRASE="$pass" python -m core.vault list > /dev/null; then
+            echo "::error::the vault did not open: OMNIFREE_VAULT_PASSPHRASE must match .omnifree_vault_pass and OMNIFREE_ENV_VAULT_B64 must be the base64 of the current .env.vault"
+            exit 1
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
       - name: Deploy
         if: steps.vault.outputs.ready == 'true'
         run: |
