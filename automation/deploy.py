@@ -863,7 +863,7 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         self.echo(f"  vercel project {name}: {len(env)} env vars")
         staging = self._vercel_hub_dir(self.cfg.path("data/vercel-hub"))
         run_env = {"VERCEL_PROJECT_ID": proj["id"], "VERCEL_ORG_ID": team or proj.get("accountId", "")}
-        cmd = ["npx", "--yes", "vercel@latest", "deploy", str(staging), "--prod", "--yes", f"--token={token}"]
+        cmd = [*self._cli("vercel@latest", "vercel"), "deploy", str(staging), "--prod", "--yes", f"--token={token}"]
         if team:
             cmd.append(f"--scope={team}")
         proc = self.runner.run(cmd, env=run_env, capture=True)
@@ -875,6 +875,13 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         return url
 
     # ------------------------------------------------------------------ edge worker / PWA
+    @staticmethod
+    def _cli(package: str, binary: str) -> list[str]:
+        """Use an installed CLI when it is on PATH (avoids npx lock races), else ``npx --yes <package>``."""
+        import shutil
+
+        return [binary] if shutil.which(binary) else ["npx", "--yes", package]
+
     def _cloudflare_env(self) -> dict[str, str]:
         return {"CLOUDFLARE_API_TOKEN": self.require("CLOUDFLARE_API_TOKEN"),
                 "CLOUDFLARE_ACCOUNT_ID": self.require("CLOUDFLARE_ACCOUNT_ID")}
@@ -895,7 +902,7 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         if not origins:
             raise DeployError("PWA origin unknown: run deploy-pwa first or pass --pwa-origin")
         self._npm_install(directory)
-        proc = self.runner.run(["npx", "wrangler", "deploy", "--var", f"HUB_ORIGIN:{hub}",
+        proc = self.runner.run([*self._cli("wrangler@4", "wrangler"), "deploy", "--var", f"HUB_ORIGIN:{hub}",
                                 "--var", f"PWA_ORIGINS:{','.join(origins)}"],
                                cwd=directory, env=self._cloudflare_env(), capture=True)
         out = proc.stdout or ""
@@ -920,6 +927,17 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             raise DeployError(f"build produced no {dist}/index.html")
         return dist
 
+    def _ensure_pages_project(self, project: str, env: dict[str, str]) -> None:
+        """Create the Cloudflare Pages project over the API if it does not exist (idempotent)."""
+        base = f"https://api.cloudflare.com/client/v4/accounts/{env['CLOUDFLARE_ACCOUNT_ID']}/pages/projects"
+        headers = {"Authorization": f"Bearer {env['CLOUDFLARE_API_TOKEN']}"}
+        with httpx.Client(timeout=30, headers=headers) as http:
+            if http.get(f"{base}/{project}").status_code == 200:
+                return
+            r = http.post(base, json={"name": project, "production_branch": "main"})
+            if r.status_code >= 400:
+                raise DeployError(f"Pages project create failed: {r.status_code} {r.text[:300]}")
+
     def deploy_pwa(self, *, target: str = "pages", hub_url: str | None = None) -> str:
         pwa = self.cfg.section("pwa")
         edge = self.state.urls.get("edge")
@@ -930,15 +948,16 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         if target == "pages":
             project = str(pwa.get("pages_project", "omnifree-pwa"))
             env = self._cloudflare_env()
-            self.runner.run(["npx", "--yes", "wrangler@4", "pages", "project", "create", project,
-                             "--production-branch=main"], env=env, check=False, capture=True)
-            proc = self.runner.run(["npx", "--yes", "wrangler@4", "pages", "deploy", str(dist),
-                                    f"--project-name={project}", "--branch=main", "--commit-dirty=true"],
-                                   env=env, capture=True)
+            self._ensure_pages_project(project, env)
+            # Neutral cwd: recent wrangler versions auto-generate a wrangler.jsonc in the working directory.
+            with tempfile.TemporaryDirectory() as neutral:
+                proc = self.runner.run([*self._cli("wrangler@4", "wrangler"), "pages", "deploy", str(dist),
+                                        f"--project-name={project}", "--branch=main", "--commit-dirty=true"],
+                                       env=env, capture=True, cwd=neutral)
             self.echo((proc.stdout or "").strip()[-800:])
             url = f"https://{project}.pages.dev"
         elif target == "vercel":
-            cmd = ["npx", "--yes", "vercel@latest", "deploy", str(dist), "--prod", "--yes",
+            cmd = [*self._cli("vercel@latest", "vercel"), "deploy", str(dist), "--prod", "--yes",
                    f"--token={self.require('VERCEL_TOKEN')}"]
             team = self.optional("VERCEL_TEAM_ID")
             if team:
@@ -948,7 +967,7 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             url = urls[-1] if urls else ""
         elif target == "netlify":
             site = str((self.cfg.plugin_settings("netlify").get("sites") or ["omnifree-pwa"])[0])
-            proc = self.runner.run(["npx", "--yes", "netlify-cli", "deploy", "--prod", f"--dir={dist}",
+            proc = self.runner.run([*self._cli("netlify-cli", "netlify"), "deploy", "--prod", f"--dir={dist}",
                                     f"--site={site}", "--json"],
                                    env={"NETLIFY_AUTH_TOKEN": self.require("NETLIFY_TOKEN")}, capture=True)
             try:
@@ -1260,6 +1279,10 @@ async def _dispatch(args: argparse.Namespace, deployer: Deployer) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # CLI output (wrangler/vercel logs) contains emoji; a legacy Windows console codepage must not crash us.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     from core.config import get_settings
 

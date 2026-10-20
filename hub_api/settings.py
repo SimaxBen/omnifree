@@ -7,8 +7,10 @@ stored here: they are resolved through ``core.config.Settings.secret``.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 __all__ = ["HubSettings", "INSTINCT_TOKEN_KEY", "HUB_TOKEN_FALLBACK_KEY"]
 
@@ -42,7 +44,7 @@ class HubSettings(BaseSettings):
     tailscale_provider: str = "tailscale"
 
     # WebSocket event stream.
-    ws_default_types: list[str] = Field(default_factory=lambda: ["*"])
+    ws_default_types: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["*"])  # CSV in env
     ws_max_replay: int = 200
     ws_ping_interval_s: float = 25.0
 

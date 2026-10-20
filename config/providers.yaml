@@ -52,8 +52,9 @@ plugins:
       api_key: GROQ_API_KEY
     settings:
       base_url: https://api.groq.com/openai/v1
-      default_model: llama-3.3-70b-versatile
-      models: [llama-3.3-70b-versatile, llama-3.1-8b-instant, openai/gpt-oss-120b, openai/gpt-oss-20b]
+      # 2026-10-20: the llama-3.x ids are gone from Groq (404 model_not_found).
+      default_model: openai/gpt-oss-120b
+      models: [openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b]
       transcription_models: [whisper-large-v3, whisper-large-v3-turbo]
   gemini:
     module: plugins.llm_pool.gemini:GeminiAdapter
@@ -69,8 +70,9 @@ plugins:
       api_key: GEMINI_API_KEY
     settings:
       base_url: https://generativelanguage.googleapis.com/v1beta/openai
-      default_model: gemini-2.5-flash
-      models: [gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro, gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite, gemini-3-flash-preview]
+      # 2026-10-20: gemini-2.5-* is "no longer available to new users"; the -latest aliases follow retirements.
+      default_model: gemini-flash-latest
+      models: [gemini-flash-latest, gemini-3.8-flash, gemini-flash-lite-latest, gemini-3.5-flash-lite, gemini-pro-latest]
       embedding_models: [gemini-embedding-2]
       default_embedding_model: gemini-embedding-2
   mistral:

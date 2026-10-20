@@ -380,17 +380,21 @@ def test_deploy_hub_command_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert json.loads((tmp_path / "state.json").read_text())["urls"]["hub"] == url
 
 
-def test_deploy_worker_and_pwa(tmp_path: Path) -> None:
+def test_deploy_worker_and_pwa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "proj"
     write_file(root / "mobile_app" / "package.json", "{}")
     write_file(root / "mobile_app" / "dist" / "index.html", "<html></html>")
     write_file(root / "deploy" / "cloudflare-worker" / "package.json", "{}")
     (root / "deploy" / "cloudflare-worker" / "node_modules").mkdir(parents=True)
-    runner = FakeRunner(outputs={"npx wrangler deploy": "Deployed omnifree-edge https://omnifree-edge.me.workers.dev"})
+    runner = FakeRunner(outputs={"npx --yes wrangler@4 deploy": "Deployed omnifree-edge https://omnifree-edge.me.workers.dev"})
     state = DeployState(tmp_path / "s.json", {"instances": {}, "urls": {"hub": "https://hub.run.app"}})
     d, _ = _deployer(tmp_path, {"CLOUDFLARE_API_TOKEN": "cf-tok", "CLOUDFLARE_ACCOUNT_ID": "acc"}, runner=runner,
                      root=root, state=state)
+    monkeypatch.setattr("shutil.which", lambda _b: None)  # no global CLIs: commands go through npx
+    created: list[str] = []
+    d._ensure_pages_project = lambda project, env: created.append(project)  # type: ignore[method-assign]
     pwa = d.deploy_pwa(target="pages")
+    assert created == ["omnifree-pwa"]
     assert pwa == "https://omnifree-pwa.pages.dev"
     build = next(c for c in runner.calls if c["argv"][:3] == ["npm", "run", "build"])
     assert build["env"] == {"VITE_HUB_URL": "https://hub.run.app"}
@@ -398,7 +402,7 @@ def test_deploy_worker_and_pwa(tmp_path: Path) -> None:
     assert pages["env"]["CLOUDFLARE_API_TOKEN"] == "cf-tok" and "--project-name=omnifree-pwa" in pages["argv"]
     edge = d.deploy_worker()
     assert edge == "https://omnifree-edge.me.workers.dev"
-    wr = next(c["argv"] for c in runner.calls if c["argv"][:3] == ["npx", "wrangler", "deploy"])
+    wr = next(c["argv"] for c in runner.calls if c["argv"][:4] == ["npx", "--yes", "wrangler@4", "deploy"])
     assert "HUB_ORIGIN:https://hub.run.app" in wr and "PWA_ORIGINS:https://omnifree-pwa.pages.dev" in wr
     assert d.final_url() == edge
 

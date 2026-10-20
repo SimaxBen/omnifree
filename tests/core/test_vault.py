@@ -104,3 +104,14 @@ def test_settings_merge_env_over_vault(tmp_path: Path, monkeypatch: pytest.Monke
     bad = Settings(root_dir=tmp_path, vault_passphrase="wrong", vault_required=True, _env_file=None)
     with pytest.raises(VaultError):
         bad.secret("ONLY_IN_VAULT")
+
+
+def test_csv_env_lists_parse_without_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OMNIFREE_CORS_ORIGINS / OMNIFREE_WS_DEFAULT_TYPES are comma-separated, not JSON (deploys set them so)."""
+    from core.config import Settings
+    from hub_api.settings import HubSettings
+
+    monkeypatch.setenv("OMNIFREE_CORS_ORIGINS", "https://a.dev, https://b.dev")
+    monkeypatch.setenv("OMNIFREE_WS_DEFAULT_TYPES", "llm.*,drive.*")
+    assert Settings().cors_origins == ["https://a.dev", "https://b.dev"]
+    assert HubSettings().ws_default_types == ["llm.*", "drive.*"]

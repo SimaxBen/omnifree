@@ -166,7 +166,7 @@ class CommandRunner:
         argv[0] = self.resolve(argv[0])
         full_env = {**os.environ, **(env or {})}
         proc = subprocess.run(argv, cwd=str(cwd) if cwd else None, env=full_env, input=input_text,
-                              capture_output=capture, text=True, check=False)
+                              capture_output=capture, text=True, encoding="utf-8", errors="replace", check=False)
         if check and proc.returncode != 0:
             detail = self.mask((proc.stderr or proc.stdout or "").strip()[-2000:]) if capture else ""
             raise DeployError(f"command failed ({proc.returncode}): {self.mask(' '.join(cmd))}\n{detail}")

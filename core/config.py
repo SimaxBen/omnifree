@@ -12,9 +12,10 @@ import logging
 import os
 from functools import cached_property, lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from core.interfaces import NotConfigured
 from core.vault import Vault, VaultError
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     hub_host: str = "0.0.0.0"
     hub_port: int = 8080
     hub_api_token: SecretStr | None = None  # bearer token for hub_api (or vault key HUB_API_TOKEN)
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:5173"])  # CSV in env
     request_timeout_s: float = 30.0
     health_interval_s: float = 120.0
 

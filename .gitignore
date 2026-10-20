@@ -16,3 +16,9 @@ deploy/pihole/etc-pihole/
 .env.vault*
 .providers.*
 *.pem
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
