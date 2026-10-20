@@ -7,6 +7,7 @@ import { errorText, useHub, useHubData } from '../../lib/hub';
 import { readPref, writePref } from '../../lib/settings';
 import type { ChatMessage, Usage } from '../../lib/types';
 import ModelPicker, { parseModelChoice } from './ModelPicker';
+import TranscribePanel from './TranscribePanel';
 
 interface Turn {
   id: number;
@@ -29,12 +30,14 @@ export default function ChatPanel() {
   const [allowFallback, setAllowFallback] = useState<boolean>(() => readPref('chat.fallback', true));
   const [system, setSystem] = useState<string>(() => readPref('chat.system', ''));
   const [showOptions, setShowOptions] = useState(false);
+  const [showTranscribe, setShowTranscribe] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const idRef = useRef(1);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Effect bodies are blocks on purpose: whatever an effect returns becomes its cleanup, and
   // Element.scrollIntoView() returns a Promise in recent Chromium, which React then calls as a
@@ -135,6 +138,12 @@ export default function ChatPanel() {
           <div className="min-w-0 flex-1">
             <ModelPicker models={models.data} value={choice} onChange={setChoice} disabled={busy} />
           </div>
+          <IconButton
+            icon="mic"
+            label="Transcribe audio"
+            onClick={() => setShowTranscribe((v) => !v)}
+            className={showTranscribe ? 'text-signal' : ''}
+          />
           <IconButton icon="settings" label="Chat options" onClick={() => setShowOptions((v) => !v)} className={showOptions ? 'text-signal' : ''} />
         </div>
         {models.error && <p className="text-xs text-danger-400">Model list unavailable: {models.error}</p>}
@@ -160,6 +169,18 @@ export default function ChatPanel() {
           </div>
         )}
       </Card>
+
+      {showTranscribe && (
+        <TranscribePanel
+          onClose={() => setShowTranscribe(false)}
+          onSend={(text) => {
+            setInput((cur) => (cur.trim() ? `${cur.trimEnd()}
+${text}` : text));
+            setShowTranscribe(false);
+            inputRef.current?.focus();
+          }}
+        />
+      )}
 
       <div className="space-y-3" aria-live="polite">
         {turns.length === 0 && (
@@ -206,6 +227,7 @@ export default function ChatPanel() {
       <div className="sticky bottom-0 -mx-4 bg-gradient-to-t from-ink-950 via-ink-950 to-transparent px-4 pb-1 pt-4">
         <div className="flex items-end gap-2 rounded-xl border border-ink-700 bg-ink-900 p-2">
           <textarea
+            ref={inputRef}
             aria-label="Message"
             rows={1}
             value={input}

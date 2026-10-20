@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '../components/icons';
 import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, QuotaBar, SectionTitle, Spinner, cx, inputClass } from '../components/ui';
+import { DIRECT_UPLOAD_THRESHOLD, HubError } from '../lib/api';
 import { formatBytes, formatDateTime } from '../lib/format';
 import { errorText, useHub, useHubData, useHubEvents } from '../lib/hub';
 import type { StoredObject } from '../lib/types';
@@ -9,7 +10,21 @@ interface Upload {
   id: number;
   name: string;
   progress: number;
+  /** Sent straight to the storage backend through a presigned URL. */
+  direct: boolean;
   error?: string;
+}
+
+/** Opens `url` in a new tab through a real anchor (used when no tab could be pre-opened). */
+function openWithAnchor(url: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export default function DriveView() {
@@ -49,15 +64,17 @@ export default function DriveView() {
     e.target.value = '';
     for (const file of picked) {
       const id = nextId.current++;
-      setUploads((u) => [...u, { id, name: file.name, progress: 0 }]);
+      const direct = file.size > DIRECT_UPLOAD_THRESHOLD;
+      setUploads((u) => [...u, { id, name: file.name, progress: 0, direct }]);
       try {
-        const obj = await client.driveUpload(file, {
+        // Files over DIRECT_UPLOAD_THRESHOLD go straight to the backend the hub picks (never through the hub).
+        const res = await client.driveUploadFile(file, {
           key: file.name,
           provider: target || undefined,
           onProgress: (p) => setUploads((u) => u.map((x) => (x.id === id ? { ...x, progress: p } : x))),
         });
         setUploads((u) => u.filter((x) => x.id !== id));
-        notify(`Stored ${obj.key ?? file.name} on ${obj.backend ?? 'the pool'}`, 'ok');
+        notify(`Stored ${res.key} on ${res.provider || 'the pool'}${res.direct ? ' (direct upload)' : ''}`, 'ok');
       } catch (err) {
         setUploads((u) => u.map((x) => (x.id === id ? { ...x, error: errorText(err) } : x)));
       }
@@ -66,19 +83,51 @@ export default function DriveView() {
     capacity.reload();
   };
 
+  /** Blob download through the hub: only for backends without presigned URLs (responses are capped at ~4.5 MB). */
+  const downloadViaHub = async (obj: StoredObject, filename: string) => {
+    const blob = await client.driveDownload(obj.key, obj.backend);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+
   const download = async (obj: StoredObject) => {
+    const filename = obj.key.split('/').pop() || 'download';
+    // Open the tab during the tap so popup blockers allow it; it is pointed at the presigned URL once known.
+    let tab: Window | null = null;
+    try {
+      tab = window.open('', '_blank');
+    } catch {
+      tab = null;
+    }
     setBusyKey(`${obj.backend}/${obj.key}`);
     try {
-      const blob = await client.driveDownload(obj.key, obj.backend);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = obj.key.split('/').pop() || 'download';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      let url: string | null = null;
+      try {
+        url = (await client.drivePresign(obj.key, obj.backend)).url || null;
+      } catch (err) {
+        // 4xx: this backend cannot presign, use the hub path. Anything else is a real failure.
+        if (!(err instanceof HubError && err.status >= 400 && err.status < 500)) throw err;
+      }
+      if (url) {
+        if (tab) {
+          tab.opener = null;
+          tab.location.href = url;
+        } else {
+          openWithAnchor(url, filename);
+        }
+        return;
+      }
+      tab?.close();
+      tab = null;
+      await downloadViaHub(obj, filename);
     } catch (err) {
+      tab?.close();
       notify(errorText(err), 'error');
     } finally {
       setBusyKey(null);
@@ -131,10 +180,16 @@ export default function DriveView() {
           </Button>
           <input ref={fileRef} type="file" multiple className="hidden" onChange={onFiles} />
         </div>
+        <p className="px-1 text-[11px] text-ink-500">
+          Files over {formatBytes(DIRECT_UPLOAD_THRESHOLD)} go straight to a backend with direct uploads (B2 or R2), chosen by the hub.
+        </p>
         {uploads.map((u) => (
           <div key={u.id} className="space-y-1 text-xs">
             <div className="flex justify-between gap-2">
-              <span className="truncate text-ink-200">{u.name}</span>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-ink-200">{u.name}</span>
+                {u.direct && <Badge tone="signal">direct</Badge>}
+              </span>
               {u.error ? (
                 <button type="button" className="text-ink-400 underline" onClick={() => setUploads((x) => x.filter((y) => y.id !== u.id))}>
                   dismiss

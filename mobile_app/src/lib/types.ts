@@ -211,3 +211,87 @@ export interface HubEvent {
   kind?: string | null;
   data: Record<string, unknown>;
 }
+
+// ------------------------------------------------------------------ drive: direct transfers
+
+/** `GET /drive/presign/{provider}/{key}`. */
+export interface PresignedUrl {
+  url: string;
+  provider: string;
+  key?: string;
+  expires_s?: number;
+  method?: string;
+}
+
+export interface UploadUrlRequest {
+  filename: string;
+  size: number;
+  content_type: string;
+  prefix?: string;
+}
+
+/** `POST /drive/upload-url`: where and how to send the bytes, bypassing the hub. */
+export interface DirectUploadTarget {
+  provider: string;
+  key: string;
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  expires_at?: string | null;
+}
+
+// ------------------------------------------------------------------ cron (core/interfaces.py CronJob)
+
+export interface CronProvider {
+  name: string;
+  enabled: boolean;
+  healthy?: boolean | null;
+  description?: string | null;
+}
+
+export interface CronJob {
+  id: string;
+  name: string;
+  /** 5-field cron expression, UTC. */
+  schedule: string;
+  /** URL (QStash) or workflow file name (GitHub Actions). */
+  target: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string | null;
+  enabled: boolean;
+  provider: string;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+}
+
+export interface CronJobCreate {
+  provider: string;
+  name: string;
+  schedule: string;
+  target: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+// ------------------------------------------------------------------ LLM audio & rerank
+
+export interface TranscriptionResult {
+  text: string;
+  model?: string;
+  language?: string;
+  duration?: number;
+}
+
+export interface RerankRequest {
+  query: string;
+  documents: string[];
+  top_n?: number;
+}
+
+export interface RerankResult {
+  index: number;
+  score: number;
+  document?: string;
+}
