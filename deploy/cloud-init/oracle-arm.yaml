@@ -1,0 +1,26 @@
+#cloud-config
+# Oracle ARM A1 (2 OCPU / 12 GB): FreeLLMAPI + Ollama + Instinct agent.
+# Contains no secrets: Tailscale joins later via `automation.deploy ssh-bootstrap`.
+hostname: oracle-arm
+package_update: true
+package_upgrade: true
+packages: [ca-certificates, curl, gnupg, jq, unzip, rsync, fail2ban, unattended-upgrades, netfilter-persistent, iptables-persistent]
+write_files:
+  - path: /etc/sysctl.d/90-omnifree.conf
+    content: |
+      vm.swappiness=10
+      fs.inotify.max_user_watches=524288
+  - path: /etc/docker/daemon.json
+    content: |
+      {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}
+runcmd:
+  - sysctl --system
+  - [sh, -c, "command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh"]
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  # Oracle images REJECT inbound by default: allow everything that arrives over Tailscale.
+  - [sh, -c, "iptables -C INPUT -i tailscale0 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i tailscale0 -j ACCEPT"]
+  - netfilter-persistent save
+  - mkdir -p /opt/omnifree /mnt/omnifree-block
+  - chown ubuntu:ubuntu /opt/omnifree
+  - touch /var/lib/omnifree-cloud-init-done

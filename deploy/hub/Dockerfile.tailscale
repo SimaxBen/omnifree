@@ -1,0 +1,13 @@
+# Adds Tailscale (userspace networking, no TUN needed on Cloud Run) on top of the hub_api image.
+# Plain-HTTP calls to tailnet hosts (http://oracle-arm:3001, http://amd-vm1, ...) go through the
+# local tailscaled HTTP proxy (HTTP_PROXY); HTTPS calls to public APIs go direct (no HTTPS_PROXY).
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER root
+COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscaled /usr/local/bin/tailscaled
+COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/tailscale
+COPY deploy/hub/entrypoint.sh /usr/local/bin/omnifree-entrypoint
+RUN chmod 0755 /usr/local/bin/omnifree-entrypoint && mkdir -p /var/run/tailscale && chown omnifree /var/run/tailscale
+USER omnifree
+ENTRYPOINT ["/usr/local/bin/omnifree-entrypoint"]
+CMD ["sh", "-c", "exec uvicorn hub_api.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*' --no-access-log"]

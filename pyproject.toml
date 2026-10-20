@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omnifree"
+version = "0.1.0"
+description = "OmniFree: modular personal cloud + pooled free-tier LLM ecosystem (hexagonal plugin architecture)."
+readme = "CONTRACT.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    "cryptography>=42",
+    "websockets>=12",
+    "python-multipart>=0.0.9",
+    "aiosqlite>=0.20",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21"]
+aws = ["boto3>=1.34"]
+oracle = ["oracledb>=2.2", "oci>=2.130"]
+gcp = ["google-auth>=2.29", "google-cloud-storage>=2.16", "google-cloud-firestore>=2.16"]
+mongo = ["motor>=3.4", "pymongo>=4.7"]
+postgres = ["asyncpg>=0.29"]
+turso = ["libsql-client>=0.3"]
+browser = ["playwright>=1.44"]
+
+[project.scripts]
+omnifree-vault = "core.vault:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "plugins*", "hub_api*", "automation*", "instinct*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["mobile_app", "deploy/cloudflare-worker", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I"]
+# Long string literals in tests/YAML-like tables are allowed to exceed the soft limit.
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency markers are evaluated once by design.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.File", "fastapi.Form", "fastapi.Header", "fastapi.Path", "fastapi.Body"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "plugins", "hub_api", "automation", "instinct", "healthmonitor", "tests"]

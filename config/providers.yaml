@@ -1,0 +1,634 @@
+# OmniFree provider registry. Schema + plugin table: see CONTRACT.md.
+# This file is rewritten atomically by core.registry when plugins are
+# enabled/disabled/reordered at runtime: keep documentation in the
+# 'description' fields (YAML comments are not preserved).
+version: 1
+defaults:
+  timeout_s: 30.0
+  quota_cooldown_s: 300.0
+  storage_strategy: most_free
+  llm_model_fallback: true
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown_s: 30.0
+    max_cooldown_s: 600.0
+notes: Free-tier limits in this file follow docs/provider_research.json (checked 2026-10-19) and are best-known values; verify them in each provider console and edit here, never in code. Host names (oracle-arm, amd-vm1, amd-vm2, gcp-monitor) are Tailscale MagicDNS names.
+hosts:
+  oracle_arm: oracle-arm
+  oracle_amd_vm1: amd-vm1
+  oracle_amd_vm2: amd-vm2
+  gcp_monitor: gcp-monitor
+plugins:
+  # ======================================================================= llm_pool
+  freellmapi:
+    module: plugins.llm_pool.freellmapi:FreeLLMAPIAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 10
+    description: Self-hosted FreeLLMAPI (ghcr.io/tashfeenahmed/freellmapi:latest) on Oracle ARM, port 3001, Tailscale-only. OpenAI-compatible (/v1, model auto); pools upstream free keys itself and reports the upstream in the X-Routed-Via header (platform/model) (verified against https://github.com/tashfeenahmed/freellmapi). Upstream keys are injected with python -m plugins.llm_pool.freellmapi_injector.
+    secrets:
+      api_key: FREELLMAPI_API_KEY
+    settings:
+      base_url: http://oracle-arm:3001/v1
+      default_model: auto
+      accepts_any_model: true
+      routed_via_header: X-Routed-Via
+      docker_image: ghcr.io/tashfeenahmed/freellmapi:latest
+      port: 3001
+      timeout_s: 60
+  groq:
+    module: plugins.llm_pool.groq:GroqAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 20
+    description: Groq LPU cloud, OpenAI-compatible. Free plan limits are per model (2026-10 docs; gpt-oss-120b/20b, qwen3.8-27b) 30 RPM, 1K RPD, 8K TPM, 200K TPD; check console.groq.com/settings/limits for your account. Old ids (mixtral, gemma2, llama3-70b-8192) are gone. Live list via GET /models; settings.models is the fallback.
+    limits:
+      - {metric: requests, window: minute, limit: 30}
+      - {metric: requests, window: day, limit: 1000}
+      - {metric: tokens, window: day, limit: 200000}
+    secrets:
+      api_key: GROQ_API_KEY
+    settings:
+      base_url: https://api.groq.com/openai/v1
+      default_model: llama-3.3-70b-versatile
+      models: [llama-3.3-70b-versatile, llama-3.1-8b-instant, openai/gpt-oss-120b, openai/gpt-oss-20b]
+      transcription_models: [whisper-large-v3, whisper-large-v3-turbo]
+  gemini:
+    module: plugins.llm_pool.gemini:GeminiAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 30
+    description: Google AI Studio (Gemini API) via its OpenAI-compatible endpoint, free tier per project with no billing account. Google no longer publishes per-model RPM/RPD (see AI Studio); limits were cut in Dec 2025 and Apr 2026, so the values below are conservative. Free-tier prompts may be used to improve Google products. No free tier for gemini-3.1-pro-preview, gemini-4-argon, image, Veo or Lyria models. The adapter lists models live (GET /models, 'models/' prefix stripped); settings.models is only a fallback.
+    limits:
+      - {metric: requests, window: minute, limit: 5}
+      - {metric: requests, window: day, limit: 100}
+    secrets:
+      api_key: GEMINI_API_KEY
+    settings:
+      base_url: https://generativelanguage.googleapis.com/v1beta/openai
+      default_model: gemini-2.5-flash
+      models: [gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro, gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite, gemini-3-flash-preview]
+      embedding_models: [gemini-embedding-2]
+      default_embedding_model: gemini-embedding-2
+  mistral:
+    module: plugins.llm_pool.mistral:MistralAdapter
+    kind: llm
+    group: llm_pool
+    enabled: false
+    priority: 40
+    description: DISABLED 2026-10-19 - the free 'Experiment' API plan is gone; the console only offers Free (chat, API keys inactive), Pro, Team or pay-as-you-go credits. Was - Mistral free 'Experiment' plan ('Free mode'). No card, but a verified phone number is required; free-plan requests may be used for training. Per-model limits are shown in the console (third-party figures about 1 req/s and 1B tokens/month per model, unverified). Use -latest aliases; many pinned ids retired in 2026. Codestral can use its own endpoint/key.
+    limits:
+      - {metric: requests, window: minute, limit: 60}
+      - {metric: tokens, window: month, limit: 1000000000}
+    secrets:
+      api_key: MISTRAL_API_KEY
+    optional_secrets:
+      codestral_api_key: CODESTRAL_API_KEY
+    settings:
+      base_url: https://api.mistral.ai/v1
+      codestral_base_url: https://codestral.mistral.ai/v1
+      default_model: mistral-small-latest
+      models: [mistral-small-latest, mistral-medium-latest, mistral-large-latest, codestral-latest, ministral-8b-latest, devstral-latest, magistral-small-latest]
+      embedding_models: [mistral-embed]
+      default_embedding_model: mistral-embed
+  nvidia_nim:
+    module: plugins.llm_pool.nvidia_nim:NvidiaNIMAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 50
+    description: NVIDIA NIM hosted API (build.nvidia.com), OpenAI-compatible. Free for development/prototyping only (not production; inputs may be logged), about 40 RPM; no rate-limit increases, and the old signup credits were reportedly phased out (unverified, no daily cap enforced here). Live list via GET /v1/models; settings.models is the fallback.
+    limits:
+      - {metric: requests, window: minute, limit: 40}
+    secrets:
+      api_key: NVIDIA_API_KEY
+    settings:
+      base_url: https://integrate.api.nvidia.com/v1
+      default_model: nvidia/nemotron-3-super-120b-a12b
+      # 2026-10-19: meta/llama-3.3-70b-instruct and openai/gpt-oss-120b return 410 Gone.
+      models: [nvidia/nemotron-3-super-120b-a12b, openai/gpt-oss-20b]
+  zai:
+    module: plugins.llm_pool.zai:ZAIAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 60
+    description: Z.AI (Zhipu) GLM Flash models are free ($0 in/out); flagship GLM-5.x is paid. No official rate limits (third parties report about 1 req/s, concurrency 1, ~1,000 req/day). OpenAI-compatible paas/v4 endpoint.
+    limits:
+      - {metric: requests, window: minute, limit: 20}
+      - {metric: requests, window: day, limit: 1000}
+    secrets:
+      api_key: ZAI_API_KEY
+    settings:
+      base_url: https://api.z.ai/api/paas/v4
+      default_model: glm-4.7-flash
+      models: [glm-4.7-flash, glm-4.5-flash, glm-4.6v-flash]
+  cloudflare_ai:
+    module: plugins.llm_pool.cloudflare_ai:CloudflareWorkersAIAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 70
+    description: Cloudflare Workers AI. 10,000 Neurons/day free (resets 00:00 UTC; more needs Workers Paid at $0.011/1K Neurons). Big models burn Neurons fast; Neurons are reported by the provider, not counted by the router.
+    limits:
+      - {metric: neurons, window: day, limit: 10000}
+    secrets:
+      account_id: CLOUDFLARE_ACCOUNT_ID
+      api_key: CLOUDFLARE_AI_API_TOKEN
+    settings:
+      base_url: https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1
+      default_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+      models: ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/openai/gpt-oss-120b', '@cf/openai/gpt-oss-20b', '@cf/meta/llama-4-scout-17b-16e-instruct', '@cf/qwen/qwen3.8-27b', '@cf/qwen/qwen3-30b-a3b-fp8', '@cf/google/gemma-4-26b-a4b-it', '@cf/mistralai/mistral-small-3.1-24b-instruct', '@cf/deepseek-ai/deepseek-v4-flash-0731']
+      embedding_models: ['@cf/qwen/qwen3-embedding-0.6b', '@cf/baai/bge-m3']
+      default_embedding_model: '@cf/qwen/qwen3-embedding-0.6b'
+  cohere:
+    module: plugins.llm_pool.cohere:CohereAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 80
+    description: Cohere trial key, 1,000 API calls/month across all endpoints (chat 20/min, rerank 10/min), non-commercial use only. Old aliases command-r, command-r-plus, command and command-light are retired. Native v2 API (not OpenAI-compatible).
+    limits:
+      - {metric: requests, window: minute, limit: 20}
+      - {metric: requests, window: month, limit: 1000}
+    secrets:
+      api_key: COHERE_API_KEY
+    settings:
+      base_url: https://api.cohere.com
+      default_model: command-a-03-2025
+      models: [command-a-03-2025, command-a-plus-05-2026, command-a-reasoning-08-2025, command-r-plus-08-2024, command-r-08-2024, command-r7b-12-2024]
+      embedding_models: [embed-v4.0, embed-v5.0-fast, embed-v5.0-pro]
+      default_embedding_model: embed-v4.0
+      rerank_models: [rerank-v3.5, rerank-v4.0-fast, rerank-v4.0-pro]
+      default_rerank_model: rerank-v3.5
+  openrouter:
+    module: plugins.llm_pool.openrouter:OpenRouterAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 90
+    description: "OpenRouter ':free' models only. 20 RPM and only 50 requests/day unless you have bought $10+ of credits in total (then 1,000/day), so it sits low in the chain. The free list changes often (the deepseek/llama/qwen :free variants are gone): the adapter fetches GET /models at runtime and keeps ids ending in ':free'; settings.models is only a fallback (verified 2026-10-19)."
+    limits:
+      - {metric: requests, window: minute, limit: 20}
+      - {metric: requests, window: day, limit: 50}
+    secrets:
+      api_key: OPENROUTER_API_KEY
+    settings:
+      base_url: https://openrouter.ai/api/v1
+      default_model: nvidia/nemotron-3-super-120b-a12b:free
+      models: ['nvidia/nemotron-3-super-120b-a12b:free', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'nvidia/nemotron-3.5-lightning:free', 'google/gemma-4-31b-it:free', 'google/gemma-4-26b-a4b-it:free', 'cohere/north-mini-code:free', 'thinkingmachines/inkling:free', 'poolside/laguna-s-2.1:free']
+      free_only: true
+      extra_headers:
+        HTTP-Referer: https://omnifree.local
+        X-Title: OmniFree
+  sambanova:
+    module: plugins.llm_pool.sambanova:SambaNovaAdapter
+    kind: llm
+    group: llm_pool
+    enabled: false
+    priority: 100
+    description: DISABLED 2026-10-19 - every chat call returns 402 PAYMENT_METHOD_REQUIRED (balance 0), so there is no usable free tier any more; key kept in the vault. Was - SambaNova Cloud, OpenAI-compatible. Free Tier (no payment method) is tiny, 20 RPM, 20 requests/day and 200K tokens/day per model, so it sits near the end of the chain. Adding a card moves the account to the Developer tier (paid).
+    limits:
+      - {metric: requests, window: minute, limit: 20}
+      - {metric: requests, window: day, limit: 20}
+      - {metric: tokens, window: day, limit: 200000}
+    secrets:
+      api_key: SAMBANOVA_API_KEY
+    settings:
+      base_url: https://api.sambanova.ai/v1
+      default_model: Meta-Llama-3.3-70B-Instruct
+      models: [Meta-Llama-3.3-70B-Instruct, DeepSeek-V3.1, gpt-oss-120b]
+  cerebras:
+    module: plugins.llm_pool.cerebras:CerebrasAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 110
+    description: "TRIAL ONLY: Cerebras has no permanent free tier any more. The Free Trial needs a verified card and gives $5 of credits that expire after 30 days (API stays inactive until a card is added; access stops when the credit runs out). Trial limits per model 5 RPM, 1M tokens/day. Lowest priority among cloud LLMs."
+    limits:
+      - {metric: requests, window: minute, limit: 5}
+      - {metric: tokens, window: day, limit: 1000000}
+    secrets:
+      api_key: CEREBRAS_API_KEY
+    settings:
+      base_url: https://api.cerebras.ai/v1
+      default_model: gpt-oss-120b
+      models: [gpt-oss-120b, qwen-3.8-27b]
+      trial: true
+      card_required: true
+  ollama:
+    module: plugins.llm_pool.ollama:OllamaAdapter
+    kind: llm
+    group: llm_pool
+    enabled: true
+    priority: 1000
+    description: Local Ollama on Oracle ARM (CPU only), last-resort fallback with no quota.
+    secrets: {}
+    settings:
+      base_url: http://oracle-arm:11434
+      auth: none
+      default_model: qwen2.5:7b
+      models: ['qwen2.5:7b', 'llama3:8b']
+      timeout_s: 180
+  # ======================================================================= oracle
+  oracle_compute:
+    module: plugins.oracle.compute:OCIComputeAdapter
+    kind: compute
+    group: oracle
+    enabled: true
+    priority: 10
+    description: "OCI Always Free compute. Ampere A1 is now 2 OCPU / 12 GB in total (1,500 OCPU-h + 9,000 GB-h per month, home region only; NOT the old 4 OCPU / 24 GB): one VM.Standard.A1.Flex 2 OCPU/12GB runs FreeLLMAPI+Ollama+Instinct. Two AMD VM.Standard.E2.1.Micro (1/8 OCPU, 1 GB) run Pi-hole and bots/frps/WireGuard. Idle instances (95th pct CPU/network/memory < 20% over 7 days) can be reclaimed; 'Out of host capacity' is common. Card required at signup. Signed OCI REST API."
+    secrets:
+      tenancy_ocid: OCI_TENANCY_OCID
+      user_ocid: OCI_USER_OCID
+      fingerprint: OCI_FINGERPRINT
+      private_key: OCI_PRIVATE_KEY_PEM
+    settings:
+      region: eu-madrid-1  # home region chosen 2026-10-19 (A1 capacity + latency from Morocco)
+      compartment_ocid: null
+      instances:
+        oracle-arm: {role: llm-host, shape: VM.Standard.A1.Flex, ocpus: 2, memory_gb: 12}
+        amd-vm1: {role: pihole, shape: VM.Standard.E2.1.Micro}
+        amd-vm2: {role: bots-frps-wireguard, shape: VM.Standard.E2.1.Micro}
+      billing_alert_usd: 1
+  oracle_adb_1:
+    module: plugins.oracle.autonomous_db:OracleAutonomousDBAdapter
+    kind: db
+    group: oracle
+    enabled: true
+    priority: 10
+    description: Oracle Autonomous AI Database (Always Free, 1 OCPU, 20GB, 20 sessions; 2 per tenancy) instance 1. oracledb thin mode, imported lazily.
+    limits:
+      - {metric: bytes, window: total, limit: 21474836480}
+    secrets:
+      user: ORACLE_ADB1_USER
+      password: ORACLE_ADB1_PASSWORD
+      dsn: ORACLE_ADB1_DSN
+    optional_secrets:
+      wallet_password: ORACLE_ADB1_WALLET_PASSWORD
+    settings:
+      wallet_dir: null
+  oracle_adb_2:
+    module: plugins.oracle.autonomous_db:OracleAutonomousDBAdapter
+    kind: db
+    group: oracle
+    enabled: true
+    priority: 20
+    description: Oracle Autonomous AI Database (Always Free, 1 OCPU, 20GB, 20 sessions) instance 2.
+    limits:
+      - {metric: bytes, window: total, limit: 21474836480}
+    secrets:
+      user: ORACLE_ADB2_USER
+      password: ORACLE_ADB2_PASSWORD
+      dsn: ORACLE_ADB2_DSN
+    optional_secrets:
+      wallet_password: ORACLE_ADB2_WALLET_PASSWORD
+    settings:
+      wallet_dir: null
+  oracle_block_storage:
+    module: plugins.oracle.block_storage:OracleBlockVolumeStorageAdapter
+    kind: storage
+    group: oracle
+    enabled: true
+    priority: 40
+    description: 50GB block volume mounted on oracle-arm (Always Free allows 200GB of block storage in total, boot volumes included; deploy.yaml uses 3 x 50GB boot volumes + this 50GB volume). Accessed through a WebDAV endpoint (rclone serve webdav) over Tailscale, or directly via mount_path when running on that host.
+    limits:
+      - {metric: bytes, window: total, limit: 53687091200}
+    secrets: {}
+    optional_secrets:
+      webdav_user: ORACLE_BLOCK_WEBDAV_USER
+      webdav_password: ORACLE_BLOCK_WEBDAV_PASSWORD
+    settings:
+      mode: webdav
+      webdav_url: http://oracle-arm:8091
+      mount_path: /mnt/omnifree-block
+      capacity_bytes: 53687091200
+  # ======================================================================= gcp
+  gcp_cloud_run:
+    module: plugins.gcp.cloud_run:CloudRunAdapter
+    kind: compute
+    group: gcp
+    enabled: true
+    priority: 20
+    description: Cloud Run services (hub_api). Free tier per month 2M requests, 180,000 vCPU-s, 360,000 GiB-s, 1 GB North America egress. Needs a billing account (card); budgets only alert, they do not cap. Cloud Run Admin API v2.
+    limits:
+      - {metric: requests, window: month, limit: 2000000}
+    secrets:
+      service_account_json: GCP_SERVICE_ACCOUNT_JSON
+    settings:
+      project_id: null
+      region: europe-west1
+      services: [omnifree-hub]
+      billing_alert_usd: 1
+  gcp_e2_micro:
+    module: plugins.gcp.compute_engine:GCEComputeAdapter
+    kind: compute
+    group: gcp
+    enabled: true
+    priority: 30
+    description: Always Free e2-micro (1 non-preemptible instance in us-west1/us-central1/us-east1 only, 30 GB-month standard PD, 1 GB egress). Primary host of the health monitor / uptime / background worker (Koyeb is optional and paid for new signups).
+    secrets:
+      service_account_json: GCP_SERVICE_ACCOUNT_JSON
+    settings:
+      project_id: null
+      zone: us-central1-a
+      instances: [gcp-monitor]
+  gcp_firestore:
+    module: plugins.gcp.firestore:FirestoreAdapter
+    kind: db
+    group: gcp
+    enabled: true
+    priority: 60
+    description: Firestore (native mode) free quota 1 GiB storage, 50K reads / 20K writes / 20K deletes per day per project, 10 GiB egress/month. Collections map to tables.
+    limits:
+      - {metric: bytes, window: total, limit: 1073741824}
+      - {metric: requests, window: day, limit: 50000}
+    secrets:
+      service_account_json: GCP_SERVICE_ACCOUNT_JSON
+    settings:
+      project_id: null
+      database: (default)
+  gcp_gcs:
+    module: plugins.gcp.gcs:GCSStorageAdapter
+    kind: storage
+    group: gcp
+    enabled: true
+    priority: 30
+    description: Cloud Storage 5 GB-month free (US regional, standard class), 5K Class A / 50K Class B ops, 100 GB egress per month. JSON API.
+    limits:
+      - {metric: bytes, window: total, limit: 5368709120}
+    secrets:
+      service_account_json: GCP_SERVICE_ACCOUNT_JSON
+    settings:
+      project_id: null
+      bucket: null
+      capacity_bytes: 5368709120
+  # ======================================================================= cloudflare
+  cloudflare_workers:
+    module: plugins.cloudflare.workers:CloudflareWorkersAdapter
+    kind: compute
+    group: cloudflare
+    enabled: true
+    priority: 40
+    description: Cloudflare Workers (edge routing). Free 100,000 requests/day, 10 ms CPU per invocation (static asset requests free; Pages Functions share this quota). Lists scripts/deployments as instances.
+    limits:
+      - {metric: requests, window: day, limit: 100000}
+    secrets:
+      account_id: CLOUDFLARE_ACCOUNT_ID
+      api_token: CLOUDFLARE_API_TOKEN
+    settings:
+      scripts: [omnifree-edge]
+  cloudflare_r2:
+    module: plugins.cloudflare.r2:R2StorageAdapter
+    kind: storage
+    group: cloudflare
+    enabled: true
+    priority: 10
+    description: Cloudflare R2 (Standard class), 10 GB-month free, 1M Class A / 10M Class B ops per month, zero egress. Enabling R2 asks for a payment method even on the free tier. S3 API (SigV4) at https://<account_id>.r2.cloudflarestorage.com.
+    limits:
+      - {metric: bytes, window: total, limit: 10737418240}
+      - {metric: requests, window: month, limit: 1000000}
+    secrets:
+      account_id: CLOUDFLARE_ACCOUNT_ID
+      access_key_id: R2_ACCESS_KEY_ID
+      secret_access_key: R2_SECRET_ACCESS_KEY
+    settings:
+      bucket: omnifree
+      capacity_bytes: 10737418240
+  cloudflare_d1:
+    module: plugins.cloudflare.d1:D1Adapter
+    kind: db
+    group: cloudflare
+    enabled: true
+    priority: 50
+    description: Cloudflare D1 (SQLite). Free 5 GB storage, 5M rows read/day, 100K rows written/day (resets 00:00 UTC). REST query API.
+    limits:
+      - {metric: bytes, window: total, limit: 5368709120}
+    secrets:
+      account_id: CLOUDFLARE_ACCOUNT_ID
+      api_token: CLOUDFLARE_API_TOKEN
+    settings:
+      database_id: null
+  # ======================================================================= aws
+  aws_dynamodb:
+    module: plugins.aws.dynamodb:DynamoDBAdapter
+    kind: db
+    group: aws
+    enabled: true
+    priority: 70
+    description: DynamoDB Always Free per region, 25 GB + 25 RCU/WCU PROVISIONED capacity (on-demand mode is billed). New AWS accounts are on the credit-based free plan (up to $200 / 6 months); card required. Statements are PartiQL. boto3 imported lazily (or SigV4 via httpx).
+    limits:
+      - {metric: bytes, window: total, limit: 26843545600}
+    secrets:
+      access_key_id: AWS_ACCESS_KEY_ID
+      secret_access_key: AWS_SECRET_ACCESS_KEY
+    settings:
+      region: eu-west-1
+      billing_alert_usd: 1
+  # ======================================================================= databases
+  supabase:
+    module: plugins.databases.supabase:SupabaseAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 20
+    description: Supabase free (2 active projects; per project 500 MB DB, 1 GB file storage, 5 GB egress, 50K MAU). Projects pause after 1 week of inactivity (keep-alive needed). New sb_secret_ keys replace service_role JWTs; both work. SQL via asyncpg (db_url) or the PostgREST/pg-meta APIs.
+    limits:
+      - {metric: bytes, window: total, limit: 524288000}
+    secrets:
+      service_role_key: SUPABASE_SERVICE_ROLE_KEY
+    optional_secrets:
+      db_url: SUPABASE_DB_URL
+    settings:
+      project_url: https://pyzuskjrzpkswrgrygvl.supabase.co
+  neon:
+    module: plugins.databases.neon:NeonAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 30
+    description: Neon serverless Postgres free (no card; 1 GB storage per project, 20 GB total, 100 CU-hours/month, 5 GB egress, scale-to-zero after 5 min). SQL over Neon's HTTP endpoint or asyncpg; usage via Neon API.
+    limits:
+      - {metric: bytes, window: total, limit: 1073741824}
+    secrets:
+      database_url: NEON_DATABASE_URL
+    optional_secrets:
+      api_key: NEON_API_KEY
+    settings:
+      project_id: null
+  turso:
+    module: plugins.databases.turso:TursoAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 40
+    description: Turso (libSQL) free tier (no card; 100 databases, 5 GB storage, 500M rows read and 10M rows written per month). Hrana-over-HTTP /v2/pipeline via httpx; libsql-client optional.
+    limits:
+      - {metric: bytes, window: total, limit: 5368709120}
+    secrets:
+      database_url: TURSO_DATABASE_URL
+      auth_token: TURSO_AUTH_TOKEN
+    settings: {}
+  mongodb_atlas:
+    module: plugins.databases.mongodb_atlas:MongoAtlasAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 80
+    description: MongoDB Atlas M0 free cluster (512 MB, shared CPU, up to 100 ops/s, no backups, one per project). motor imported lazily. Collections map to tables; query() takes a JSON command document.
+    limits:
+      - {metric: bytes, window: total, limit: 536870912}
+    secrets:
+      uri: MONGODB_URI
+    settings:
+      database: omnifree
+  upstash_redis:
+    module: plugins.databases.upstash_redis:UpstashRedisAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 90
+    description: Upstash Redis free (250 MB data, 500K commands/month, 10 GB bandwidth/month). Adding a card moves the database to pay-as-you-go. REST API; query/execute take a Redis command line or JSON array.
+    limits:
+      - {metric: bytes, window: total, limit: 262144000}
+      - {metric: requests, window: month, limit: 500000}
+    secrets:
+      rest_url: UPSTASH_REDIS_REST_URL
+      rest_token: UPSTASH_REDIS_REST_TOKEN
+    settings: {}
+  ibm_cloudant:
+    module: plugins.databases.cloudant:CloudantAdapter
+    kind: db
+    group: databases
+    enabled: true
+    priority: 110
+    description: IBM Cloudant Lite (1 GB, 20 reads/s, 10 writes/s, 5 global queries/s; one Lite instance per account; IBM Cloud likely asks for a card at signup). IAM API key exchanged for a bearer token; databases map to tables.
+    limits:
+      - {metric: bytes, window: total, limit: 1073741824}
+    secrets:
+      url: CLOUDANT_URL
+      apikey: CLOUDANT_APIKEY
+    settings: {}
+  # ======================================================================= storage
+  backblaze_b2:
+    module: plugins.storage.backblaze_b2:B2StorageAdapter
+    kind: storage
+    group: storage
+    enabled: true
+    priority: 20
+    description: Backblaze B2, first 10 GB storage free; free egress up to 3x average monthly storage; Class A/B/C calls free, Class D 2,500/day free. Real spending caps (Caps & Alerts). Native B2 API v3 or S3-compatible API.
+    limits:
+      - {metric: bytes, window: total, limit: 10737418240}
+    secrets:
+      key_id: B2_KEY_ID
+      application_key: B2_APPLICATION_KEY
+    settings:
+      bucket: omnifree
+      capacity_bytes: 10737418240
+      billing_alert_usd: 1
+  # ======================================================================= compute_edge
+  koyeb:
+    module: plugins.compute_edge.koyeb:KoyebAdapter
+    kind: compute
+    group: compute_edge
+    enabled: false
+    priority: 50
+    description: "OPTIONAL / PAID: Koyeb has no free compute tier for new signups since 2026 (after the Mistral AI acquisition, new users start at Pro, $29/mo + compute). Only orgs created before then keep the old free web service (512 MB, 0.1 vCPU). Disabled by default; enable only for a legacy free org. The health monitor runs on the GCP e2-micro instead. Koyeb REST API; services map to instances, pause/resume = power."
+    secrets:
+      api_token: KOYEB_API_TOKEN
+    settings:
+      services: [omnifree-worker]
+  vercel:
+    module: plugins.compute_edge.vercel:VercelAdapter
+    kind: compute
+    group: compute_edge
+    enabled: true
+    priority: 60
+    description: Vercel Hobby (PWA hosting; non-commercial only). Per month 100 GB Fast Data Transfer, 1M function invocations, 4 active-CPU hours, 100 deployments/day; over the limit the feature pauses (no overage billing). Projects/deployments map to instances (no power capability).
+    secrets:
+      token: VERCEL_TOKEN
+    optional_secrets:
+      team_id: VERCEL_TEAM_ID
+    settings:
+      projects: [omnifree-pwa]
+  netlify:
+    module: plugins.compute_edge.netlify:NetlifyAdapter
+    kind: compute
+    group: compute_edge
+    enabled: true
+    priority: 70
+    description: Netlify Free (PWA mirror) is now credit-based, 300 credits (production deploy 15, bandwidth 20/GB), so about 20 deploys or 15 GB; the old 100 GB / 300 build-minute allowance no longer applies. Keep it a mirror only. Sites map to instances.
+    secrets:
+      token: NETLIFY_TOKEN
+    settings:
+      sites: [omnifree-pwa]
+  github_pages:
+    module: plugins.compute_edge.github_pages:GitHubPagesAdapter
+    kind: compute
+    group: compute_edge
+    enabled: true
+    priority: 80
+    description: GitHub Pages (static PWA fallback), free for public repos. Pages site/builds map to instances.
+    secrets:
+      token: GITHUB_TOKEN
+    settings:
+      owner: SimaxBen
+      repo: omnifree
+  github_actions:
+    module: plugins.compute_edge.github_actions:GitHubActionsCronAdapter
+    kind: cron
+    group: compute_edge
+    enabled: true
+    priority: 20
+    description: GitHub Actions scheduled workflows (CI/CD + cron). trigger() = workflow_dispatch. Standard runners free for public repos; 2,000 min/month on private repos (larger runners always billed).
+    limits:
+      - {metric: minutes, window: month, limit: 2000}
+    secrets:
+      token: GITHUB_TOKEN
+    settings:
+      owner: SimaxBen
+      repo: omnifree
+      ref: main
+  upstash_qstash:
+    module: plugins.compute_edge.qstash:QStashCronAdapter
+    kind: cron
+    group: compute_edge
+    enabled: true
+    priority: 10
+    description: Upstash QStash schedules (HTTP cron). Free tier 1,000 messages/day, 50 GB bandwidth, 1 MB max message. Also the replacement Upstash recommends for the discontinued Kafka.
+    limits:
+      - {metric: requests, window: day, limit: 1000}
+    secrets:
+      token: QSTASH_TOKEN
+    optional_secrets:
+      current_signing_key: QSTASH_CURRENT_SIGNING_KEY
+      next_signing_key: QSTASH_NEXT_SIGNING_KEY
+    settings:
+      base_url: https://qstash.upstash.io
+  # ======================================================================= network
+  pihole:
+    module: plugins.network.pihole:PiHoleDNSAdapter
+    kind: dns
+    group: network
+    enabled: true
+    priority: 10
+    description: Pi-hole (Docker) on Oracle AMD VM1, reached over Tailscale. Pi-hole v6 REST API (/api/auth session, /api/dns/blocking, /api/queries).
+    secrets:
+      password: PIHOLE_PASSWORD
+    settings:
+      base_url: http://amd-vm1
+      api_version: 6
+  tailscale:
+    module: plugins.network.tailscale:TailscaleAdapter
+    kind: compute
+    group: network
+    enabled: true
+    priority: 90
+    description: Tailscale mesh node status via the Tailscale API v2 (devices map to instances with state online/offline; no power capability). Personal plan is free for non-commercial use (6 users, unlimited user devices, 50 tagged resources). API keys expire after at most 90 days.
+    secrets:
+      api_key: TAILSCALE_API_KEY
+    settings:
+      tailnet: '-'

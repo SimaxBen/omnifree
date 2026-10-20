@@ -1,0 +1,17 @@
+# WebDAV over the 200 GB-class Oracle block volume (oracle_block_storage plugin, mode: webdav).
+# Deployed by `python -m automation.deploy deploy-arm`; listens on the Tailscale IP only.
+# The port comes from providers.yaml oracle_block_storage.settings.webdav_url.
+services:
+  webdav:
+    image: ${RCLONE_IMAGE:-rclone/rclone:latest}
+    container_name: omnifree-webdav
+    restart: unless-stopped
+    network_mode: host
+    user: "1000:1000"
+    environment:
+      RCLONE_USER: ${ORACLE_BLOCK_WEBDAV_USER:?ORACLE_BLOCK_WEBDAV_USER missing}
+      RCLONE_PASS: ${ORACLE_BLOCK_WEBDAV_PASSWORD:?ORACLE_BLOCK_WEBDAV_PASSWORD missing}
+    command: ["serve", "webdav", "/data", "--addr", "${BIND_IP:?BIND_IP missing}:${WEBDAV_PORT:-8091}"]
+    volumes:
+      - ${BLOCK_MOUNT:-/mnt/omnifree-block}:/data
+    mem_limit: 256m

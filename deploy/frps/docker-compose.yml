@@ -1,0 +1,38 @@
+# frps (+ optional WireGuard) on Oracle AMD VM2. Deployed by `python -m automation.deploy deploy-edge`,
+# which writes .env (FRPS_TOKEN from the vault) next to this file.
+services:
+  frps:
+    image: ${FRPS_IMAGE:-snowdreamtech/frps:latest}
+    container_name: frps
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      FRPS_TOKEN: ${FRPS_TOKEN:?FRPS_TOKEN missing}
+    volumes:
+      - ./frps.toml:/etc/frp/frps.toml:ro
+    command: ["-c", "/etc/frp/frps.toml"]
+    mem_limit: 128m
+
+  wireguard:
+    profiles: [wireguard]
+    image: ${WIREGUARD_IMAGE:-lscr.io/linuxserver/wireguard:latest}
+    container_name: wireguard
+    restart: unless-stopped
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-UTC}
+      SERVERURL: ${WG_SERVERURL:-auto}
+      SERVERPORT: "51820"
+      PEERS: ${WG_PEERS:-phone,laptop}
+      PEERDNS: ${WG_PEERDNS:-auto}
+      INTERNAL_SUBNET: 10.13.13.0
+    volumes:
+      - ./wireguard:/config
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - "51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    mem_limit: 128m

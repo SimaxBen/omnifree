@@ -1,0 +1,25 @@
+# Upload set for `gcloud builds submit` (automation.deploy deploy-hub). Never ship local state:
+# data/ holds the browser profile (logged-in cookies), quota DB and deploy state.
+.gcloudignore
+.git
+.github
+.env
+.env.*
+data/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/node_modules/
+mobile_app/
+tests/
+automation/
+healthmonitor/
+instinct/
+deploy/cloud-init/
+deploy/pihole/
+deploy/frps/
+deploy/blockstore/
+deploy/instinct/
+deploy/oracle-arm/
+deploy/cloudflare-worker/
+PROVISIONING_STATUS.md

@@ -1,0 +1,44 @@
+# OmniFree health monitor targets. ${VAR} = plain env setting, ${secret:NAME} = env/vault secret.
+# Targets with unresolved references are reported as "disabled". tailnet: true targets only run
+# when OMNIFREE_MONITOR_TAILNET=1 (the GCP e2-micro joins the tailnet; Koyeb does not).
+interval_s: 60
+timeout_s: 10
+failure_threshold: 3
+
+targets:
+  - name: hub
+    url: ${HUB_URL}/healthz
+  - name: hub-auth
+    url: ${HUB_URL}/plugins/chains
+    headers: {Authorization: "Bearer ${secret:HUB_API_TOKEN}"}
+    contains: '"llm"'
+  - name: edge-worker
+    url: ${EDGE_URL}/edge/health
+  - name: pwa
+    url: ${PWA_URL}/
+  - name: freellmapi
+    url: http://oracle-arm:3001/
+    expect_status: [200, 204, 301, 302, 401, 403, 404]
+    tailnet: true
+  - name: ollama
+    url: http://oracle-arm:11434/api/tags
+    tailnet: true
+  - name: pihole
+    url: http://amd-vm1/admin/
+    expect_status: [200, 301, 302, 308]
+    tailnet: true
+  - name: frps-vhost
+    url: http://amd-vm2:8080/
+    expect_status: [200, 404]
+    tailnet: true
+
+jobs:
+  # Supabase pauses free projects after ~1 week without activity.
+  - name: supabase-keepalive
+    url: ${SUPABASE_URL}/rest/v1/
+    headers: {apikey: "${secret:SUPABASE_SERVICE_ROLE_KEY}", Authorization: "Bearer ${secret:SUPABASE_SERVICE_ROLE_KEY}"}
+    every_s: 86400
+  # Keeps one Cloud Run instance warm-ish during the day without paying for min-instances.
+  - name: hub-warmup
+    url: ${HUB_URL}/healthz
+    every_s: 600

@@ -1,0 +1,16 @@
+# Health monitor on the GCP e2-micro (joined to the tailnet, so tailnet-only targets run too).
+# `python -m automation.deploy deploy-monitor --target gce` uploads the project subset and a .env
+# (HUB_URL, EDGE_URL, PWA_URL, SUPABASE_URL + the secrets the targets reference) next to this file.
+services:
+  healthmonitor:
+    build:
+      context: ../..
+      dockerfile: deploy/healthmonitor/Dockerfile
+    image: omnifree-healthmonitor:local
+    container_name: omnifree-healthmonitor
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OMNIFREE_MONITOR_TAILNET: "1"
+    network_mode: host   # uses the host's Tailscale MagicDNS (oracle-arm, amd-vm1, ...)
+    mem_limit: 200m

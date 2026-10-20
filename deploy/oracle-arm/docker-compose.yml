@@ -1,0 +1,105 @@
+# OmniFree LLM pool on the Oracle ARM A1 host (2 OCPU / 12 GB): FreeLLMAPI + local Ollama.
+#
+# Reachable only over Tailscale: every published port binds to ${HOST_BIND}, the host's
+# Tailscale IPv4 (tailscale ip -4), never 0.0.0.0. Bring tailscaled up before this stack,
+# otherwise Docker cannot bind the address. Keep the OCI security list closed for 3001/11434.
+#
+# Prepare (from the omnifree project root, with OMNIFREE_VAULT_PASSPHRASE exported):
+#   python -m plugins.llm_pool.freellmapi_injector genkey            # once: FREELLMAPI_ENCRYPTION_KEY
+#   python -m plugins.llm_pool.freellmapi_injector render \
+#       --out deploy/oracle-arm/secrets/freellmapi.config.json \
+#       --env-out deploy/oracle-arm/.env --host-bind "$(tailscale ip -4)"
+#   docker compose -f deploy/oracle-arm/docker-compose.yml up -d
+#
+# FreeLLMAPI applies secrets/freellmapi.config.json (FREEAPI_CONFIG_PATH) idempotently on every
+# boot, so re-run `render` and `docker compose restart freellmapi` after changing vault keys.
+# After the first boot, copy the unified "freellmapi-..." key from the dashboard Keys page into
+# the vault as FREELLMAPI_API_KEY (OmniFree's freellmapi plugin uses it).
+# Keep the freellmapi-data volume and ENCRYPTION_KEY together: a new key cannot decrypt old rows.
+
+name: omnifree-llm
+
+services:
+  freellmapi:
+    image: ghcr.io/tashfeenahmed/freellmapi:latest
+    container_name: freellmapi
+    restart: unless-stopped
+    env_file: .env                     # ENCRYPTION_KEY, PORT, HOST_BIND, FREEAPI_CONFIG_PATH (generated)
+    environment:
+      HOST: "0.0.0.0"                  # inside the container; exposure is controlled by HOST_BIND below
+      FREEAPI_CONFIG_PATH: /run/omnifree/freellmapi.config.json
+    ports:
+      - "${HOST_BIND:?set HOST_BIND to the Tailscale IP in .env}:${PORT:-3001}:3001"
+    volumes:
+      - freellmapi-data:/app/server/data
+      - ./secrets/freellmapi.config.json:/run/omnifree/freellmapi.config.json:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks: [llm]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "10m"
+      OLLAMA_NUM_PARALLEL: "1"         # CPU-only ARM: one request at a time
+      OLLAMA_MAX_LOADED_MODELS: "1"    # qwen2.5:7b (~4.7 GB) or llama3:8b (~4.7 GB), not both
+    ports:
+      # OmniFree's `ollama` plugin talks to http://oracle-arm:11434 directly (fallback when FreeLLMAPI is down)
+      - "${HOST_BIND:?set HOST_BIND to the Tailscale IP in .env}:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks: [llm]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    mem_limit: 8g
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  ollama-pull:
+    # One-shot job: pulls the fallback models into the shared volume, then exits.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: ollama-pull
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_MODELS_TO_PULL: "${OLLAMA_MODELS_TO_PULL:-qwen2.5:7b llama3:8b}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for m in $${OLLAMA_MODELS_TO_PULL}; do
+          echo "pulling $$m"
+          ollama pull "$$m"
+        done
+        ollama list
+    networks: [llm]
+
+networks:
+  llm:
+    driver: bridge
+
+volumes:
+  freellmapi-data:
+  ollama-data:

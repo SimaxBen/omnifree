@@ -1,0 +1,19 @@
+#cloud-config
+# GCP e2-micro (Always Free, us-central1/us-west1/us-east1): OmniFree health monitor worker.
+hostname: gcp-monitor
+package_update: true
+packages: [ca-certificates, curl, jq, unattended-upgrades]
+swap:
+  filename: /swapfile
+  size: 1G
+  maxsize: 1G
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      {"log-driver": "json-file", "log-opts": {"max-size": "5m", "max-file": "2"}}
+runcmd:
+  - [sh, -c, "command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh"]
+  - usermod -aG docker ubuntu || true
+  - systemctl enable --now docker
+  - mkdir -p /opt/omnifree && chown ubuntu:ubuntu /opt/omnifree || true
+  - touch /var/lib/omnifree-cloud-init-done

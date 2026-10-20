@@ -1,0 +1,18 @@
+# OmniFree edge router (Cloudflare Workers free plan: 100k requests/day).
+#   /api/*        -> hub_api on Cloud Run (prefix stripped; WebSockets pass through)
+#   /edge/health  -> edge + hub liveness JSON
+#   everything    -> PWA origins in order (Cloudflare Pages, then Vercel/Netlify/GitHub Pages mirrors)
+# `python -m automation.deploy deploy-worker` passes the real origins with --var.
+name = "omnifree-edge"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[vars]
+HUB_ORIGIN = ""
+PWA_ORIGINS = ""
+API_PREFIX = "/api"
+ALLOWED_ORIGINS = "*"
+
+[observability]
+enabled = true

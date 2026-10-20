@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+.env
+.providers.*.tmp
+.vault.*.tmp
+node_modules/
+dist/
+# Host-side state that holds private keys or Pi-hole data if a stack is ever run from this tree.
+deploy/frps/wireguard/
+deploy/pihole/etc-pihole/
+.ruff_cache/
+
+# Public repo: never publish the (encrypted) vault, its backups, or provisioning state.
+.env.vault*
+.providers.*
+*.pem

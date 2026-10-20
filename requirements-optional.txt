@@ -1,0 +1,15 @@
+# Heavy provider SDKs. Every plugin must import these lazily (inside methods),
+# so the core installs and tests without them. Install only what you enable.
+boto3>=1.34                 # aws_dynamodb (alternative: SigV4 over httpx)
+oracledb>=2.2               # oracle_adb_* (thin mode, wallet-less TLS or wallet)
+oci>=2.130                  # oracle_compute (alternative: signed REST over httpx)
+google-auth>=2.29           # gcp_* service-account token minting
+google-cloud-storage>=2.16  # gcp_gcs (alternative: JSON API over httpx)
+google-cloud-firestore>=2.16
+motor>=3.4                  # mongodb_atlas (async driver)
+pymongo>=4.7
+asyncpg>=0.29               # supabase / neon raw SQL
+libsql-client>=0.3          # turso (alternative: Hrana-over-HTTP via httpx)
+playwright>=1.44            # instinct agent / automation.browser_provisioner
+qrcode>=7.4                 # automation.browser_provisioner (terminal QR for 2FA / mobile hand-off)
+asyncssh>=2.14              # automation.deploy remote steps (paramiko also works)

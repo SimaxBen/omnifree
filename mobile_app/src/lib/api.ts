@@ -1,0 +1,472 @@
+// Typed client for hub_api. Every endpoint used here is listed in API_ASSUMPTIONS.md.
+// Response normalisers accept a couple of plausible shapes so the PWA keeps working while
+// hub_api and this app are reconciled.
+
+import type { HubSettings } from './settings';
+import { readSSE } from './sse';
+import type {
+  AgentTask,
+  AgentTaskCreate,
+  ChatChunk,
+  ChatRequest,
+  ChatResponse,
+  DBProvider,
+  DNSQueryLogEntry,
+  DNSStatus,
+  HealthStatus,
+  ModelInfo,
+  ProviderStatus,
+  QueryResult,
+  QuotaInfo,
+  StoredObject,
+  TableInfo,
+  VMInstance,
+} from './types';
+
+export class HubError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body?: unknown,
+  ) {
+    super(message);
+    this.name = 'HubError';
+  }
+}
+
+type Query = Record<string, string | number | boolean | null | undefined>;
+
+interface RequestOptions {
+  query?: Query;
+  json?: unknown;
+  form?: FormData;
+  signal?: AbortSignal;
+  accept?: string;
+}
+
+function detailMessage(body: unknown, fallback: string): string {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    const detail = (body as { detail: unknown }).detail;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : JSON.stringify(d)))
+        .join('; ');
+    }
+    if (detail && typeof detail === 'object' && 'message' in detail) return String((detail as { message: unknown }).message);
+  }
+  if (typeof body === 'string' && body) return body.slice(0, 300);
+  return fallback;
+}
+
+export interface ChatResult {
+  response: ChatResponse;
+  /** Value of the X-Routed-Via header (falls back to response.routed_via). */
+  routedVia: string;
+}
+
+export interface StreamHandlers {
+  onChunk: (chunk: ChatChunk) => void;
+  onRoutedVia?: (routedVia: string) => void;
+}
+
+export interface DriveListing {
+  objects: StoredObject[];
+  errors: Record<string, string>;
+}
+
+export interface UploadOptions {
+  key?: string;
+  provider?: string;
+  onProgress?: (fraction: number) => void;
+}
+
+export class HubClient {
+  readonly baseUrl: string;
+  readonly token: string;
+
+  constructor(settings: HubSettings) {
+    this.baseUrl = settings.hubUrl.replace(/\/+$/, '');
+    this.token = settings.token;
+  }
+
+  url(path: string, query?: Query): string {
+    const u = new URL(this.baseUrl + path);
+    if (query) {
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, String(v));
+      }
+    }
+    return u.toString();
+  }
+
+  /** True when the token can travel as a WebSocket subprotocol (RFC 7230 token characters). */
+  private tokenFitsSubprotocol(): boolean {
+    return !!this.token && /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(this.token);
+  }
+
+  /**
+   * Subprotocols for the /ws upgrade: ["bearer", token] keeps the token out of the URL,
+   * which Cloud Run request logs and proxies record in full.
+   */
+  wsProtocols(): string[] | undefined {
+    return this.tokenFitsSubprotocol() ? ['bearer', this.token as string] : undefined;
+  }
+
+  wsUrl(types: string[]): string {
+    const u = new URL(this.baseUrl + '/ws');
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (this.token && !this.tokenFitsSubprotocol()) u.searchParams.set('token', this.token);
+    if (types.length) u.searchParams.set('types', types.join(','));
+    return u.toString();
+  }
+
+  private headers(extra?: Record<string, string>): Record<string, string> {
+    const h: Record<string, string> = { ...extra };
+    if (this.token) h.Authorization = `Bearer ${this.token}`;
+    return h;
+  }
+
+  async raw(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
+    const headers = this.headers({ Accept: opts.accept ?? 'application/json' });
+    let body: BodyInit | undefined;
+    if (opts.form) body = opts.form;
+    else if (opts.json !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify(opts.json);
+    }
+    let res: Response;
+    try {
+      res = await fetch(this.url(path, opts.query), { method, headers, body, signal: opts.signal });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      throw new HubError(`Cannot reach hub at ${this.baseUrl} (${err instanceof Error ? err.message : String(err)})`, 0);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let parsed: unknown = text;
+      try {
+        parsed = text ? JSON.parse(text) : undefined;
+      } catch {
+        parsed = text;
+      }
+      throw new HubError(detailMessage(parsed, `${res.status} ${res.statusText}`), res.status, parsed);
+    }
+    return res;
+  }
+
+  async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+    const res = await this.raw(method, path, opts);
+    if (res.status === 204) return undefined as T;
+    const type = res.headers.get('content-type') ?? '';
+    if (type.includes('application/json')) return (await res.json()) as T;
+    return (await res.text()) as unknown as T;
+  }
+
+  // ------------------------------------------------------------------ system
+
+  health(signal?: AbortSignal): Promise<unknown> {
+    return this.request('GET', '/healthz', { signal });
+  }
+
+  // ------------------------------------------------------------------ LLM
+
+  async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResult> {
+    const res = await this.raw('POST', '/llm/chat', { json: { ...req, stream: false }, signal });
+    const response = (await res.json()) as ChatResponse;
+    const routedVia = res.headers.get('X-Routed-Via') ?? response.routed_via ?? '';
+    return { response, routedVia };
+  }
+
+  async stream(req: ChatRequest, handlers: StreamHandlers, signal?: AbortSignal): Promise<void> {
+    const res = await this.raw('POST', '/llm/stream', { json: { ...req, stream: true }, signal, accept: 'text/event-stream' });
+    const header = res.headers.get('X-Routed-Via');
+    if (header) handlers.onRoutedVia?.(header);
+    if (!res.body) throw new HubError('Streaming is not supported by this browser', 0);
+    // hub_api sends `event: chunk` (ChatChunk JSON) ..., then `event: done` or `event: error`.
+    // A bare `data: [DONE]` (OpenAI style) also ends the stream.
+    for await (const msg of readSSE(res.body, signal)) {
+      if (msg.data === '[DONE]' || msg.event === 'done') return;
+      if (msg.event === 'error') {
+        let parsed: unknown = msg.data;
+        try {
+          parsed = JSON.parse(msg.data);
+        } catch {
+          parsed = msg.data;
+        }
+        throw new HubError(detailMessage(parsed, 'Stream failed'), 502, parsed);
+      }
+      let chunk: ChatChunk;
+      try {
+        chunk = JSON.parse(msg.data) as ChatChunk;
+      } catch {
+        continue;
+      }
+      handlers.onChunk(chunk);
+    }
+  }
+
+  async quotas(signal?: AbortSignal): Promise<Record<string, QuotaInfo[]>> {
+    return groupQuotas(await this.request<unknown>('GET', '/llm/quotas', { signal }));
+  }
+
+  async models(signal?: AbortSignal): Promise<Record<string, ModelInfo[]>> {
+    return groupModels(await this.request<unknown>('GET', '/llm/models', { signal }));
+  }
+
+  // ------------------------------------------------------------------ agent
+
+  async agentTasks(signal?: AbortSignal): Promise<AgentTask[]> {
+    const body = await this.request<unknown>('GET', '/agent/tasks', { signal });
+    return listOf<AgentTask>(body, 'tasks');
+  }
+
+  createAgentTask(task: AgentTaskCreate): Promise<AgentTask> {
+    return this.request<AgentTask>('POST', '/agent/tasks', { json: task });
+  }
+
+  cancelAgentTask(id: string): Promise<AgentTask> {
+    return this.request<AgentTask>('POST', `/agent/tasks/${encodeURIComponent(id)}/cancel`);
+  }
+
+  // ------------------------------------------------------------------ drive
+
+  async driveList(prefix: string, q: string, signal?: AbortSignal): Promise<DriveListing> {
+    const needle = q.trim();
+    if (needle) {
+      return normalizeListing(await this.request<unknown>('GET', '/drive/search', { query: { q: needle, prefix }, signal }));
+    }
+    return normalizeListing(await this.request<unknown>('GET', '/drive/files', { query: { prefix }, signal }));
+  }
+
+  async driveCapacity(signal?: AbortSignal): Promise<Record<string, QuotaInfo>> {
+    return normalizeDriveUsage(await this.request<unknown>('GET', '/drive/usage', { signal }));
+  }
+
+  /** Multipart upload through XHR so the UI can show progress. */
+  driveUpload(file: File, opts: UploadOptions = {}): Promise<StoredObject> {
+    return new Promise((resolve, reject) => {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      if (opts.key) form.append('key', opts.key);
+      if (opts.provider) form.append('provider', opts.provider);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', this.url('/drive/upload'));
+      for (const [k, v] of Object.entries(this.headers({ Accept: 'application/json' }))) xhr.setRequestHeader(k, v);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) opts.onProgress?.(e.loaded / e.total);
+      };
+      xhr.onerror = () => reject(new HubError(`Cannot reach hub at ${this.baseUrl}`, 0));
+      xhr.onload = () => {
+        let parsed: unknown = xhr.responseText;
+        try {
+          parsed = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+        } catch {
+          parsed = xhr.responseText;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(parsed as StoredObject);
+        else reject(new HubError(detailMessage(parsed, `${xhr.status} ${xhr.statusText}`), xhr.status, parsed));
+      };
+      xhr.send(form);
+    });
+  }
+
+  async driveDownload(key: string, provider: string): Promise<Blob> {
+    const res = await this.raw('GET', driveObjectPath(provider, key), { accept: '*/*' });
+    return res.blob();
+  }
+
+  driveDelete(key: string, provider: string): Promise<unknown> {
+    return this.request('DELETE', driveObjectPath(provider, key));
+  }
+
+  // ------------------------------------------------------------------ DNS & network
+
+  dnsStatus(signal?: AbortSignal): Promise<DNSStatus> {
+    return this.request<DNSStatus>('GET', '/dns/status', { signal });
+  }
+
+  dnsSetBlocking(enabled: boolean, durationS?: number): Promise<DNSStatus> {
+    return this.request<DNSStatus>('POST', '/dns/blocking', { json: { enabled, duration_s: durationS ?? null } });
+  }
+
+  async dnsQueryLog(limit: number, blockedOnly: boolean, signal?: AbortSignal): Promise<DNSQueryLogEntry[]> {
+    const body = await this.request<unknown>('GET', '/dns/queries', { query: { limit, blocked_only: blockedOnly }, signal });
+    return listOf<DNSQueryLogEntry>(body, 'entries');
+  }
+
+  async tailscaleNodes(signal?: AbortSignal): Promise<VMInstance[]> {
+    const body = await this.request<unknown>('GET', '/dns/nodes', { signal });
+    return listOf<VMInstance>(body, 'nodes');
+  }
+
+  // ------------------------------------------------------------------ databases
+
+  async dbProviders(signal?: AbortSignal): Promise<DBProvider[]> {
+    const body = await this.request<unknown>('GET', '/db/providers', { signal });
+    return listOf<DBProvider>(body, 'providers');
+  }
+
+  async dbTables(provider: string, signal?: AbortSignal): Promise<TableInfo[]> {
+    const body = await this.request<unknown>('GET', `/db/${encodeURIComponent(provider)}/tables`, { signal });
+    return listOf<TableInfo>(body, 'tables');
+  }
+
+  dbDescribe(provider: string, table: string, signal?: AbortSignal): Promise<TableInfo> {
+    return this.request<TableInfo>('GET', `/db/${encodeURIComponent(provider)}/tables/${encodeURIComponent(table)}`, { signal });
+  }
+
+  dbQuery(provider: string, statement: string, opts: { write: boolean; limit: number }, signal?: AbortSignal): Promise<QueryResult> {
+    return this.request<QueryResult>('POST', `/db/${encodeURIComponent(provider)}/query`, {
+      json: { statement, params: null, limit: opts.limit, write: opts.write },
+      signal,
+    });
+  }
+
+  dbUsage(provider: string, signal?: AbortSignal): Promise<QuotaInfo> {
+    return this.request<QuotaInfo>('GET', `/db/${encodeURIComponent(provider)}/usage`, { signal });
+  }
+
+  // ------------------------------------------------------------------ plugins
+
+  async plugins(kind?: string, signal?: AbortSignal): Promise<ProviderStatus[]> {
+    const body = await this.request<unknown>('GET', '/plugins', { query: { kind }, signal });
+    return listOf<ProviderStatus>(body, 'plugins');
+  }
+
+  setPluginEnabled(name: string, enabled: boolean): Promise<unknown> {
+    return this.request('POST', `/plugins/${encodeURIComponent(name)}/${enabled ? 'enable' : 'disable'}`);
+  }
+
+  reorderPlugins(kind: string, order: string[]): Promise<{ chain: string[] }> {
+    return this.request<{ chain: string[] }>('POST', '/plugins/reorder', { json: { kind, names: order } });
+  }
+
+  checkPluginHealth(name: string): Promise<HealthStatus> {
+    return this.request<HealthStatus>('POST', `/plugins/${encodeURIComponent(name)}/health`);
+  }
+
+  resetPlugin(name: string): Promise<unknown> {
+    return this.request('POST', `/plugins/${encodeURIComponent(name)}/reset`);
+  }
+}
+
+// ------------------------------------------------------------------ normalisers
+
+/** `/drive/files/{provider}/{key}`: each key segment is encoded, `/` separators are kept. */
+export function driveObjectPath(provider: string, key: string): string {
+  const segments = key.split('/').filter(Boolean).map(encodeURIComponent);
+  return `/drive/files/${encodeURIComponent(provider)}/${segments.join('/')}`;
+}
+
+/**
+ * hub_api `GET /drive/usage`: `{backends: [{provider, used, limit, source, ...}], total, strategy}`.
+ * Also accepts `{provider: QuotaInfo | QuotaInfo[]}` (the bytes entry is used).
+ */
+export function normalizeDriveUsage(body: unknown): Record<string, QuotaInfo> {
+  const out: Record<string, QuotaInfo> = {};
+  if (isRecord(body) && Array.isArray(body.backends)) {
+    for (const b of body.backends) {
+      if (!isRecord(b) || typeof b.provider !== 'string' || typeof b.used !== 'number') continue;
+      out[b.provider] = {
+        provider: b.provider,
+        used: b.used,
+        limit: typeof b.limit === 'number' ? b.limit : null,
+        unit: 'bytes',
+        source: (b.source as QuotaInfo['source']) ?? 'router',
+      };
+    }
+    return out;
+  }
+  for (const [name, list] of Object.entries(groupQuotas(body))) {
+    const bytes = list.find((q) => q.unit === 'bytes') ?? list[0];
+    if (bytes) out[name] = bytes;
+  }
+  return out;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+export function listOf<T>(body: unknown, key: string): T[] {
+  if (Array.isArray(body)) return body as T[];
+  if (isRecord(body)) {
+    for (const k of [key, 'items', 'data', 'results']) {
+      if (Array.isArray(body[k])) return body[k] as T[];
+    }
+  }
+  return [];
+}
+
+/**
+ * Accepts hub_api `GET /llm/quotas` (`{kind, providers: {name: {quotas: QuotaInfo[], breaker, exhausted_until}}}`),
+ * `{provider: QuotaInfo[] | QuotaInfo}`, `{quotas: {...}}` or a flat `QuotaInfo[]`.
+ */
+export function groupQuotas(body: unknown): Record<string, QuotaInfo[]> {
+  const out: Record<string, QuotaInfo[]> = {};
+  const push = (name: string, q: unknown) => {
+    if (isRecord(q) && typeof q.used === 'number') (out[name] ??= []).push({ ...(q as unknown as QuotaInfo), provider: String(q.provider ?? name) });
+  };
+  if (Array.isArray(body)) {
+    for (const q of body) if (isRecord(q)) push(String(q.provider ?? 'unknown'), q);
+    return out;
+  }
+  if (!isRecord(body)) return out;
+  const src = isRecord(body.providers) ? body.providers : isRecord(body.quotas) ? body.quotas : body;
+  for (const [name, v] of Object.entries(src)) {
+    if (Array.isArray(v)) v.forEach((q) => push(name, q));
+    else if (isRecord(v) && Array.isArray(v.quotas)) v.quotas.forEach((q) => push(name, q));
+    else push(name, v);
+  }
+  return out;
+}
+
+/**
+ * Accepts hub_api `GET /llm/models` (`{providers: {name: ModelInfo[]}, chain}`), `{provider: ModelInfo[]}`,
+ * `{models: {...}}`, `ModelInfo[]` or OpenAI-style `{data: [...]}`.
+ */
+export function groupModels(body: unknown): Record<string, ModelInfo[]> {
+  const out: Record<string, ModelInfo[]> = {};
+  const push = (name: string, m: unknown) => {
+    if (typeof m === 'string') (out[name] ??= []).push({ id: m, provider: name });
+    else if (isRecord(m) && typeof m.id === 'string') (out[name] ??= []).push({ ...(m as unknown as ModelInfo), provider: String(m.provider ?? name) });
+  };
+  const flat = Array.isArray(body) ? body : isRecord(body) && Array.isArray(body.data) ? body.data : null;
+  if (flat) {
+    for (const m of flat) push(isRecord(m) ? String(m.provider ?? m.owned_by ?? 'unknown') : 'unknown', m);
+    return out;
+  }
+  if (!isRecord(body)) return out;
+  const src = isRecord(body.providers) ? body.providers : isRecord(body.models) ? body.models : body;
+  for (const [name, v] of Object.entries(src)) if (Array.isArray(v)) v.forEach((m) => push(name, m));
+  return out;
+}
+
+/**
+ * Accepts the router's `storage_list` shape `{provider: StoredObject[] | "error"}`,
+ * `{items|objects|files: StoredObject[], errors: {...}}` or a flat `StoredObject[]`.
+ */
+export function normalizeListing(body: unknown): DriveListing {
+  if (Array.isArray(body)) return { objects: body as StoredObject[], errors: {} };
+  const listing: DriveListing = { objects: [], errors: {} };
+  if (!isRecord(body)) return listing;
+  // hub_api `/drive/files` and `/drive/search` answer `{items, count, errors}`.
+  const arr = Array.isArray(body.items)
+    ? body.items
+    : Array.isArray(body.objects)
+      ? body.objects
+      : Array.isArray(body.files)
+        ? body.files
+        : null;
+  if (arr) {
+    listing.objects = arr as StoredObject[];
+    if (isRecord(body.errors)) for (const [k, v] of Object.entries(body.errors)) listing.errors[k] = String(v);
+    return listing;
+  }
+  for (const [name, v] of Object.entries(body)) {
+    if (Array.isArray(v)) listing.objects.push(...(v as StoredObject[]).map((o) => ({ ...o, backend: o.backend || name })));
+    else listing.errors[name] = typeof v === 'string' ? v : 'error';
+  }
+  return listing;
+}

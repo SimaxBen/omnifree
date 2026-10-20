@@ -1,0 +1,29 @@
+# Instinct agent (FastAPI + headless Playwright) on the Oracle ARM host, next to FreeLLMAPI/Ollama.
+# Deployed by `python -m automation.deploy deploy-arm`, which uploads core/ + instinct/ to
+# /opt/omnifree and writes .env here (HOST_BIND = Tailscale IP, HUB_URL and the bearer tokens).
+# Reached by hub_api at http://oracle-arm:8090 over Tailscale only.
+name: omnifree-instinct
+
+services:
+  instinct:
+    build:
+      context: ../..
+      dockerfile: instinct/Dockerfile
+    image: omnifree-instinct:local
+    container_name: instinct
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      INSTINCT_HOST: 0.0.0.0
+      INSTINCT_PORT: "8090"
+      # Talk to FreeLLMAPI / Ollama through the host's Tailscale IP (no MagicDNS needed in the container).
+      INSTINCT_LLM_BASE_URL: http://${HOST_BIND:?HOST_BIND missing}:${FREELLMAPI_PORT:-3001}/v1
+      INSTINCT_FALLBACK_BASE_URL: http://${HOST_BIND}:11434/v1
+      INSTINCT_HUB_URL: ${HUB_URL:-}
+    ports:
+      - "${HOST_BIND}:8090:8090"
+    shm_size: 1gb
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

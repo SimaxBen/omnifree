@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: #07090d;
+}
+
+body {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Subtle grid backdrop: reads as an instrument panel without competing with content. */
+.backdrop-grid {
+  background-image:
+    linear-gradient(rgba(122, 133, 151, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(122, 133, 151, 0.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #323c4e transparent;
+}
+
+.pb-safe {
+  padding-bottom: var(--safe-bottom);
+}
+
+.pt-safe {
+  padding-top: var(--safe-top);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

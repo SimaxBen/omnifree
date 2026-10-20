@@ -1,0 +1,15 @@
+# Cloud Build: hub_api image (hub_api/Dockerfile) + a Tailscale userspace layer so the hub on
+# Cloud Run can reach Tailscale-only services (FreeLLMAPI, Ollama, Pi-hole, Instinct).
+# Invoked by `python -m automation.deploy deploy-hub` with _IMAGE set.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "hub_api/Dockerfile", "-t", "${_IMAGE}-base", "."]
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "deploy/hub/Dockerfile.tailscale", "--build-arg", "BASE_IMAGE=${_IMAGE}-base",
+           "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+substitutions:
+  _IMAGE: ""
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s

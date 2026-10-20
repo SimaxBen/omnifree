@@ -1,0 +1,30 @@
+#cloud-config
+# Oracle AMD micro VM1 (1/8 OCPU, 1 GB): Pi-hole (Docker), DNS for the tailnet.
+hostname: amd-vm1
+package_update: true
+package_upgrade: true
+packages: [ca-certificates, curl, jq, fail2ban, unattended-upgrades, netfilter-persistent, iptables-persistent]
+swap:
+  filename: /swapfile
+  size: 2G
+  maxsize: 2G
+write_files:
+  - path: /etc/systemd/resolved.conf.d/omnifree-pihole.conf
+    content: |
+      # Free port 53 for Pi-hole; the host itself keeps resolving through 1.1.1.1.
+      [Resolve]
+      DNSStubListener=no
+      DNS=1.1.1.1 9.9.9.9
+  - path: /etc/docker/daemon.json
+    content: |
+      {"log-driver": "json-file", "log-opts": {"max-size": "5m", "max-file": "2"}}
+runcmd:
+  - systemctl restart systemd-resolved
+  - ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  - [sh, -c, "command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh"]
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  - [sh, -c, "iptables -C INPUT -i tailscale0 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i tailscale0 -j ACCEPT"]
+  - netfilter-persistent save
+  - mkdir -p /opt/omnifree && chown ubuntu:ubuntu /opt/omnifree
+  - touch /var/lib/omnifree-cloud-init-done

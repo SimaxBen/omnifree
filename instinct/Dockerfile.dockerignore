@@ -1,0 +1,14 @@
+# BuildKit picks this up for `docker build -f instinct/Dockerfile .`
+**/__pycache__
+**/*.pyc
+.git
+.env
+.env.*
+data
+tests
+mobile_app
+node_modules
+**/.pytest_cache
+hub_api
+automation
+plugins

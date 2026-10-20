@@ -1,0 +1,124 @@
+# mobile_app: hub_api contract
+
+> Reconciled with `hub_api/routers/*` by the integrator (2026-10). Where the PWA's first guesses differed
+> from hub_api, the PWA was changed to match; this file documents the routes as implemented.
+
+Every HTTP and WebSocket call the PWA makes is listed here. The client lives in `src/lib/api.ts`
+(WebSocket: `src/lib/events.ts`). The payload types in `src/lib/types.ts` mirror the core pydantic
+models (`core/interfaces.py`, `core/router.py`, `core/events.py`) serialised with `model_dump(mode="json")`.
+The normalisers still tolerate a few alternative shapes (flat arrays, `{data: [...]}`), but the shapes
+below are what hub_api returns.
+
+## Cross-cutting
+
+| topic | contract |
+|---|---|
+| Base URL | Set in Settings (localStorage `omnifree.settings.v1`). The default is `VITE_HUB_URL` at build time (`<edge>/api` when deployed behind the Cloudflare Worker), then `window.location.origin`. |
+| Auth (HTTP) | `Authorization: Bearer <HUB_API_TOKEN>` on every request, including multipart upload (XHR) and download. hub_api also accepts `?access_token=`. No token configured on the hub -> 503 on every protected route. |
+| Auth (WS) | Browsers cannot set headers on a WebSocket, so the token travels as the subprotocol pair `["bearer", token]` (kept out of the URL, which Cloud Run request logs record). Only a token with characters that are illegal in a subprotocol falls back to `/ws?token=<HUB_API_TOKEN>`. |
+| CORS | hub_api allows `OMNIFREE_CORS_ORIGINS` and exposes `X-Routed-Via`, `X-Storage-Backend`, `Retry-After`, `Content-Disposition`. |
+| Errors | Non-2xx responses carry `{"detail": "..."}`; provider errors add `error`, `provider`, `status`, `retry_after?`, `attempts?`. Mapping (`hub_api/errors.py`): `NoProviderAvailable` 503, `QuotaExhausted` 429, `ProviderTimeout` 504, `ProviderUnavailable` 503, `ProviderAuthError` 502, `NotConfigured` 409 (unknown plugin 404), `CapabilityNotSupported` 501, provider 404 -> 404, other provider 4xx -> 400. |
+| Datetimes | ISO 8601 strings in UTC. |
+
+## System
+
+| method + path | request | response | used by |
+|---|---|---|---|
+| `GET /healthz` | none (unauthenticated; the token is sent anyway) | 2xx JSON | Settings: "Test connection" (reachability) |
+| `GET /events/recent` | none | recent bus events | not used by the PWA yet |
+
+## LLM pool
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `POST /llm/chat` | `ChatRequest` JSON: `{messages:[{role,content}], model: str\|null, provider: str\|null, allow_fallback: bool, stream: false}` | `ChatResponse` JSON plus the `X-Routed-Via` header (e.g. `freellmapi:groq`) | `model: null` = auto. `attempts[]` is displayed as the failover trail, `latency_ms`/`usage` as badges. |
+| `POST /llm/stream` | same `ChatRequest` with `stream: true` | `text/event-stream`: `event: chunk` + `data: <ChatChunk JSON>` per chunk, then `event: done` (`{routed_via, chunks}`) or, on a mid-stream failure, `event: error` (`{detail, ...}`). A failure before the first chunk is a normal HTTP error. `X-Routed-Via` is a response header (the hub awaits the first chunk before replying). | The client also tolerates OpenAI-style `data: [DONE]`. This is a POST, so the client uses fetch and a ReadableStream, not EventSource. |
+| `GET /llm/quotas` | optional `?kind=` (default `llm`) | `{kind, providers: {name: {quotas: QuotaInfo[] (+remaining, fraction_used), exhausted_until, breaker}}}` | The gauges use the highest `used/limit` per provider. |
+| `GET /llm/models` | none | `{providers: {name: ModelInfo[]}, chain: [names]}` | |
+| `POST /llm/embed` | `EmbeddingRequest` | `EmbeddingResponse` + `X-Routed-Via` | not used by the PWA yet |
+
+## Agent (Instinct)
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /agent/tasks` | none | `{items: AgentTask[]}` (summaries with `step_count`, no `steps`) | Polled every 15 s and refreshed on `instinct.task.created/completed/failed`. |
+| `POST /agent/tasks` | `{goal: str, start_url?: str, model?: str, max_steps?: int (1-200)}` | 202 + `AgentTask` summary | Proxied to Instinct. 503 when `OMNIFREE_INSTINCT_URL` is unset, 502/504 when Instinct is unreachable. |
+| `GET /agent/tasks/{id}` | none | `AgentTask` with `steps: StepRecord[]` | |
+| `POST /agent/tasks/{id}/cancel` | none | `AgentTask` summary | Shown while the status is `queued` or `running`. |
+| `GET /agent/tasks/{id}/screenshot` | none | `image/jpeg` | Latest frame kept by the hub. |
+
+`AgentTask` = Instinct `TaskState` (`instinct/models.py`): `{id, goal, status: queued|running|completed|failed|cancelled, start_url, model, max_steps, created_at, started_at, finished_at, result, error, screenshot_step, step_count | steps}`.
+`StepRecord` = `{step: int, action?: {action, url?, element?, selector?, text?}, result, error?, url?, routed_via?, at}`.
+
+## Unified Drive
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /drive/files?prefix=&provider=&limit=` | query | `{items: StoredObject[], count, errors: {provider: msg}}` | Used when the search box is empty. |
+| `GET /drive/search?q=&prefix=&limit=` | `q` required | `{query, items, count, errors}` | Substring match on key and metadata values; used when the search box is not empty. |
+| `GET /drive/usage` | none | `{backends: [{provider, description, used, limit, remaining, fraction_used, source}], total: {used, limit}, strategy}` | Bytes. The quota bars and the upload target list come from `backends`. |
+| `POST /drive/upload` | `multipart/form-data`: `file`, `key` (optional, defaults to `prefix/filename`), `prefix` (optional), `provider` (optional; absent = most free space, with fallback) | 201 + `StoredObject` | Progress from XHR upload events. Over 32 MiB -> 413; keys with `..` -> 400. |
+| `GET /drive/files/{provider}/{key}` | path (each `key` segment URL-encoded, `/` kept) | raw bytes, `Content-Disposition: attachment`, `X-Storage-Backend` | Fetched as a blob with the bearer header, then saved by the browser. `?inline=true` for inline. |
+| `DELETE /drive/files/{provider}/{key}` | path | `{deleted, provider}` | `router.storage_delete`. |
+| `GET /drive/locate/{key}`, `GET /drive/presign/{provider}/{key}` | path | `StoredObject` / `{url, provider, key, expires_s, method}` | not used by the PWA yet |
+
+## DNS & Network
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /dns/status` | optional `?provider=` | `DNSStatus` | Refreshed on `dns.*` events. |
+| `POST /dns/blocking` | `{enabled: bool, duration_s: int\|null, provider?: str}` | `DNSStatus` after the change | The PWA offers 300/1800/3600 s or null (indefinitely) when disabling. The hub publishes `dns.blocking_changed`. |
+| `GET /dns/queries?limit=100&blocked_only=false` | query | `{provider, items: DNSQueryLogEntry[], count}` | |
+| `GET /dns/nodes` | none | `{provider, items: VMInstance[], online, total}` from the `tailscale` plugin | Uses `state` (online/offline), `tailscale_ip` and `meta.os`. Refreshed on `compute.state_changed` with `provider == "tailscale"`. |
+| `GET /dns/records`, `GET /dns/providers` | none | `{provider, items: DNSRecord[]}` / `{providers, chain}` | not used by the PWA yet |
+
+## Database Explorer
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /db/providers` (optional `?usage=true`) | none | `{providers: [{name, enabled, group, display_name, description, available, capabilities: str[], sql: bool, missing_secrets: str[], usage}]}` | `capabilities` containing `"sql"` switches the editor placeholder and the starter query. Only `enabled` entries are offered. |
+| `GET /db/{provider}/tables` | none | `{provider, items: TableInfo[]}` | `adapter.list_tables()` |
+| `GET /db/{provider}/tables/{table}` | none | `TableInfo` with `columns` | `adapter.describe(table)`. Only called when the list entry has no columns. |
+| `POST /db/{provider}/query` | `{statement: str, params: null, limit: int, write: bool}` | `QueryResult` + `mode` | `write=false` -> `adapter.query(...)`; SQL engines additionally refuse multi-statement or write-keyword statements with 400. `write=true` -> `adapter.execute(...)`. The PWA asks for confirmation before a write. |
+| `GET /db/{provider}/usage` | none | `QuotaInfo` (+`remaining`, `fraction_used`) | Storage bar. |
+
+## Plugin & Quota Switchboard
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /plugins` (optional `?kind=`, `?health=true`) | none (the PWA fetches all kinds and filters client-side) | `{plugins: [ProviderStatus + description, module, limits, healthy, latency_ms], chains: {kind: [names]}}` | Settings "Test connection" also calls this to prove the token works. |
+| `POST /plugins/{name}/enable` / `disable` | none | the updated entry | `registry.set_enabled` (persisted to providers.yaml). `PUT /plugins/{name}/enabled {enabled}` also exists. |
+| `POST /plugins/reorder` | `{kind: str, names: [names...]}` (every plugin of that kind, in the new order) | `{kind, chain: [names...]}` | The PWA optimistically sets priorities to 10, 20, ... and re-fetches on failure. |
+| `POST /plugins/{name}/health` | none | `HealthStatus` | `router.health_check(name)` |
+| `POST /plugins/{name}/reset` | none | the updated entry | Clears the breaker and quota cooldown. |
+| `GET /plugins/{name}`, `GET /plugins/chains`, `PUT /plugins/{name}/priority`, `PATCH /plugins/{name}/settings`, `POST /plugins/reload` | | | not used by the PWA yet |
+
+## WebSocket `/ws`
+
+* URL: `ws(s)://<hub>/ws?types=router.*,quota.*,breaker.*,health.*,registry.*,storage.*,instinct.*,dns.*,compute.*`
+  (`types` is comma-separated `EventBus` patterns).
+* Server -> client: one JSON text frame per event, `Event.model_dump(mode="json")`: `{id, type, ts, provider, kind, data}`.
+* Reconnects with exponential backoff (1 s up to 30 s).
+* Consumed event types:
+  * `quota.*`, `router.success` -> refresh `/llm/quotas` (debounced)
+  * `registry.*`, `breaker.*`, `health.*`, `quota.exhausted` -> refresh `/plugins` (debounced)
+  * `storage.*` -> refresh the drive listing and usage
+  * `dns.*` -> refresh `/dns/status`. `compute.state_changed` (provider `tailscale`) -> refresh `/dns/nodes`
+  * `instinct.task.created | step | screenshot | completed | failed` with `data.task_id` (Instinct posts them to `POST /agent/events`, the hub republishes them):
+    * step: `{step: int, status, action?: {...}, thought?, result?, error?, url?, routed_via?}`, rendered as one line of text
+    * screenshot: `data.image_b64` (JPEG base64, without the `data:` prefix)
+    * completed: `data.result`
+    * failed: `data.error`
+
+## Reconciliation log (integrator)
+
+Changed in the PWA to match hub_api: `/health` -> `/healthz`; SSE `event: chunk`/`event: done` handling;
+`/llm/quotas` and `/llm/models` wrapped shapes; `/drive/files` `{items}` shape and `/drive/search` for non-empty
+queries; `/drive/capacity` -> `/drive/usage`; download and delete moved to `/drive/files/{provider}/{key}`;
+`/dns/querylog` -> `/dns/queries`; reorder body `order` -> `names`; Instinct step payloads rendered as text;
+service-worker `navigateFallbackDenylist` now covers `/healthz`, `/events`, `/compute` and `/api`.
+
+Changed in hub_api: `/db/providers` entries now include `display_name` from `class_meta()`.
+
+Already matching: `/dns/nodes`, `POST /plugins/{name}/enable|disable|health|reset`, `/agent/tasks*`, `/ws` (subprotocol `bearer` auth),
+CORS exposing `X-Routed-Via`.

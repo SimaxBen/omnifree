@@ -1,0 +1,22 @@
+# Pi-hole v6 on Oracle AMD VM1. Deployed by `python -m automation.deploy deploy-pihole`, which writes
+# .env (PIHOLE_PASSWORD from the vault, BIND_IP = this host's Tailscale IPv4) next to this file.
+# DNS (53) and the web/API (80) listen on the Tailscale IP only; nothing is exposed publicly.
+services:
+  pihole:
+    image: ${PIHOLE_IMAGE:-pihole/pihole:latest}
+    container_name: pihole
+    hostname: amd-vm1-pihole
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:?BIND_IP must be the Tailscale IP}:53:53/tcp"
+      - "${BIND_IP}:53:53/udp"
+      - "${BIND_IP}:80:80/tcp"
+    environment:
+      TZ: ${TZ:-UTC}
+      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?PIHOLE_PASSWORD missing}
+      FTLCONF_dns_listeningMode: all
+      FTLCONF_dns_upstreams: ${PIHOLE_UPSTREAMS:-1.1.1.1;9.9.9.9}
+      FTLCONF_webserver_port: "80"
+    volumes:
+      - ./etc-pihole:/etc/pihole
+    mem_limit: 300m

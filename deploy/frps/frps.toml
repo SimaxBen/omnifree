@@ -1,0 +1,18 @@
+# frp server. The token is read from the container environment (Go template, frp >= 0.52).
+bindPort = 7000
+auth.method = "token"
+auth.token = "{{ .Envs.FRPS_TOKEN }}"
+transport.tls.force = true
+
+# HTTP virtual hosts for exposed webhooks/bots (reach them over Tailscale, or open the port yourself).
+vhostHTTPPort = 8080
+
+# TCP/UDP remote ports clients may claim.
+allowPorts = [{ start = 20000, end = 20050 }]
+
+# Dashboard on localhost only (ssh -L 7500:127.0.0.1:7500 or Tailscale + port-forward).
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+
+log.to = "console"
+log.level = "info"
