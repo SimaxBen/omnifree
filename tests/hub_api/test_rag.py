@@ -360,3 +360,9 @@ def test_rag_without_db_plugin(make_hub):
     del plugins["turso"]
     hub = make_hub(plugins)
     assert hub.get("/rag/docs").status_code in (404, 409)
+
+
+def test_citation_variants_are_normalised() -> None:
+    from hub_api.routers.rag import normalise_citations
+
+    assert normalise_citations("A【1】 B【2, 3】 C［4］ D[5]") == "A[1] B[2][3] C[4] D[5]"

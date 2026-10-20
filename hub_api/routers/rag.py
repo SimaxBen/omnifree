@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import posixpath
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -324,4 +325,14 @@ async def ask(body: AskBody, state: HubState = Depends(get_state)) -> dict[str, 
             max_tokens=1200,
         )
     )
-    return {"answer": (resp.content or "").strip() or NOT_FOUND_ANSWER, "sources": sources, "routed_via": resp.routed_via}
+    answer = normalise_citations((resp.content or "").strip()) or NOT_FOUND_ANSWER
+    return {"answer": answer, "sources": sources, "routed_via": resp.routed_via}
+
+
+_CITATION_VARIANTS = re.compile(r"[【〔［]\s*(\d+(?:\s*[,،]\s*\d+)*)\s*[】〕］]")
+
+
+def normalise_citations(text: str) -> str:
+    """Rewrite citation markers some models emit (【1】, ［2］, 【1, 3】) into the contract's [n] form."""
+    return _CITATION_VARIANTS.sub(
+        lambda m: "".join(f"[{n.strip()}]" for n in re.split(r"[,،]", m.group(1))), text)
