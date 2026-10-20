@@ -33,6 +33,11 @@ import type {
   VoiceMode,
   VoiceNoteResult,
   ChatChunk,
+  Digest,
+  DigestPeriod,
+  InboxStatus,
+  InboxSyncRequest,
+  InboxSyncResult,
   ChatRequest,
   ChatResponse,
   CronJob,
@@ -670,6 +675,44 @@ export class HubClient {
     return this.request<void>('DELETE', `/expenses/${encodeURIComponent(id)}`);
   }
 
+  // ------------------------------------------------------------------ Gmail receipts import
+
+  /** `GET /inbox/receipts/status`: the configured mailboxes, their last sync or error, and the last run. */
+  async inboxStatus(signal?: AbortSignal): Promise<InboxStatus> {
+    const body = await this.request<unknown>('GET', '/inbox/receipts/status', { signal });
+    const b = isRecord(body) ? body : {};
+    const accounts = Array.isArray(b.accounts) ? b.accounts.filter(isRecord) : [];
+    return {
+      configured: b.configured === true,
+      accounts: accounts.map((a) => ({
+        name: String(a.name ?? ''),
+        user: String(a.user ?? ''),
+        host: String(a.host ?? ''),
+        port: typeof a.port === 'number' ? a.port : 993,
+        configured: a.configured === true,
+        last_sync_at: typeof a.last_sync_at === 'string' ? a.last_sync_at : null,
+        last_error: typeof a.last_error === 'string' ? a.last_error : null,
+      })),
+      problems: Array.isArray(b.problems) ? b.problems.filter((x): x is string => typeof x === 'string') : [],
+      last_sync_at: typeof b.last_sync_at === 'string' ? b.last_sync_at : null,
+      last_result: isRecord(b.last_result) ? (b.last_result as InboxStatus['last_result']) : null,
+    };
+  }
+
+  /** `POST /inbox/receipts/sync`: reads receipt emails of every mailbox (or `opts.account`) into expenses (one call stays under ~50 s). */
+  async syncGmailReceipts(opts: InboxSyncRequest = {}, signal?: AbortSignal): Promise<InboxSyncResult> {
+    const body = await this.request<unknown>('POST', '/inbox/receipts/sync', { json: opts, signal });
+    return normalizeSyncResult(body);
+  }
+
+  // ------------------------------------------------------------------ summary (digest)
+
+  /** `GET /digest?period=week|month[&refresh=1]`: stats plus an LLM-written summary (cached ~1 h). */
+  async digest(period: DigestPeriod = 'week', refresh = false, signal?: AbortSignal): Promise<Digest> {
+    const body = await this.request<unknown>('GET', '/digest', { query: { period, refresh: refresh ? 1 : undefined }, signal });
+    return normalizeDigest(body, period);
+  }
+
   // ------------------------------------------------------------------ short links & drops
 
   async links(signal?: AbortSignal): Promise<ShortLink[]> {
@@ -744,6 +787,60 @@ export function driveObjectPath(provider: string, key: string, base = '/drive/fi
 
 export function cronJobPath(provider: string, id: string): string {
   return `/cron/jobs/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`;
+}
+
+/** `POST /inbox/receipts/sync` reply with every list present. */
+export function normalizeSyncResult(body: unknown): InboxSyncResult {
+  const b = isRecord(body) ? body : {};
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    scanned: num(b.scanned),
+    matched: num(b.matched),
+    created: Array.isArray(b.created) ? (b.created as InboxSyncResult['created']) : [],
+    skipped: Array.isArray(b.skipped) ? (b.skipped as InboxSyncResult['skipped']) : [],
+    errors: Array.isArray(b.errors) ? (b.errors as InboxSyncResult['errors']) : [],
+    remaining: num(b.remaining),
+    dry_run: b.dry_run === true,
+    accounts: Array.isArray(b.accounts) ? (b.accounts as InboxSyncResult['accounts']) : [],
+  };
+}
+
+/** `GET /digest` reply with safe defaults for any missing stat. */
+export function normalizeDigest(body: unknown, period: DigestPeriod = 'week'): Digest {
+  const b = isRecord(body) ? body : {};
+  const st = isRecord(b.stats) ? b.stats : {};
+  const rec = (v: unknown): Record<string, unknown> => (isRecord(v) ? v : {});
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const numOrNull = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  const e = rec(st.expenses);
+  const t = rec(st.tasks);
+  const n = rec(st.notes);
+  const d = rec(st.drive);
+  const l = rec(st.llm);
+  return {
+    period: b.period === 'month' || b.period === 'week' ? b.period : period,
+    from: typeof b.from === 'string' ? b.from : '',
+    to: typeof b.to === 'string' ? b.to : '',
+    generated_at: typeof b.generated_at === 'string' ? b.generated_at : '',
+    markdown: typeof b.markdown === 'string' ? b.markdown : '',
+    stats: {
+      expenses: {
+        total_by_currency: rec(e.total_by_currency) as Record<string, number>,
+        by_category: rec(e.by_category) as Record<string, Record<string, number>>,
+        count: num(e.count),
+        top_merchants: Array.isArray(e.top_merchants) ? (e.top_merchants as Digest['stats']['expenses']['top_merchants']) : [],
+      },
+      tasks: { done: num(t.done), open: num(t.open), overdue: num(t.overdue) },
+      notes: { created: num(n.created), voice: num(n.voice) },
+      drive: { uploaded_files: numOrNull(d.uploaded_files), uploaded_bytes: numOrNull(d.uploaded_bytes) },
+      llm: { requests_by_provider: rec(l.requests_by_provider) as Record<string, number> },
+    },
+    highlights: strings(b.highlights),
+    suggestions: strings(b.suggestions),
+    source: typeof b.source === 'string' ? b.source : '',
+    cached: b.cached === true,
+  };
 }
 
 /** `GET /cron/jobs`: `{jobs: CronJob[], errors: {provider: message}}` (a flat array is accepted too). */

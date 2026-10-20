@@ -1,59 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Icon } from '../../components/icons';
 import { SwipeRow } from '../../components/SwipeRow';
-import { Button, Chip, EmptyState, ErrorNote, IconButton, SkeletonList, cx, riseStyle } from '../../components/ui';
+import { Badge, Button, Chip, EmptyState, ErrorNote, IconButton, SkeletonList, cx, riseStyle } from '../../components/ui';
 import { useActions } from '../../lib/actions';
-import { categoryBreakdown, currenciesByWeight, currentMonth, formatMoney, monthLabel, shiftMonth, type CategorySlice } from '../../lib/apps';
+import { categoryBreakdown, currenciesByWeight, currentMonth, formatMoney, monthLabel, shiftMonth } from '../../lib/apps';
 import { announce, useTopic } from '../../lib/bus';
+import { emailMailbox } from '../../lib/digest';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
 import type { Expense, ExpenseCategory } from '../../lib/types';
+import { Donut } from './Donut';
 import { CATEGORY_COLOR } from './ExpenseEditor';
-
-/** Donut of category shares; segments sweep in when the data changes. */
-function Donut({ slices, total, currency }: { slices: CategorySlice[]; total: number; currency: string }) {
-  const r = 52;
-  const c = 2 * Math.PI * r;
-  const [shown, setShown] = useState(false);
-  useEffect(() => {
-    setShown(false);
-    const t = window.requestAnimationFrame(() => setShown(true));
-    return () => window.cancelAnimationFrame(t);
-  }, [slices]);
-  let offset = 0;
-  return (
-    <svg viewBox="0 0 140 140" className="h-40 w-40 shrink-0" role="img" aria-label={`Spending by category: ${slices.map((s) => `${s.category} ${Math.round(s.share * 100)}%`).join(', ')}`}>
-      <circle cx="70" cy="70" r={r} fill="none" stroke="#1C2146" strokeWidth="16" />
-      <g transform="rotate(-90 70 70)">
-        {slices.map((s) => {
-          const len = Math.max(s.share * c - 2, 0.5);
-          const el = (
-            <circle
-              key={s.category}
-              cx="70"
-              cy="70"
-              r={r}
-              fill="none"
-              stroke={CATEGORY_COLOR[s.category as ExpenseCategory] ?? '#8A8FBF'}
-              strokeWidth="16"
-              strokeDasharray={`${shown ? len : 0} ${c}`}
-              strokeDashoffset={-offset}
-              style={{ transition: 'stroke-dasharray 600ms cubic-bezier(0.22, 1, 0.36, 1)' }}
-            />
-          );
-          offset += s.share * c;
-          return el;
-        })}
-      </g>
-      <text x="70" y="66" textAnchor="middle" className="fill-ink-400" style={{ font: '500 10px "Atkinson Hyperlegible Next", sans-serif' }}>
-        {currency}
-      </text>
-      <text x="70" y="84" textAnchor="middle" className="fill-ink-100" style={{ font: '700 17px "Bricolage Grotesque", sans-serif' }}>
-        {total >= 10000 ? `${(total / 1000).toFixed(1)}k` : Math.round(total).toLocaleString('en-GB')}
-      </text>
-    </svg>
-  );
-}
+import { GmailImport } from './GmailImport';
 
 function dayLabel(iso: string): string {
   return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -106,6 +64,8 @@ export default function ExpensesView() {
           Add by hand
         </Button>
       </div>
+
+      <GmailImport />
 
       <div className="flex items-center justify-between rounded-full bg-ink-900 p-1 ring-1 ring-inset ring-ink-800">
         <IconButton icon="left" label="Previous month" onClick={() => setMonth((m) => shiftMonth(m, -1))} />
@@ -170,10 +130,19 @@ export default function ExpensesView() {
                 <SwipeRow end={{ icon: 'trash', label: 'Delete', tone: 'danger', run: () => remove(e) }}>
                   <button type="button" onClick={() => actions.editExpense(e)} className="flex min-h-[64px] w-full items-center gap-3 px-3 py-2 text-left">
                     <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full" style={{ background: `${CATEGORY_COLOR[e.category] ?? '#8A8FBF'}22`, color: CATEGORY_COLOR[e.category] ?? '#8A8FBF' }}>
-                      <Icon name={e.receipt_key ? 'receipt' : 'wallet'} size={18} />
+                      <Icon name={e.source === 'email' && !e.receipt_key ? 'mail' : e.receipt_key ? 'receipt' : 'wallet'} size={18} />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[15px] text-ink-100">{e.merchant || 'Untitled'}</span>
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-[15px] text-ink-100">{e.merchant || 'Untitled'}</span>
+                        {e.source === 'email' && (
+                          <span title={emailMailbox(e.source_ref) ?? 'Imported from email'} className="shrink-0">
+                            <Badge tone="signal" className="!px-1.5 !py-0 text-[11px]">
+                              email
+                            </Badge>
+                          </span>
+                        )}
+                      </span>
                       <span className="block truncate text-[12px] capitalize text-ink-500">
                         {e.category}
                         {e.note ? `, ${e.note}` : ''}

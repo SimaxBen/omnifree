@@ -7,7 +7,6 @@ safe defaults (currency MAD, today's date in Africa/Casablanca, category "other"
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import mimetypes
@@ -18,27 +17,24 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
-from core.interfaces import Capability, ChatMessage, ChatRequest, ChatResponse, ProviderKind
-from core.router import TOKEN_METRIC
-from hub_api.appdata import AppDB, extract_json, get_appdb, local_today, new_id, now_iso, read_upload
+from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso, read_upload
+from hub_api.receipts import CATEGORIES, read_receipt_file
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "CATEGORIES", "normalise_currency", "parse_receipt", "summarise", "SCHEMA"]
+__all__ = [
+    "router", "CATEGORIES", "normalise_currency", "parse_receipt", "summarise", "SCHEMA",
+    "ensure_schema", "insert_expense", "expense_out",
+]
 
 log = logging.getLogger("omnifree.hub.expenses")
 
 router = APIRouter(prefix="/expenses", tags=["expenses"])
 
-CATEGORIES = (
-    "food", "groceries", "transport", "housing", "bills", "health",
-    "shopping", "entertainment", "education", "travel", "other",
-)
 Category = Literal[
     "food", "groceries", "transport", "housing", "bills", "health",
     "shopping", "entertainment", "education", "travel", "other",
 ]
 DEFAULT_CURRENCY = "MAD"
-VISION_PREFERRED = "gemini"
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_expenses ("
@@ -48,6 +44,10 @@ SCHEMA = (
     " receipt_key TEXT, created_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_expenses_date ON app_expenses (date)",
 )
+# Migration v2: where an expense came from ("email" for the Gmail import) and its reference there
+# (the email's Message-ID), used to deduplicate imports. NULL for manual and scanned expenses.
+SOURCE_COLUMNS = (("source", "TEXT"), ("source_ref", "TEXT"))
+SOURCE_INDEX = ("CREATE INDEX IF NOT EXISTS app_expenses_source_ref ON app_expenses (source_ref)",)
 
 _IMAGE_TYPES = {
     "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp",
@@ -61,9 +61,16 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = r"^\d{4}-(0[1-9]|1[0-2])$"
 
 
-async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
+async def ensure_schema(db: AppDB) -> AppDB:
+    """Create ``app_expenses`` and apply its migrations (idempotent, once per process)."""
     await db.ensure("expenses", SCHEMA)
+    await db.add_columns("expenses_v2_source", "app_expenses", SOURCE_COLUMNS)
+    await db.ensure("expenses_v2_index", SOURCE_INDEX)
     return db
+
+
+async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
+    return await ensure_schema(db)
 
 
 # --------------------------------------------------------------------------- validation helpers
@@ -175,8 +182,13 @@ def _expense_out(row: dict[str, Any]) -> dict[str, Any]:
         "items": items if isinstance(items, list) else [],
         "note": row.get("note"),
         "receipt_key": row.get("receipt_key"),
+        "source": row.get("source"),
+        "source_ref": row.get("source_ref"),
         "created_at": row["created_at"],
     }
+
+
+expense_out = _expense_out
 
 
 def summarise(expenses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -205,6 +217,8 @@ async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
         "items": json.dumps(fields.get("items") or []),
         "note": fields.get("note"),
         "receipt_key": fields.get("receipt_key"),
+        "source": fields.get("source"),
+        "source_ref": fields.get("source_ref"),
         "created_at": now_iso(),
     }
     cols = list(row)
@@ -213,6 +227,9 @@ async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
         [row[c] for c in cols],
     )
     return _expense_out(row)
+
+
+insert_expense = _insert
 
 
 async def _get(db: AppDB, expense_id: str) -> dict[str, Any]:
@@ -299,42 +316,6 @@ async def create_expense(body: ExpenseCreate, db: AppDB = Depends(_db)) -> dict[
     return await _insert(db, fields)
 
 
-_RECEIPT_PROMPT = (
-    "You read photos of receipts and invoices (often Moroccan: French/Arabic, amounts in dirhams 'DH'/'MAD').\n"
-    "Today is {today}. Answer with ONE JSON object only, no prose, no code fences:\n"
-    '{{"merchant": "store name", "date": "YYYY-MM-DD or null", "total": number (the grand total paid), '
-    '"currency": "ISO 4217 code (DH/Dhs = MAD) or null", "category": one of {categories}, '
-    '"items": [{{"name": "...", "qty": number or null, "price": number or null}}], '
-    '"confidence": "high|medium|low"}}\n'
-    "Use null for anything unreadable; never invent amounts. confidence is low when the image is blurry, cut or not a receipt."
-)
-
-
-def _vision_candidates(state: HubState) -> list[str]:
-    chain = state.registry.chain(ProviderKind.LLM)
-    vision = [n for n in chain if Capability.VISION in state.registry.class_meta(n).get("capabilities", [])]
-    if VISION_PREFERRED in vision:
-        vision.remove(VISION_PREFERRED)
-        vision.insert(0, VISION_PREFERRED)
-    return vision
-
-
-async def _vision_chat(state: HubState, request: ChatRequest) -> ChatResponse:
-    """Chat on vision-capable providers only (Gemini first), with failover between them."""
-    routed = await state.router.execute(
-        ProviderKind.LLM,
-        lambda a: a.chat(request),
-        candidates=_vision_candidates(state),
-        capability=Capability.VISION,
-        op_name="chat",
-    )
-    resp: ChatResponse = routed.result
-    resp.routed_via = resp.routed_via or routed.provider
-    if resp.usage and resp.usage.total_tokens:
-        await state.router.record_usage(routed.provider, TOKEN_METRIC, resp.usage.total_tokens)
-    return resp
-
-
 def _image_type(filename: str | None, content_type: str | None) -> tuple[str, str]:
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
     if ctype not in _IMAGE_TYPES:
@@ -361,29 +342,7 @@ async def scan_receipt(
     meta = {"original-filename": file.filename} if file.filename else None
     await state.router.storage_put(key, image, content_type, meta)
 
-    data_url = f"data:{content_type};base64,{base64.b64encode(image).decode('ascii')}"
-    request = ChatRequest(
-        messages=[
-            ChatMessage(
-                role="system",
-                content=_RECEIPT_PROMPT.format(today=today.isoformat(), categories="|".join(CATEGORIES)),
-            ),
-            ChatMessage(
-                role="user",
-                content=[
-                    {"type": "text", "text": "Extract this receipt as JSON."},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            ),
-        ],
-        model=state.hub.receipt_model or None,
-        temperature=0.0,
-        response_format={"type": "json_object"},
-    )
-    resp = await _vision_chat(state, request)
-    data = extract_json(resp.content)
-    if data is None:
-        log.warning("receipt extraction returned no JSON (routed via %s)", resp.routed_via)
+    data = await read_receipt_file(state, image, content_type, today)
     fields, confidence = parse_receipt(data, today)
     fields["note"] = note.strip() if note and note.strip() else None
     fields["receipt_key"] = key

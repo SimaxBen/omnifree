@@ -5,6 +5,7 @@ import { SwipeRow } from '../components/SwipeRow';
 import { ErrorNote, Meter, SectionTitle, cx, haptic, riseStyle } from '../components/ui';
 import { useActions } from '../lib/actions';
 import { budgetAlerts, currenciesByWeight, currentMonth, formatMoney, isoDay, sortTasks } from '../lib/apps';
+import { headlineStats } from '../lib/digest';
 import { announce, useTopic } from '../lib/bus';
 import { displayName, fileKind } from '../lib/files';
 import { errorText, useHub, useHubData } from '../lib/hub';
@@ -31,6 +32,7 @@ export default function HomeView() {
   const budget = useHubData((c, s) => c.budget(s), [], 5 * 60_000);
   const spend = useHubData((c, s) => c.expenses(currentMonth(today), s), []);
   const files = useHubData((c, s) => c.driveList('', '', s), []);
+  const week = useHubData((c, s) => c.digest('week', false, s), []);
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
   const timers = useRef<Record<string, number>>({});
 
@@ -44,6 +46,7 @@ export default function HomeView() {
     budget.reload();
     spend.reload();
     files.reload();
+    week.reload();
   });
 
   const upNext = useMemo(() => sortTasks(tasks.data ?? []).slice(0, 6), [tasks.data]);
@@ -135,6 +138,45 @@ export default function HomeView() {
           </button>
         ))}
       </div>
+
+      <button
+        type="button"
+        onClick={() => go('more', 'summary')}
+        className="press rise block w-full rounded-card bg-ink-900 p-4 text-left ring-1 ring-inset ring-ink-800"
+        style={riseStyle(4)}
+        aria-label="This week: open the summary"
+      >
+        <span className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 font-display text-[17px] font-semibold text-ink-100">
+            <span className="grid h-8 w-8 place-items-center rounded-full bg-signal/15 text-signal">
+              <Icon name="chart" size={16} />
+            </span>
+            This week
+          </span>
+          <span className="flex items-center gap-0.5 text-[14px] text-signal">
+            Summary
+            <Icon name="right" size={16} />
+          </span>
+        </span>
+        <span className="mt-3 grid grid-cols-3 gap-2">
+          {week.data
+            ? headlineStats(week.data).map((st) => (
+                <span key={st.label} className="block min-w-0">
+                  <span className="block truncate font-display text-[19px] font-semibold leading-tight text-ink-100">{st.value}</span>
+                  <span className="block truncate text-[12px] text-ink-400">{st.label}</span>
+                </span>
+              ))
+            : week.error
+              ? <span className="col-span-3 block text-[14px] text-ink-400">Spending, tasks and notes of the last 7 days.</span>
+              : [0, 1, 2].map((i) => (
+                <span key={i} className="block space-y-1.5" aria-hidden="true">
+                  <span className="skeleton block h-5 w-3/4" />
+                  <span className="skeleton block h-3 w-1/2" />
+                </span>
+              ))}
+        </span>
+        {week.data?.highlights[0] && <span className="mt-3 line-clamp-2 block text-[14px] leading-snug text-ink-300">{week.data.highlights[0]}</span>}
+      </button>
 
       <section>
         <SectionTitle

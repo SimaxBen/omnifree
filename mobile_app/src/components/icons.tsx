@@ -59,6 +59,7 @@ const PATHS = {
   chart: 'M4 20V10 M10 20V4 M16 20v-7 M3 20h18',
   wave: 'M3 12h2 M7 8v8 M11 5v14 M15 9v6 M19 11v2',
   undo: 'M9 14L4 9l5-5 M4 9h10a6 6 0 010 12h-3',
+  mail: 'M3 6h18v12H3z M3 7l9 6 9-6',
 } as const;
 
 export type IconName = keyof typeof PATHS;

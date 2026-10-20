@@ -125,6 +125,9 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `GET/POST /drops`, `DELETE /drops/{code}` | `drops()`, `createDrop()`, `deleteDrop()` | Drive > Drops, file actions "Share as a drop" |
 | `GET /rag/docs`, `POST /rag/index`, `DELETE /rag/docs/{provider}/{key}`, `POST /rag/ask` | `ragDocs()`, `ragIndex()`, `ragDelete()`, `ragAsk()` | Drive > Ask: one `/rag/index` call per file, in sequence, with per-file progress; a 404 on delete counts as already removed |
 | `GET /budget` | `budget()` | More > Free-tier budget, Home warnings (warn/over items) |
+| `GET /inbox/receipts/status` | `inboxStatus()` | Expenses "Import from email" row: setup / failing badges, mailbox count, last import; per-mailbox list in the sheet |
+| `POST /inbox/receipts/sync` `{days?, max?, dry_run?, account?}` | `syncGmailReceipts()` | Expenses "Import from email": result sheet (per mailbox, added / skipped by reason / errors / left for next run); 409 = no mailbox configured. Expenses with `source: "email"` get an "email" badge whose tooltip (and the expense sheet) shows the mailbox from `source_ref` (`<mailbox>#<Message-ID>`) |
+| `GET /digest?period=week\|month&refresh=1` | `digest()` | More > Summary (period switch, refresh button forces `refresh=1`), Home "This week" card |
 
 Drive additions used by the redesign:
 

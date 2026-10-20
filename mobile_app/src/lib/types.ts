@@ -406,10 +406,14 @@ export interface Expense {
   items: ExpenseItem[];
   note: string | null;
   receipt_key: string | null;
+  /** Where the expense came from: 'email' for the Gmail import, null for manual or scanned ones. */
+  source?: string | null;
+  /** The source's reference: `<mailbox>#<Message-ID>` for email imports. */
+  source_ref?: string | null;
   created_at: string;
 }
 
-export type ExpenseCreate = Omit<Expense, 'id' | 'created_at'>;
+export type ExpenseCreate = Omit<Expense, 'id' | 'created_at' | 'source' | 'source_ref'>;
 export type ExpensePatch = Partial<ExpenseCreate>;
 
 export interface ExpenseSummary {
@@ -527,4 +531,100 @@ export interface BudgetReport {
   generated_at: string;
   items: BudgetItem[];
   summary: Record<BudgetStatus, number>;
+}
+
+// ------------------------------------------------------------------ Gmail receipts import
+
+export interface InboxSyncRequest {
+  days?: number;
+  max?: number;
+  dry_run?: boolean;
+  /** Sync one mailbox only (account name or address). */
+  account?: string;
+}
+
+export interface InboxSkip {
+  account?: string;
+  message_id: string;
+  reason: string;
+  subject?: string;
+}
+
+export interface InboxError {
+  account?: string;
+  message_id: string | null;
+  error: string;
+}
+
+/** `POST /inbox/receipts/sync`. In a dry run `created` holds would-be expenses with `id: null`. */
+export interface InboxSyncResult {
+  scanned: number;
+  matched: number;
+  created: Expense[];
+  skipped: InboxSkip[];
+  errors: InboxError[];
+  /** New messages left for the next run (time budget or `max` reached). */
+  remaining: number;
+  dry_run: boolean;
+  /** One summary per mailbox visited (or not reached) by this call. */
+  accounts: InboxAccountRun[];
+}
+
+export interface InboxAccountRun {
+  name: string;
+  user: string;
+  scanned: number;
+  created: number;
+  skipped: number;
+  /** null when the mailbox was not reached. */
+  remaining: number | null;
+  error: string | null;
+  complete: boolean;
+}
+
+export interface InboxAccount {
+  name: string;
+  user: string;
+  host: string;
+  port: number;
+  configured: boolean;
+  last_sync_at: string | null;
+  last_error: string | null;
+}
+
+export interface InboxStatus {
+  configured: boolean;
+  accounts: InboxAccount[];
+  /** Configuration mistakes in INBOX_ACCOUNTS. */
+  problems: string[];
+  last_sync_at: string | null;
+  last_result: Partial<InboxSyncResult> | null;
+}
+
+// ------------------------------------------------------------------ digest (summary)
+
+export type DigestPeriod = 'week' | 'month';
+
+export interface DigestStats {
+  expenses: ExpenseSummary & {
+    top_merchants: { merchant: string; currency: string; total: number; count: number }[];
+  };
+  tasks: { done: number; open: number; overdue: number };
+  notes: { created: number; voice: number };
+  drive: { uploaded_files: number | null; uploaded_bytes: number | null };
+  llm: { requests_by_provider: Record<string, number> };
+}
+
+export interface Digest {
+  period: DigestPeriod;
+  from: string;
+  to: string;
+  generated_at: string;
+  markdown: string;
+  stats: DigestStats;
+  highlights: string[];
+  suggestions: string[];
+  /** 'llm' or 'template' (no LLM answered). */
+  source: string;
+  cached: boolean;
 }
