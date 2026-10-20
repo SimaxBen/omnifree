@@ -5,6 +5,8 @@ endpoint is not used.) Flow: ``b2_authorize_account`` (Basic ``key_id:applicatio
 token cached ~23 h and refreshed on ``expired_auth_token``), ``b2_get_upload_url`` +
 upload, downloads from ``downloadUrl/file/<bucket>/<key>``, ``b2_list_file_versions`` for
 listing, deletion and capacity accounting, ``b2_get_download_authorization`` for presigning.
+``upload_target`` hands a browser a fresh ``b2_get_upload_url`` (direct upload, bypassing the
+hub body limit); ``set_cors`` installs the bucket CORS rule such uploads need.
 
 Settings: ``bucket`` (required), ``bucket_id`` (optional, skips a lookup),
 ``capacity_bytes``, ``auth_url`` (default ``https://api.backblazeb2.com``),
@@ -16,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar
 from urllib.parse import quote, unquote
 
@@ -24,6 +26,7 @@ import httpx
 
 from core.interfaces import (
     Capability,
+    DirectUpload,
     HealthStatus,
     PluginMeta,
     ProviderError,
@@ -36,6 +39,10 @@ from core.interfaces import (
 API = "/b2api/v3"
 _TOKEN_TTL_S = 23 * 3600
 _INFO_PREFIX = "x-bz-info-"
+_UPLOAD_URL_TTL_S = 24 * 3600  # B2 upload URLs/tokens stay valid for 24 hours
+CORS_RULE_NAME = "omnifreeDirectUpload"
+CORS_OPERATIONS = ("b2_upload_file", "b2_download_file_by_name", "b2_download_file_by_id")
+CORS_EXPOSE_HEADERS = ("x-bz-content-sha1", "x-bz-file-name", "x-bz-file-id")
 
 
 def _b2_quote(key: str) -> str:
@@ -50,7 +57,7 @@ def _ms_to_dt(value: Any) -> datetime | None:
 
 
 class B2StorageAdapter(StorageAdapter):
-    capabilities: ClassVar[frozenset[str]] = frozenset({Capability.PRESIGN})
+    capabilities: ClassVar[frozenset[str]] = frozenset({Capability.PRESIGN, Capability.DIRECT_UPLOAD})
     meta: ClassVar[PluginMeta] = PluginMeta(
         display_name="Backblaze B2",
         description="Backblaze B2 via the native B2 API v3.",
@@ -259,6 +266,59 @@ class B2StorageAdapter(StorageAdapter):
         })
         auth = await self._authorize()
         return f"{self._download_url(auth, key)}?Authorization={quote(payload['authorizationToken'], safe='')}"
+
+    async def upload_target(
+        self, key: str, content_type: str, size: int | None = None, expires_s: int = 3600
+    ) -> DirectUpload:
+        """A fresh upload URL + token for one ``b2_upload_file`` POST by the client.
+
+        The body hash is not known here, so the client sends ``X-Bz-Content-Sha1:
+        do_not_verify`` (B2 then stores no SHA1 for the file).
+        """
+        bucket_id = await self._get_bucket_id()
+        target = await self._api("b2_get_upload_url", {"bucketId": bucket_id})
+        ttl = max(1, min(int(expires_s), _UPLOAD_URL_TTL_S))
+        self._usage = None
+        return DirectUpload(
+            provider=self.name,
+            key=key,
+            method="POST",
+            url=str(target["uploadUrl"]),
+            headers={
+                "Authorization": str(target["authorizationToken"]),
+                "X-Bz-File-Name": _b2_quote(key),
+                "Content-Type": content_type or "b2/x-auto",
+                "X-Bz-Content-Sha1": "do_not_verify",
+            },
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl),
+        )
+
+    async def set_cors(self, origins: list[str]) -> dict[str, Any]:
+        """Allow browser uploads/downloads from ``origins`` (replaces only OmniFree's own rule).
+
+        Other CORS rules and every other bucket setting are left untouched:
+        ``b2_update_bucket`` only changes the fields it receives.
+        """
+        clean = sorted({o.strip().rstrip("/") for o in origins if o and o.strip()})
+        if not clean:
+            raise ProviderError("at least one origin is required", provider=self.name, status_code=400)
+        auth = await self._authorize()
+        bucket_id = await self._get_bucket_id()
+        listing = await self._api("b2_list_buckets", {"accountId": auth["accountId"], "bucketId": bucket_id})
+        current = next(iter(listing.get("buckets") or []), {})
+        rules = [r for r in current.get("corsRules") or [] if r.get("corsRuleName") != CORS_RULE_NAME]
+        rules.append({
+            "corsRuleName": CORS_RULE_NAME,
+            "allowedOrigins": clean,
+            "allowedOperations": list(CORS_OPERATIONS),
+            "allowedHeaders": ["*"],
+            "exposeHeaders": list(CORS_EXPOSE_HEADERS),
+            "maxAgeSeconds": 3600,
+        })
+        body: dict[str, Any] = {"accountId": auth["accountId"], "bucketId": bucket_id, "corsRules": rules}
+        if current.get("revision") is not None:
+            body["ifRevisionIs"] = current["revision"]
+        return await self._api("b2_update_bucket", body)
 
     async def quota(self) -> QuotaInfo:
         ttl = float(self.setting("usage_cache_s", 300))

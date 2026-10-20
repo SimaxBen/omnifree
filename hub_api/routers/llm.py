@@ -1,4 +1,4 @@
-"""/llm: chat (JSON), stream (SSE), models, quotas, embeddings. Sets ``X-Routed-Via``."""
+"""/llm: chat (JSON), stream (SSE), models, quotas, embeddings, rerank, transcription. Sets ``X-Routed-Via``."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import Field
 
 from core.interfaces import (
     ChatChunk,
@@ -16,15 +17,24 @@ from core.interfaces import (
     ProviderError,
     ProviderKind,
     QuotaInfo,
+    RerankRequest,
+    TranscriptionRequest,
 )
 from hub_api.errors import error_body
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "ROUTED_VIA_HEADER"]
+__all__ = ["router", "ROUTED_VIA_HEADER", "RerankBody"]
 
 ROUTED_VIA_HEADER = "X-Routed-Via"
 
 router = APIRouter(prefix="/llm", tags=["llm"])
+
+_READ_CHUNK = 1024 * 1024
+
+
+class RerankBody(RerankRequest):
+    documents: list[str] = Field(min_length=1)
+    top_n: int | None = Field(None, ge=1)
 
 
 def _quota_json(q: QuotaInfo) -> dict[str, Any]:
@@ -120,5 +130,45 @@ async def quotas(
 @router.post("/embed")
 async def embed(body: EmbeddingRequest, response: Response, state: HubState = Depends(get_state)) -> Any:
     result = await state.router.embed(body)
+    response.headers[ROUTED_VIA_HEADER] = result.routed_via
+    return result.model_dump(mode="json")
+
+
+@router.post("/rerank")
+async def rerank(body: RerankBody, response: Response, state: HubState = Depends(get_state)) -> Any:
+    """Order ``documents`` by relevance to ``query`` (Cohere rerank or any RERANK-capable provider)."""
+    result = await state.router.rerank(RerankRequest.model_validate(body.model_dump()))
+    response.headers[ROUTED_VIA_HEADER] = result.routed_via
+    return result.model_dump(mode="json")
+
+
+@router.post("/transcribe")
+async def transcribe(
+    response: Response,
+    file: UploadFile = File(...),
+    model: str | None = Form(None),
+    language: str | None = Form(None),
+    provider: str | None = Form(None),
+    prompt: str | None = Form(None),
+    state: HubState = Depends(get_state),
+) -> Any:
+    """Speech to text (Groq Whisper or any TRANSCRIBE-capable provider). Multipart ``file`` upload."""
+    limit = state.hub.max_upload_bytes
+    buf = bytearray()
+    while chunk := await file.read(_READ_CHUNK):
+        buf.extend(chunk)
+        if len(buf) > limit:
+            raise HTTPException(413, detail=f"file exceeds {limit} bytes")
+    if not buf:
+        raise HTTPException(422, detail="empty audio file")
+    request = TranscriptionRequest(
+        audio=bytes(buf),
+        filename=file.filename or "audio.wav",
+        model=model or None,
+        language=language or None,
+        prompt=prompt or None,
+        provider=provider or None,
+    )
+    result = await state.router.transcribe(request)
     response.headers[ROUTED_VIA_HEADER] = result.routed_via
     return result.model_dump(mode="json")

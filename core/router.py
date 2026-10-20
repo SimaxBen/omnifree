@@ -28,9 +28,11 @@ from pydantic import BaseModel, Field
 from core.events import EventBus, EventType
 from core.interfaces import (
     Capability,
+    CapabilityNotSupported,
     ChatChunk,
     ChatRequest,
     ChatResponse,
+    DirectUpload,
     EmbeddingRequest,
     EmbeddingResponse,
     HealthStatus,
@@ -785,6 +787,47 @@ class SmartRouter:
         self._capacity_cache.pop(routed.provider, None)
         self.bus.publish(EventType.OBJECT_STORED, provider=routed.provider, kind=ProviderKind.STORAGE, key=key, size=len(data))
         return obj
+
+    async def storage_upload_target(
+        self,
+        key: str,
+        content_type: str,
+        size: int | None = None,
+        *,
+        expires_s: int = 3600,
+        provider: str | None = None,
+    ) -> DirectUpload:
+        """Pick a backend for a client-side direct upload and return its upload instructions.
+
+        Same placement policy as :meth:`storage_put` (most free space first). Backends without
+        ``Capability.DIRECT_UPLOAD`` are skipped, as are unconfigured ones. A pinned ``provider``
+        is used alone and reports CapabilityNotSupported when it cannot do direct uploads.
+        """
+        if provider:
+            spec = self.registry.spec(provider)
+            if spec.kind != ProviderKind.STORAGE:
+                raise NotConfigured(f"plugin '{provider}' is {spec.kind}, not {ProviderKind.STORAGE}", provider=provider)
+            adapter = await self.registry.get(provider)
+            if not adapter.supports(Capability.DIRECT_UPLOAD):
+                raise CapabilityNotSupported(
+                    f"capability '{Capability.DIRECT_UPLOAD}' not supported", provider=provider
+                )
+            order: list[str] | None = None
+        else:
+            order = await self._storage_order(max(size or 0, 0))
+        routed = await self.execute(
+            ProviderKind.STORAGE,
+            lambda a: a.upload_target(key, content_type, size, expires_s),
+            candidates=order,
+            provider=provider,
+            allow_fallback=provider is None,
+            capability=Capability.DIRECT_UPLOAD,
+            op_name="upload_target",
+        )
+        target: DirectUpload = routed.result
+        target.provider = target.provider or routed.provider
+        self._capacity_cache.pop(routed.provider, None)  # the client is about to add bytes
+        return target
 
     async def storage_get(self, key: str, provider: str) -> bytes:
         return await self.call(provider, lambda a: a.get(key), op_name="get")

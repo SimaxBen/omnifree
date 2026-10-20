@@ -7,12 +7,13 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from pydantic import BaseModel, Field
 
 from core.interfaces import ProviderKind, StoredObject
 from hub_api.deps import spec_of_kind, with_adapter
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "normalise_key"]
+__all__ = ["router", "normalise_key", "UploadUrlBody"]
 
 router = APIRouter(prefix="/drive", tags=["drive"])
 
@@ -127,6 +128,30 @@ async def upload(
         target, bytes(buf), content_type, metadata, provider=provider, allow_fallback=provider is None
     )
     return _obj(obj)
+
+
+class UploadUrlBody(BaseModel):
+    filename: str = Field(min_length=1)
+    size: int | None = Field(None, ge=0)
+    content_type: str | None = None
+    prefix: str = ""
+    key: str | None = None
+    provider: str | None = None
+
+
+@router.post("/upload-url")
+async def upload_url(body: UploadUrlBody, state: HubState = Depends(get_state)) -> dict[str, Any]:
+    """Direct-upload instructions (bypasses the hub/serverless body limit).
+
+    The backend is chosen like ``/drive/upload`` (most free space, or the pinned
+    ``provider``); the client then sends the bytes with ``method`` to ``url`` adding ``headers``.
+    """
+    if body.provider:
+        spec_of_kind(state, body.provider, ProviderKind.STORAGE)
+    target = normalise_key(body.key or f"{body.prefix.rstrip('/')}/{body.filename}")
+    content_type = body.content_type or mimetypes.guess_type(target)[0] or "application/octet-stream"
+    result = await state.router.storage_upload_target(target, content_type, body.size, provider=body.provider)
+    return result.model_dump(mode="json")
 
 
 @router.get("/locate/{key:path}")
