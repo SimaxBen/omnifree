@@ -413,7 +413,7 @@ plugins:
       account_id: CLOUDFLARE_ACCOUNT_ID
       api_token: CLOUDFLARE_API_TOKEN
     settings:
-      database_id: null
+      database_id: bf2e9d4f-72cb-4085-9a9f-79c2e9b3283f  # "omnifree", created 2026-10-20 (weur)
   # ======================================================================= aws
   aws_dynamodb:
     module: plugins.aws.dynamodb:DynamoDBAdapter

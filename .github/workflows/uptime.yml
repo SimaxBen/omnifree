@@ -1,0 +1,56 @@
+name: Uptime
+
+# Every 30 minutes: edge / site / hub liveness plus database keep-alive through the hub
+# (Supabase pauses free projects after a week idle). Failures open (or update) an issue labelled
+# "uptime", which GitHub emails to the repo owner; the next green run closes it.
+#
+# Repository secret: HUB_API_TOKEN (the hub bearer token). Without it only the public checks run.
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: run
+        env:
+          HUB_API_TOKEN: ${{ secrets.HUB_API_TOKEN }}
+        run: |
+          set +e
+          python -m automation.uptime --json report.json
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Open or close the uptime issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.run.outputs.code }}
+        run: |
+          gh label create uptime --color B60205 --description "OmniFree uptime alert" 2>/dev/null || true
+          open=$(gh issue list --label uptime --state open --json number --jq '.[0].number')
+          body=$(python -c "import json;print(json.load(open('report.json'))['markdown'])")
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$CODE" != "0" ]; then
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "Still failing ($run_url)"$'\n\n'"$body"
+            else
+              gh issue create --label uptime --title "OmniFree is down" --body "Failing checks ($run_url)"$'\n\n'"$body"
+            fi
+            exit 1
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --comment "Recovered ($run_url)"$'\n\n'"$body"
+          fi
