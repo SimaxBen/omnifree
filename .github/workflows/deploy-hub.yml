@@ -46,6 +46,8 @@ jobs:
 
   deploy:
     needs: test
+    # Cloud Run needs a GCP billing account; until then the hub runs on a Hugging Face Space.
+    if: vars.HUB_TARGET == 'cloudrun'
     runs-on: ubuntu-latest
     environment: production
     env:

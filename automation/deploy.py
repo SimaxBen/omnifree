@@ -666,6 +666,89 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             self.echo(f"hub: {url}")
         return url
 
+    # ------------------------------------------------------------------ deploy-hub (Hugging Face Space)
+    # Human-only credentials that the hub never reads; never copied into Space secrets.
+    _HF_SECRET_DENYLIST = frozenset({
+        "B2_ACCOUNT_PASSWORD", "HF_ACCOUNT_PASSWORD", "HF_TOKEN", "OCI_CONSOLE_PASSWORD", "SUPABASE_DB_PASSWORD",
+        "FREELLMAPI_ADMIN_PASSWORD", "GITHUB_TOKEN_CLASSIC",
+    })
+
+    def hub_secret_names(self) -> list[str]:
+        """Vault keys the hub can use: secrets of enabled plugins plus the hub/instinct tokens."""
+        names: dict[str, None] = {"HUB_API_TOKEN": None, "INSTINCT_API_TOKEN": None}
+        for spec in (self.cfg.providers.get("plugins") or {}).values():
+            if not isinstance(spec, dict) or not spec.get("enabled", True):
+                continue
+            for group in ("secrets", "optional_secrets"):
+                for key in (spec.get(group) or {}).values():
+                    names[str(key)] = None
+        return [n for n in names if n not in self._HF_SECRET_DENYLIST]
+
+    def _hf_space_dir(self, target: Path) -> Path:
+        import shutil
+
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True)
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+        for rel in ("core", "plugins", "hub_api", "config"):
+            shutil.copytree(self.cfg.path(rel), target / rel, ignore=ignore)
+        shutil.copy2(self.cfg.path("requirements.txt"), target / "requirements.txt")
+        hub = self.cfg.section("hub")
+        extra = str(hub.get("hf_extra_pip", "asyncpg motor pymongo"))
+        dockerfile = self.cfg.path("hub_api/Dockerfile").read_text(encoding="utf-8")
+        dockerfile = dockerfile.replace('ARG EXTRA_PIP=""', f'ARG EXTRA_PIP="{extra}"')
+        (target / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+        (target / "README.md").write_text(
+            "---\ntitle: OmniFree Hub\nemoji: 🛰️\ncolorFrom: indigo\ncolorTo: gray\nsdk: docker\napp_port: 8080\n"
+            "pinned: false\n---\n\nOmniFree hub_api (FastAPI). Source: https://github.com/SimaxBen/omnifree\n",
+            encoding="utf-8")
+        return target
+
+    def deploy_hub_hf(self, *, space: str | None = None, cors: Sequence[str] = (), wait_s: float = 900.0) -> str:
+        import time
+
+        from huggingface_hub import HfApi  # lazy: only this deploy target needs it
+
+        hub = self.cfg.section("hub")
+        token = self.require("HF_TOKEN")
+        api = HfApi(token=token)
+        owner = str(hub.get("hf_owner") or api.whoami()["name"])
+        repo_id = space or f"{owner}/{hub.get('hf_space', 'omnifree-hub')}"
+        api.create_repo(repo_id, repo_type="space", space_sdk="docker", private=False, exist_ok=True)
+
+        sent = 0
+        for name in self.hub_secret_names():
+            value = self.optional(name)
+            if value:
+                api.add_space_secret(repo_id, name, value)
+                sent += 1
+        origins = [o for o in [*cors, self.state.urls.get("edge", ""), self.state.urls.get("pwa", "")] if o]
+        variables = {"OMNIFREE_ENVIRONMENT": "production", "OMNIFREE_VAULT_REQUIRED": "false"}
+        if origins:
+            variables["OMNIFREE_CORS_ORIGINS"] = ",".join(dict.fromkeys(origins))
+        for key, value in variables.items():
+            api.add_space_variable(repo_id, key, value)
+        self.echo(f"  {sent} secrets + {len(variables)} variables set on {repo_id}")
+
+        staging = self._hf_space_dir(self.cfg.path("data/hf-space"))
+        api.upload_folder(repo_id=repo_id, repo_type="space", folder_path=str(staging),
+                          commit_message="deploy hub_api", delete_patterns=["*"])
+        url = f"https://{repo_id.replace('/', '-').replace('_', '-').lower()}.hf.space"
+        deadline = time.monotonic() + wait_s
+        stage = ""
+        while time.monotonic() < deadline:
+            stage = str(api.get_space_runtime(repo_id).stage)
+            if stage in ("RUNNING", "BUILD_ERROR", "RUNTIME_ERROR", "CONFIG_ERROR"):
+                break
+            time.sleep(15)
+        self.echo(f"  space stage: {stage}")
+        if stage != "RUNNING":
+            raise DeployError(f"Space {repo_id} ended in {stage}; see https://huggingface.co/spaces/{repo_id}?logs=build")
+        self.state.set_url("hub", url)
+        self.echo(f"hub: {url}")
+        return url
+
     # ------------------------------------------------------------------ edge worker / PWA
     def _cloudflare_env(self) -> dict[str, str]:
         return {"CLOUDFLARE_API_TOKEN": self.require("CLOUDFLARE_API_TOKEN"),
@@ -966,7 +1049,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--set-tailnet-dns", action="store_true", help="make Pi-hole the tailnet DNS server")
     s = sub.add_parser("deploy-edge", help="frps (+ WireGuard) on AMD VM2")
     s.add_argument("--wireguard", action="store_true", default=None)
-    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud)")
+    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud) or a Hugging Face Space")
+    s.add_argument("--target", choices=["cloudrun", "hf"], default="cloudrun")
+    s.add_argument("--space", help="hf target: owner/name of the Space (default <user>/omnifree-hub)")
     s.add_argument("--project")
     s.add_argument("--region")
     s.add_argument("--cors", action="append", default=[])
@@ -1018,6 +1103,8 @@ async def _dispatch(args: argparse.Namespace, deployer: Deployer) -> int:
         await deployer.deploy_pihole(set_tailnet_dns=args.set_tailnet_dns)
     elif cmd == "deploy-edge":
         await deployer.deploy_edge(wireguard=args.wireguard)
+    elif cmd == "deploy-hub" and args.target == "hf":
+        await asyncio.to_thread(deployer.deploy_hub_hf, space=args.space, cors=args.cors)
     elif cmd == "deploy-hub":
         await asyncio.to_thread(deployer.deploy_hub, project=args.project, region=args.region, cors=args.cors,
                                 activate_sa=args.activate_sa, tag=args.tag, tailscale=not args.no_tailscale)

@@ -455,3 +455,28 @@ def test_cli_status_and_missing_hub(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert dp.main(["--state", str(state), "status"]) == 0
     assert '"hub": "https://h"' in capsys.readouterr().out
     assert dp.main(["--state", str(tmp_path / "none.json"), "qr"]) == 2
+
+
+# ---------------------------------------------------------------------- deploy-hub --target hf
+
+
+def test_hub_secret_names_cover_enabled_plugins_and_skip_human_passwords(tmp_path: Path) -> None:
+    d, _ = _deployer(tmp_path, {})
+    names = d.hub_secret_names()
+    assert names[:2] == ["HUB_API_TOKEN", "INSTINCT_API_TOKEN"]
+    assert {"GROQ_API_KEY", "NEON_DATABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"} <= set(names)
+    assert "MISTRAL_API_KEY" not in names and "SAMBANOVA_API_KEY" not in names  # disabled plugins
+    assert not {"HF_TOKEN", "B2_ACCOUNT_PASSWORD", "OCI_CONSOLE_PASSWORD", "SUPABASE_DB_PASSWORD"} & set(names)
+
+
+def test_hf_space_dir_has_docker_readme_and_sources(tmp_path: Path) -> None:
+    d, _ = _deployer(tmp_path, {})
+    space = d._hf_space_dir(tmp_path / "space")
+    readme = (space / "README.md").read_text(encoding="utf-8")
+    assert "sdk: docker" in readme and "app_port: 8080" in readme
+    dockerfile = (space / "Dockerfile").read_text(encoding="utf-8")
+    assert 'ARG EXTRA_PIP="asyncpg motor pymongo"' in dockerfile
+    for rel in ("core/vault.py", "hub_api/main.py", "config/providers.yaml", "requirements.txt"):
+        assert (space / rel).is_file()
+    assert not list(space.rglob("__pycache__"))
+    assert not (space / ".env.vault").exists()
