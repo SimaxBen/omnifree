@@ -20,6 +20,8 @@ from core.router import SmartRouter
 from hub_api.auth import require_token
 from hub_api.errors import install_error_handlers
 from hub_api.routers import agent, compute, cron, db, dns, drive, llm, plugins, ws
+from hub_api.routers import budget as budget_router
+from hub_api.routers import rag as rag_router
 from hub_api.routers.llm import ROUTED_VIA_HEADER
 from hub_api.settings import HubSettings
 from hub_api.state import HubState
@@ -131,7 +133,7 @@ def create_app(
         return {"ok": True, "version": VERSION, "plugins": len(state.registry.specs)}
 
     protected = [Depends(require_token)]
-    for module in (llm, agent, drive, dns, db, plugins, compute, cron):
+    for module in (llm, agent, drive, dns, db, plugins, compute, cron, rag_router, budget_router):
         app.include_router(module.router, dependencies=protected)
 
     @app.get("/events/recent", tags=["meta"], dependencies=protected)
