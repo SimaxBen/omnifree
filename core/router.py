@@ -55,7 +55,7 @@ from core.interfaces import (
     Usage,
     translate_transport_error,
 )
-from core.quota import QuotaStore, window_reset_at
+from core.quota import QuotaBackend, window_reset_at
 from core.registry import PluginRegistry
 
 __all__ = [
@@ -240,7 +240,7 @@ class SmartRouter:
     def __init__(
         self,
         registry: PluginRegistry,
-        quota_store: QuotaStore,
+        quota_store: QuotaBackend,
         bus: EventBus | None = None,
         *,
         clock: Callable[[], float] = time.time,
@@ -260,6 +260,7 @@ class SmartRouter:
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> SmartRouter:
         await self.quota.open()
+        await self.registry.apply_overrides()  # shared-state overrides (no-op without an OverridesStore)
         return self
 
     async def close(self) -> None:

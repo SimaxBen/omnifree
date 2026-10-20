@@ -3,7 +3,7 @@
 Precedence for secrets (``Settings.secret(name)``):
     1. process environment variable ``name``
     2. the encrypted vault (.env.vault), decrypted with OMNIFREE_VAULT_PASSPHRASE
-Plain settings use the ``OMNIFREE_`` env prefix (e.g. OMNIFREE_DATA_DIR).
+Plain settings use the ``OMNIFREE_`` env prefix (e.g. OMNIFREE_DATA_DIR, OMNIFREE_STATE_BACKEND).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import os
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:5173"])  # CSV in env
     request_timeout_s: float = 30.0
     health_interval_s: float = 120.0
+    # Where cross-instance state lives (quota counters, registry overrides, recent events):
+    # "local" = SQLite + providers.yaml + memory; "upstash" = Upstash Redis (see core.shared_state).
+    state_backend: Literal["local", "upstash"] = "local"
+
+    @field_validator("state_backend", mode="before")
+    @classmethod
+    def _lower_backend(cls, v: object) -> object:
+        return v.strip().lower() if isinstance(v, str) else v
 
     @field_validator("cors_origins", mode="before")
     @classmethod

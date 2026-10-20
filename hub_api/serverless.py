@@ -16,6 +16,7 @@ import os
 os.environ.setdefault("OMNIFREE_BACKGROUND_HEALTH", "false")
 os.environ.setdefault("OMNIFREE_DATA_DIR", "/tmp/omnifree-data")
 os.environ.setdefault("OMNIFREE_QUOTA_DB", "/tmp/omnifree-data/quota.db")
+os.environ.setdefault("OMNIFREE_STATE_BACKEND", "upstash")
 
 from collections.abc import Awaitable, Callable  # noqa: E402
 
