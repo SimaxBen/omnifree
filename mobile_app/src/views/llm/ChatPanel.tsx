@@ -32,7 +32,11 @@ export default function ChatPanel() {
   const [showOptions, setShowOptions] = useState(false);
   const [showTranscribe, setShowTranscribe] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState<string>(() => {
+    const draft = readPref('chat.draft', '');
+    if (draft) writePref('chat.draft', '');
+    return draft;
+  });
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const idRef = useRef(1);
@@ -185,16 +189,16 @@ ${text}` : text));
       <div className="space-y-3" aria-live="polite">
         {turns.length === 0 && (
           <p className="px-2 py-8 text-center text-sm text-ink-400">
-            Ask anything. Each reply shows which provider answered (<span className="font-mono text-ink-300">X-Routed-Via</span>) and any failovers on the way.
+            Ask anything. Each reply shows which free provider answered, and any failovers on the way.
           </p>
         )}
         {turns.map((t) =>
           t.role === 'user' ? (
-            <div key={t.id} className="ml-10 whitespace-pre-wrap rounded-xl rounded-br-sm bg-ink-800 px-3 py-2 text-sm text-ink-100">
+            <div key={t.id} className="rise ml-10 whitespace-pre-wrap rounded-[20px] rounded-br-md bg-signal/15 px-4 py-2.5 text-[15px] text-ink-100">
               {t.content}
             </div>
           ) : (
-            <div key={t.id} className="mr-4 space-y-2">
+            <div key={t.id} className="rise mr-4 space-y-2">
               <div className="flex flex-wrap items-center gap-1.5">
                 {t.routedVia ? (
                   <Badge tone="signal" className="gap-1">
@@ -209,10 +213,10 @@ ${text}` : text));
                 {t.usage && t.usage.total_tokens > 0 && <Badge>{t.usage.total_tokens} tok</Badge>}
               </div>
               {t.attempts && t.attempts.length > 0 && (
-                <p className="font-mono text-[11px] text-amber-400">failover: {t.attempts.join(' -> ')}</p>
+                <p className="text-[12px] text-amber-400">failover: {t.attempts.join(' -> ')}</p>
               )}
               {(t.content || t.pending) && (
-                <div className="whitespace-pre-wrap break-words rounded-xl rounded-bl-sm border border-ink-700/70 bg-ink-900 px-3 py-2 text-sm leading-relaxed text-ink-100">
+                <div className="whitespace-pre-wrap break-words rounded-[20px] rounded-bl-md bg-ink-900 px-4 py-2.5 text-[15px] leading-relaxed ring-1 ring-inset ring-ink-800 text-ink-100">
                   {t.content}
                   {t.pending && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-signal align-middle" />}
                 </div>
@@ -224,8 +228,8 @@ ${text}` : text));
         <div ref={endRef} />
       </div>
 
-      <div className="sticky bottom-0 -mx-4 bg-gradient-to-t from-ink-950 via-ink-950 to-transparent px-4 pb-1 pt-4">
-        <div className="flex items-end gap-2 rounded-xl border border-ink-700 bg-ink-900 p-2">
+      <div className="sticky -mx-4 bg-gradient-to-t from-ink-950 via-ink-950/95 to-transparent px-4 pb-2 pt-4" style={{ bottom: 'calc(var(--nav-h) + var(--safe-bottom) + 8px)' }}>
+        <div className="flex items-end gap-2 rounded-[24px] bg-ink-900 p-1.5 pl-3 ring-1 ring-inset ring-ink-700 focus-within:ring-signal/60">
           <textarea
             ref={inputRef}
             aria-label="Message"
@@ -234,7 +238,7 @@ ${text}` : text));
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKey}
             placeholder="Message the pool"
-            className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent px-2 py-2 text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none"
+            className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-1 py-2.5 text-[16px] text-ink-100 placeholder:text-ink-500 focus:outline-none"
           />
           {busy ? (
             <IconButton icon="stop" label="Stop" onClick={() => abortRef.current?.abort()} className="bg-ink-800 text-danger-400" />

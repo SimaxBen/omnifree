@@ -109,6 +109,31 @@ Lives in the Plugins tab ("Switchboard | Schedules" toggle). Times are UTC 5-fie
 | `DELETE /cron/jobs/{provider}/{id}` | none | 204 | Confirmed in-page. |
 | `POST /cron/jobs/{provider}/{id}/trigger` | none | 202 | "Run now". |
 
+## Personal apps (round 3: `hub_api/routers/{notes,expenses,links,rag,budget}.py`)
+
+Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, tests in `src/lib/__tests__/apps-api.test.ts`.
+
+| method + path | client | used by |
+|---|---|---|
+| `GET /notes?notebook=&q=&limit=` | `notes()` | Notes list (search, notebook chips), Home recent notes, notebook pickers |
+| `POST /notes`, `GET/PATCH/DELETE /notes/{id}` | `createNote()`, `note()`, `updateNote()`, `deleteNote()` | Note editor (autosave 800 ms after the last keystroke: create on first text, then PATCH of changed fields), swipe pin/delete |
+| `POST /notes/voice` (multipart `file`, `mode`, `notebook?`, `language?`) | `voiceNote()` | Voice capture sheet; 422 (empty transcript) is shown with a retry |
+| `GET /tasks?status=&due_before=`, `POST /tasks`, `PATCH/DELETE /tasks/{id}` | `tasks()`, `createTask()`, `updateTask()`, `deleteTask()` | Tasks panel, Home "Up next", tasks linked to a note |
+| `POST /expenses/receipt` (multipart `file`, `note?`) | `scanReceipt()` | Camera capture then review; `confidence: low` is shown as a draft to fill in |
+| `GET /expenses?month=`, `GET /expenses/{id}`, `POST /expenses`, `PATCH/DELETE /expenses/{id}` | `expenses()`, `expense()`, `createExpense()`, `updateExpense()`, `deleteExpense()` | Expenses month view, editor, Home monthly total |
+| `GET/POST /links`, `DELETE /links/{code}` | `links()`, `createLink()`, `deleteLink()` | Links (QR generated client-side in `src/lib/qr.ts`); 409 shows "code taken" |
+| `GET/POST /drops`, `DELETE /drops/{code}` | `drops()`, `createDrop()`, `deleteDrop()` | Drive > Drops, file actions "Share as a drop" |
+| `GET /rag/docs`, `POST /rag/index`, `DELETE /rag/docs/{provider}/{key}`, `POST /rag/ask` | `ragDocs()`, `ragIndex()`, `ragDelete()`, `ragAsk()` | Drive > Ask: one `/rag/index` call per file, in sequence, with per-file progress; a 404 on delete counts as already removed |
+| `GET /budget` | `budget()` | More > Free-tier budget, Home warnings (warn/over items) |
+
+Drive additions used by the redesign:
+
+| method + path | client | notes |
+|---|---|---|
+| `GET /drive/locate/{key}` | `driveLocate()` | Voice-note playback: `audio_key` has no provider, so locate it, then presign. |
+| `GET /drive/presign/{provider}/{key}?expires_s=` | `drivePresign(key, provider, signal, expiresS)` | Thumbnails and previews (image, PDF iframe, audio, video); "Copy a 24-hour link" uses `expires_s=86400`. Text previews download through the hub (files up to 1 MB). |
+| `POST /drive/upload` / `POST /drive/upload-url` with `key` (+ `provider`) | `driveUploadFile()` | The upload sheet sets the final key (sanitised name inside the chosen folder). The hub has no rename/move/copy endpoint, so names and folders can only be chosen at upload time. |
+
 ## WebSocket `/ws`
 
 * URL: `ws(s)://<hub>/ws?types=router.*,quota.*,breaker.*,health.*,registry.*,storage.*,instinct.*,dns.*,compute.*`

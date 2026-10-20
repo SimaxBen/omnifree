@@ -6,32 +6,61 @@
   color-scheme: dark;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
+  --nav-h: 68px;
+  --ease-spring: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --saffron: #ffc24b;
+  --night: #0b0d1e;
 }
 
 html,
 body,
 #root {
   height: 100%;
-  background: #07090d;
+  background: var(--night);
 }
 
 body {
-  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-family: 'Atkinson Hyperlegible Next', 'Atkinson Hyperlegible', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
   -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Subtle grid backdrop: reads as an instrument panel without competing with content. */
-.backdrop-grid {
-  background-image:
-    linear-gradient(rgba(122, 133, 151, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(122, 133, 151, 0.05) 1px, transparent 1px);
-  background-size: 28px 28px;
+h1,
+h2,
+h3,
+.font-display {
+  font-family: 'Bricolage Grotesque', system-ui, sans-serif;
+  font-optical-sizing: auto;
+  letter-spacing: -0.01em;
+}
+
+button,
+[role='button'] {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--saffron);
+  outline-offset: 2px;
 }
 
 .scroll-thin {
   scrollbar-width: thin;
-  scrollbar-color: #323c4e transparent;
+  scrollbar-color: #394075 transparent;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 .pb-safe {
@@ -42,11 +71,180 @@ body {
   padding-top: var(--safe-top);
 }
 
+/* Room for the floating bottom navigation under scrolling content. */
+.pb-nav {
+  padding-bottom: calc(var(--nav-h) + var(--safe-bottom) + 28px);
+}
+
+/* ------------------------------------------------------------------ press feedback */
+
+.press {
+  transition: transform 150ms var(--ease-out), background-color 150ms, color 150ms, opacity 150ms;
+}
+.press:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* ------------------------------------------------------------------ screen + list motion */
+
+@keyframes screen-in-right {
+  from { opacity: 0; transform: translate3d(18px, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes screen-in-left {
+  from { opacity: 0; transform: translate3d(-18px, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes screen-in-up {
+  from { opacity: 0; transform: translate3d(0, 10px, 0); }
+  to { opacity: 1; transform: none; }
+}
+.screen-in-right { animation: screen-in-right 260ms var(--ease-out) both; }
+.screen-in-left { animation: screen-in-left 260ms var(--ease-out) both; }
+.screen-in-up { animation: screen-in-up 240ms var(--ease-out) both; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: none; }
+}
+/* List items: a short stagger set inline through --i (capped by the components). */
+.rise {
+  animation: rise 240ms var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 28ms);
+}
+
+@keyframes pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.pop { animation: pop 280ms var(--ease-spring) both; }
+
+/* ------------------------------------------------------------------ skeletons */
+
+@keyframes shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+.skeleton {
+  background: linear-gradient(100deg, #1c2146 30%, #282e5c 50%, #1c2146 70%) 0 0 / 200% 100%;
+  animation: shimmer 1.3s linear infinite;
+  border-radius: 10px;
+}
+
+/* ------------------------------------------------------------------ sheets */
+
+@keyframes sheet-up {
+  from { transform: translate3d(0, 100%, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+@keyframes sheet-down {
+  from { transform: translate3d(0, var(--drag, 0px), 0); }
+  to { transform: translate3d(0, 100%, 0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.sheet-enter { animation: sheet-up 300ms var(--ease-spring) both; }
+.sheet-exit { animation: sheet-down 200ms var(--ease-out) both; }
+.backdrop-enter { animation: fade-in 220ms var(--ease-out) both; }
+.backdrop-exit { animation: fade-out 200ms var(--ease-out) both; }
+
+/* ------------------------------------------------------------------ capture button */
+
+.capture-btn {
+  transition: transform 300ms var(--ease-spring), box-shadow 220ms var(--ease-out);
+  box-shadow: 0 10px 28px -8px rgba(255, 194, 75, 0.55), 0 0 0 6px var(--night);
+}
+.capture-btn:active {
+  transform: scale(0.9);
+}
+.capture-btn[aria-expanded='true'] svg {
+  transform: rotate(135deg);
+}
+.capture-btn svg {
+  transition: transform 300ms var(--ease-spring);
+}
+
+/* ------------------------------------------------------------------ task check-off */
+
+@keyframes check-fill {
+  0% { transform: scale(0.4); opacity: 0; }
+  70% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes check-draw {
+  from { stroke-dashoffset: 18; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes ring-burst {
+  from { transform: scale(0.8); opacity: 0.7; }
+  to { transform: scale(1.9); opacity: 0; }
+}
+.check-fill { animation: check-fill 260ms var(--ease-spring) both; }
+.check-draw { stroke-dasharray: 18; animation: check-draw 220ms 90ms var(--ease-out) both; }
+.ring-burst { animation: ring-burst 420ms var(--ease-out) both; }
+
+.strike {
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 55%;
+  background-size: 0% 1.5px;
+  transition: background-size 260ms var(--ease-out), color 220ms;
+}
+.strike[data-done='true'] {
+  background-size: 100% 1.5px;
+}
+
+/* ------------------------------------------------------------------ voice recorder */
+
+@keyframes rec-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.35; }
+  50% { transform: scale(1.12); opacity: 0.15; }
+}
+.rec-halo { animation: rec-breathe 1.6s ease-in-out infinite; }
+
+@keyframes dots {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-3px); }
+}
+.dot-wave span { display: inline-block; animation: dots 1s var(--ease-out) infinite; }
+.dot-wave span:nth-child(2) { animation-delay: 120ms; }
+.dot-wave span:nth-child(3) { animation-delay: 240ms; }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spin { animation: spin 0.8s linear infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  .skeleton {
+    animation: none;
+  }
 }
+
+/* Receipt scan: a saffron line sweeping down the photo while the vision model reads it. */
+@keyframes receipt-scan {
+  0% { top: -4rem; }
+  100% { top: 100%; }
+}
+.receipt-scan { animation: receipt-scan 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate; }
+
+/* Pull-to-refresh arc. */
+.ptr-arc { transition: transform 220ms var(--ease-spring), opacity 150ms; }
+
+/* Nav indicator blob. */
+.nav-blob { transition: left 340ms var(--ease-spring); }

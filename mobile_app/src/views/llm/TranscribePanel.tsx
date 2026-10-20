@@ -23,7 +23,7 @@ function canRecord(): boolean {
 }
 
 /** Speech to text through `POST /llm/transcribe`; the text can be copied or dropped into the chat input. */
-export default function TranscribePanel({ onSend, onClose }: { onSend: (text: string) => void; onClose: () => void }) {
+export default function TranscribePanel({ onSend, onClose }: { onSend: (text: string) => void; onClose?: () => void }) {
   const { client, notify } = useHub();
   const [clip, setClip] = useState<Clip | null>(null);
   const [language, setLanguage] = useState('');
@@ -124,8 +124,8 @@ export default function TranscribePanel({ onSend, onClose }: { onSend: (text: st
   return (
     <Card className="space-y-3 p-3">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-400">Transcribe</h3>
-        <IconButton icon="x" label="Close transcribe" onClick={onClose} className="h-8 w-8" />
+        <h3 className="font-display text-[17px] font-semibold text-ink-100">Speech to text</h3>
+        {onClose && <IconButton icon="x" label="Close transcribe" onClick={onClose} />}
       </div>
 
       <div className="flex flex-wrap gap-2">
