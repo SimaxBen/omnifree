@@ -7,6 +7,31 @@ import { readSSE } from './sse';
 import type {
   AgentTask,
   AgentTaskCreate,
+  BudgetItem,
+  BudgetReport,
+  Drop,
+  DropCreate,
+  Expense,
+  ExpenseCreate,
+  ExpenseListing,
+  ExpensePatch,
+  Note,
+  NotebookCount,
+  NoteCreate,
+  NoteListing,
+  NotePatch,
+  RagAnswer,
+  RagAskRequest,
+  RagDoc,
+  RagDocListing,
+  ReceiptResult,
+  ShortLink,
+  ShortLinkCreate,
+  Task,
+  TaskCreate,
+  TaskPatch,
+  VoiceMode,
+  VoiceNoteResult,
   ChatChunk,
   ChatRequest,
   ChatResponse,
@@ -421,6 +446,8 @@ export class HubClient {
         size: file.size,
         content_type: file.type || 'application/octet-stream',
         ...(opts.prefix ? { prefix: opts.prefix } : {}),
+        ...(opts.key ? { key: opts.key } : {}),
+        ...(opts.provider ? { provider: opts.provider } : {}),
       });
     } catch (err) {
       if (err instanceof HubError && [404, 405, 422, 501].includes(err.status)) {
@@ -433,8 +460,14 @@ export class HubClient {
   }
 
   /** `GET /drive/presign/{provider}/{key}`: a short-lived URL that serves the object without the hub. */
-  drivePresign(key: string, provider: string, signal?: AbortSignal): Promise<PresignedUrl> {
-    return this.request<PresignedUrl>('GET', driveObjectPath(provider, key, '/drive/presign'), { signal });
+  drivePresign(key: string, provider: string, signal?: AbortSignal, expiresS?: number): Promise<PresignedUrl> {
+    return this.request<PresignedUrl>('GET', driveObjectPath(provider, key, '/drive/presign'), { signal, query: { expires_s: expiresS } });
+  }
+
+  /** `GET /drive/locate/{key}`: which backend holds `key` (used for voice-note audio, stored without a provider). */
+  driveLocate(key: string, signal?: AbortSignal): Promise<StoredObject> {
+    const segments = key.split('/').filter(Boolean).map(encodeURIComponent);
+    return this.request<StoredObject>('GET', `/drive/locate/${segments.join('/')}`, { signal });
   }
 
   async driveDownload(key: string, provider: string): Promise<Blob> {
@@ -537,6 +570,167 @@ export class HubClient {
 
   resetPlugin(name: string): Promise<unknown> {
     return this.request('POST', `/plugins/${encodeURIComponent(name)}/reset`);
+  }
+
+  // ------------------------------------------------------------------ notes & tasks
+
+  async notes(params: { notebook?: string; q?: string; limit?: number } = {}, signal?: AbortSignal): Promise<NoteListing> {
+    const body = await this.request<unknown>('GET', '/notes', { query: { notebook: params.notebook, q: params.q?.trim(), limit: params.limit }, signal });
+    return {
+      notes: listOf<Note>(body, 'notes'),
+      notebooks: isRecord(body) && Array.isArray(body.notebooks) ? (body.notebooks as NotebookCount[]) : [],
+    };
+  }
+
+  note(id: string, signal?: AbortSignal): Promise<Note> {
+    return this.request<Note>('GET', `/notes/${encodeURIComponent(id)}`, { signal });
+  }
+
+  createNote(note: NoteCreate): Promise<Note> {
+    return this.request<Note>('POST', '/notes', { json: note });
+  }
+
+  updateNote(id: string, patch: NotePatch, signal?: AbortSignal): Promise<Note> {
+    return this.request<Note>('PATCH', `/notes/${encodeURIComponent(id)}`, { json: patch, signal });
+  }
+
+  deleteNote(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/notes/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /notes/voice` (multipart): audio in, transcript + note and/or tasks out. */
+  voiceNote(
+    audio: Blob,
+    opts: { mode?: VoiceMode; notebook?: string; language?: string; filename?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<VoiceNoteResult> {
+    const form = new FormData();
+    const name = opts.filename ?? (typeof File !== 'undefined' && audio instanceof File ? audio.name : 'voice.webm');
+    form.append('file', audio, name);
+    form.append('mode', opts.mode ?? 'auto');
+    if (opts.notebook) form.append('notebook', opts.notebook);
+    if (opts.language) form.append('language', opts.language);
+    return this.request<VoiceNoteResult>('POST', '/notes/voice', { form, signal });
+  }
+
+  async tasks(params: { status?: 'open' | 'done' | 'all'; due_before?: string } = {}, signal?: AbortSignal): Promise<Task[]> {
+    const body = await this.request<unknown>('GET', '/tasks', { query: { status: params.status, due_before: params.due_before }, signal });
+    return listOf<Task>(body, 'tasks');
+  }
+
+  createTask(task: TaskCreate): Promise<Task> {
+    return this.request<Task>('POST', '/tasks', { json: task });
+  }
+
+  updateTask(id: string, patch: TaskPatch): Promise<Task> {
+    return this.request<Task>('PATCH', `/tasks/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteTask(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/tasks/${encodeURIComponent(id)}`);
+  }
+
+  // ------------------------------------------------------------------ expenses
+
+  /** `POST /expenses/receipt` (multipart): a receipt photo read by a vision model. */
+  scanReceipt(image: Blob, opts: { note?: string; filename?: string } = {}, signal?: AbortSignal): Promise<ReceiptResult> {
+    const form = new FormData();
+    const name = opts.filename ?? (typeof File !== 'undefined' && image instanceof File ? image.name : 'receipt.jpg');
+    form.append('file', image, name);
+    if (opts.note) form.append('note', opts.note);
+    return this.request<ReceiptResult>('POST', '/expenses/receipt', { form, signal });
+  }
+
+  async expenses(month?: string, signal?: AbortSignal): Promise<ExpenseListing> {
+    const body = await this.request<unknown>('GET', '/expenses', { query: { month }, signal });
+    const s = isRecord(body) && isRecord(body.summary) ? body.summary : {};
+    return {
+      expenses: listOf<Expense>(body, 'expenses'),
+      summary: {
+        total_by_currency: (isRecord(s.total_by_currency) ? s.total_by_currency : {}) as Record<string, number>,
+        by_category: (isRecord(s.by_category) ? s.by_category : {}) as Record<string, Record<string, number>>,
+        count: typeof s.count === 'number' ? s.count : 0,
+      },
+    };
+  }
+
+  expense(id: string, signal?: AbortSignal): Promise<Expense> {
+    return this.request<Expense>('GET', `/expenses/${encodeURIComponent(id)}`, { signal });
+  }
+
+  createExpense(expense: ExpenseCreate): Promise<Expense> {
+    return this.request<Expense>('POST', '/expenses', { json: expense });
+  }
+
+  updateExpense(id: string, patch: ExpensePatch): Promise<Expense> {
+    return this.request<Expense>('PATCH', `/expenses/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteExpense(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/expenses/${encodeURIComponent(id)}`);
+  }
+
+  // ------------------------------------------------------------------ short links & drops
+
+  async links(signal?: AbortSignal): Promise<ShortLink[]> {
+    return listOf<ShortLink>(await this.request<unknown>('GET', '/links', { signal }), 'links');
+  }
+
+  createLink(link: ShortLinkCreate): Promise<ShortLink> {
+    return this.request<ShortLink>('POST', '/links', { json: link });
+  }
+
+  deleteLink(code: string): Promise<void> {
+    return this.request<void>('DELETE', `/links/${encodeURIComponent(code)}`);
+  }
+
+  async drops(signal?: AbortSignal): Promise<Drop[]> {
+    return listOf<Drop>(await this.request<unknown>('GET', '/drops', { signal }), 'drops');
+  }
+
+  createDrop(drop: DropCreate): Promise<Drop> {
+    return this.request<Drop>('POST', '/drops', { json: drop });
+  }
+
+  deleteDrop(code: string): Promise<void> {
+    return this.request<void>('DELETE', `/drops/${encodeURIComponent(code)}`);
+  }
+
+  // ------------------------------------------------------------------ ask my drive (RAG)
+
+  async ragDocs(signal?: AbortSignal): Promise<RagDocListing> {
+    const body = await this.request<unknown>('GET', '/rag/docs', { signal });
+    return {
+      docs: listOf<RagDoc>(body, 'docs'),
+      embedding_model: isRecord(body) && typeof body.embedding_model === 'string' ? body.embedding_model : '',
+    };
+  }
+
+  /** `POST /rag/index`: one file per call (the hub has ~60 s per request). */
+  async ragIndex(provider: string, key: string, signal?: AbortSignal): Promise<RagDoc> {
+    const body = await this.request<{ doc: RagDoc }>('POST', '/rag/index', { json: { provider, key }, signal });
+    return body.doc;
+  }
+
+  ragDelete(provider: string, key: string): Promise<void> {
+    return this.request<void>('DELETE', driveObjectPath(provider, key, '/rag/docs'));
+  }
+
+  ragAsk(req: RagAskRequest, signal?: AbortSignal): Promise<RagAnswer> {
+    return this.request<RagAnswer>('POST', '/rag/ask', { json: req, signal });
+  }
+
+  // ------------------------------------------------------------------ free-tier budget
+
+  async budget(signal?: AbortSignal): Promise<BudgetReport> {
+    const body = await this.request<unknown>('GET', '/budget', { signal });
+    const s = isRecord(body) && isRecord(body.summary) ? body.summary : {};
+    const n = (k: string) => (typeof s[k] === 'number' ? (s[k] as number) : 0);
+    return {
+      generated_at: isRecord(body) && typeof body.generated_at === 'string' ? body.generated_at : '',
+      items: listOf<BudgetItem>(body, 'items'),
+      summary: { ok: n('ok'), warn: n('warn'), over: n('over'), unknown: n('unknown') },
+    };
   }
 }
 

@@ -3,6 +3,7 @@ import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, QuotaBar, Secti
 import { cellText, formatBytes, formatMs, formatNumber } from '../lib/format';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import { readPref, writePref } from '../lib/settings';
+import { useConfirm } from '../components/Sheet';
 import type { DBProvider, QueryResult, TableInfo } from '../lib/types';
 
 /** Starter statement for a table in the provider's native query language (see CONTRACT.md section 2). */
@@ -24,6 +25,7 @@ function templateFor(provider: DBProvider | undefined, table: TableInfo): string
 
 export default function DatabaseView() {
   const { client, notify } = useHub();
+  const confirm = useConfirm();
   const providers = useHubData((c, s) => c.dbProviders(s));
   const [provider, setProvider] = useState<string>(() => readPref('db.provider', ''));
   const [statement, setStatement] = useState('');
@@ -66,7 +68,7 @@ export default function DatabaseView() {
 
   const run = async () => {
     if (!statement.trim() || !provider || running) return;
-    if (write && !window.confirm(`Run a write statement against ${provider}?`)) return;
+    if (write && !(await confirm({ title: 'Run a write statement?', body: `This changes data in ${provider}.`, confirmLabel: 'Run it', tone: 'danger' }))) return;
     setRunning(true);
     setQueryError(null);
     try {

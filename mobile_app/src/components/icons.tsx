@@ -29,6 +29,36 @@ const PATHS = {
   plus: 'M12 5v14 M5 12h14',
   copy: 'M9 9h11v11H9z M5 15H4V4h11v1',
   mic: 'M12 3a3 3 0 013 3v5a3 3 0 01-6 0V6a3 3 0 013-3z M5 11a7 7 0 0014 0 M12 18v3',
+  home: 'M4 11l8-7 8 7v9h-5v-6H9v6H4v-9z',
+  note: 'M6 3h9l4 4v14H6V3z M14 3v5h5 M9 12h7 M9 16h5',
+  check: 'M5 12.5l4.5 4.5L19 7.5',
+  circle: 'M12 3a9 9 0 110 18 9 9 0 010-18z',
+  camera: 'M4 8h3l2-3h6l2 3h3v11H4V8z M12 10a3.5 3.5 0 110 7 3.5 3.5 0 010-7z',
+  receipt: 'M6 3h12v18l-3-2-3 2-3-2-3 2V3z M9 8h6 M9 12h6 M9 16h3',
+  link: 'M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1 M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1',
+  qr: 'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h2v2h-2z M18 18h2v2h-2z M14 18h2 M18 14h2',
+  left: 'M15 5l-7 7 7 7',
+  right: 'M9 5l7 7-7 7',
+  grid: 'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z',
+  pin: 'M9 4h6l-1 6 3 3H7l3-3-1-6z M12 13v7',
+  tag: 'M3 12V4h8l9 9-8 8-9-9z M7.5 7.5h.01',
+  wallet: 'M4 7h15v12H4V7z M4 7l11-3v3 M15 13h4',
+  spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z',
+  folder: 'M3 6h6l2 2h10v11H3V6z',
+  file: 'M6 3h9l4 4v14H6V3z M14 3v5h5',
+  lock: 'M6 11h12v9H6v-9z M8 11V8a4 4 0 018 0v3',
+  eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 110 6 3 3 0 010-6z',
+  edit: 'M4 20h4L19 9l-4-4L4 16v4z M13 7l4 4',
+  book: 'M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2V5z M4 19a2 2 0 012-2h13',
+  calendar: 'M4 6h16v14H4V6z M4 10h16 M8 3v5 M16 3v5',
+  flag: 'M5 21V4 M5 4h12l-2 4 2 4H5',
+  gauge: 'M4 16a8 8 0 1116 0 M12 16l4-5',
+  external: 'M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6',
+  share: 'M12 15V3 M7 8l5-5 5 5 M5 12v8h14v-8',
+  more: 'M5 12h.01 M12 12h.01 M19 12h.01',
+  chart: 'M4 20V10 M10 20V4 M16 20v-7 M3 20h18',
+  wave: 'M3 12h2 M7 8v8 M11 5v14 M15 9v6 M19 11v2',
+  undo: 'M9 14L4 9l5-5 M4 9h10a6 6 0 010 12h-3',
 } as const;
 
 export type IconName = keyof typeof PATHS;
@@ -41,7 +71,7 @@ export function Icon({ name, size = 20, ...rest }: { name: IconName; size?: numb
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.7}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
