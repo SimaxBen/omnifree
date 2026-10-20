@@ -505,6 +505,14 @@ async def _process(
     fields["note"] = f"{note} ({sender}mailbox {meta['mailbox']})"[:5000]
     fields["source"] = "email"
     fields["source_ref"] = meta["ref"]
+    # One purchase often sends several emails (order, payment and exchange summaries): same merchant,
+    # amount, currency and day as an expense already recorded -> treat it as the same purchase.
+    same = await db.fetch(
+        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ? AND lower(merchant) = lower(?) LIMIT 1",
+        [fields["date"], fields["total"], fields["currency"], fields["merchant"]],
+    )
+    if same:
+        return None, f"same purchase as expense {same[0]['id']}"
     if dry_run:
         return {**fields, "id": None, "receipt_key": None, "created_at": None}, None
     if attachment is not None:

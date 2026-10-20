@@ -683,7 +683,19 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             for group in ("secrets", "optional_secrets"):
                 for key in (spec.get(group) or {}).values():
                     names[str(key)] = None
+        # Email receipt import (hub_api/routers/inbox.py): the account list plus each account's password key.
+        names.update(dict.fromkeys(("INBOX_ACCOUNTS", "GMAIL_IMAP_USER", "GMAIL_APP_PASSWORD")))
+        names.update(dict.fromkeys(self._inbox_password_keys()))
         return [n for n in names if n not in self._HF_SECRET_DENYLIST]
+
+    def _inbox_password_keys(self) -> list[str]:
+        try:
+            entries = json.loads(self.optional("INBOX_ACCOUNTS") or "[]")
+        except ValueError:
+            return []
+        if not isinstance(entries, list):
+            return []
+        return [str(e["password_key"]).strip() for e in entries if isinstance(e, dict) and e.get("password_key")]
 
     def _hf_space_dir(self, target: Path) -> Path:
         import shutil

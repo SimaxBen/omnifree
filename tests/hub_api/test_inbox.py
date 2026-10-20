@@ -231,6 +231,19 @@ def test_sync_creates_expenses_and_dedupes(app_hub, _env) -> None:
     assert app_hub.get("/expenses", params={"month": "2026-10"}).json()["summary"]["count"] == 4
 
 
+def test_several_emails_of_one_purchase_make_one_expense(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    oncf = {uid: _mail(f"oncf-{uid}@oncf.ma", subject, "ONCF <oncf-voyages@oncf.ma>", text="Total 100 MAD")
+            for uid, subject in (("1", "Purchase summary"), ("2", "Payment summary"), ("3", "Confirmation of exchange"))}
+    monkeypatch.setattr(inbox_mod, "imap_factory", lambda host, port, timeout: FakeIMAP(dict(oncf)))
+    ticket = {"is_receipt": True, "merchant": "ONCF", "date": "2026-10-13", "total": 100, "currency": "MAD", "category": "transport"}
+    fa.CHAT_SCRIPT["groq"].extend([json.dumps(ticket), json.dumps({**ticket, "merchant": "oncf"}), json.dumps(ticket)])
+    out = app_hub.post("/inbox/receipts/sync", json={}).json()
+    assert out["matched"] == 1 and len(out["created"]) == 1
+    first = out["created"][0]["id"]
+    assert [s["reason"] for s in out["skipped"]] == [f"same purchase as expense {first}"] * 2
+    assert app_hub.get("/expenses", params={"month": "2026-10"}).json()["summary"]["count"] == 1
+
+
 def test_dry_run_writes_nothing(app_hub) -> None:
     _script_all()
     out = app_hub.post("/inbox/receipts/sync", json={"dry_run": True}).json()
@@ -361,10 +374,10 @@ def test_multi_account_sync_isolates_failures(app_hub, multi) -> None:
     by_name = {a["name"]: a for a in out["accounts"]}
     assert set(by_name) == {"perso", "ilyas", "work"}
     assert "login failed" in by_name["ilyas"]["error"] and by_name["ilyas"]["created"] == 0
-    assert by_name["perso"]["created"] == 1 and by_name["work"]["created"] == 1
-    # The same Message-ID in two mailboxes is two expenses (dedupe is per mailbox).
-    refs = sorted(e["source_ref"] for e in out["created"])
-    assert refs == ["iouhnine@bidtndr.com#same@inwi.ma", "simaxhah@gmail.com#same@inwi.ma"]
+    # The same receipt reaching two mailboxes is read in both, but recorded once (same purchase).
+    assert by_name["perso"]["created"] + by_name["work"]["created"] == 1
+    assert len(out["created"]) == 1 and out["created"][0]["source_ref"].endswith("#same@inwi.ma")
+    assert [s["reason"] for s in out["skipped"]] == [f"same purchase as expense {out['created'][0]['id']}"]
     assert out["errors"] == [{"account": "ilyas", "message_id": None, "error": by_name["ilyas"]["error"]}]
 
     # Gmail hosts search with X-GM-RAW in All Mail; the custom host with standard IMAP SEARCH in INBOX.
@@ -387,7 +400,7 @@ def test_multi_account_sync_isolates_failures(app_hub, multi) -> None:
     multi.clear()
     again = app_hub.post("/inbox/receipts/sync", json={}).json()
     assert [a["name"] for a in again["accounts"]][0] == "ilyas"
-    assert again["created"] == [] and {s["reason"] for s in again["skipped"]} == {"already imported"}
+    assert again["created"] == [] and {s["reason"] for s in again["skipped"]} <= {"already imported", "already processed"}
 
 
 def test_sync_one_account_and_config_problems(app_hub, multi, monkeypatch: pytest.MonkeyPatch) -> None:
