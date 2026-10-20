@@ -19,7 +19,7 @@ from core.registry import PluginRegistry
 from core.router import SmartRouter
 from hub_api.auth import require_token
 from hub_api.errors import install_error_handlers
-from hub_api.routers import agent, compute, cron, db, dns, drive, llm, plugins, ws
+from hub_api.routers import agent, compute, cron, db, dns, drive, expenses, links, llm, notes, plugins, ws
 from hub_api.routers.llm import ROUTED_VIA_HEADER
 from hub_api.settings import HubSettings
 from hub_api.state import HubState
@@ -133,6 +133,9 @@ def create_app(
     protected = [Depends(require_token)]
     for module in (llm, agent, drive, dns, db, plugins, compute, cron):
         app.include_router(module.router, dependencies=protected)
+    for module in (notes, expenses, links):  # personal apps (data in D1)
+        app.include_router(module.router, dependencies=protected)
+    app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)
 
     @app.get("/events/recent", tags=["meta"], dependencies=protected)
     async def recent_events(limit: int = 100, types: str | None = None) -> list[dict[str, Any]]:

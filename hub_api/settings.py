@@ -40,6 +40,11 @@ class HubSettings(BaseSettings):
     db_max_rows: int = 1000
     db_timeout_s: float = 30.0
 
+    # Personal apps (notes, tasks, expenses, links, drops): DB plugin holding their tables,
+    # and the public origin used to build short-link / file-drop URLs.
+    apps_db_provider: str = "cloudflare_d1"
+    public_base_url: str = "https://api.ilyasouhnine.tech"
+
     # Network page: name of the compute plugin listing Tailscale nodes.
     tailscale_provider: str = "tailscale"
 
