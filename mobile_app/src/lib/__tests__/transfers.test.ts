@@ -244,9 +244,9 @@ describe('llm audio and rerank', () => {
       vi.fn(async (url: string, init: RequestInit) => {
         expect(url).toBe('https://edge.example/api/llm/rerank');
         expect(JSON.parse(init.body as string)).toEqual({ query: 'cats', documents: ['dogs', 'cats'], top_n: 1 });
-        return json({ results: [{ index: 1, score: 0.93, document: 'cats' }] });
+        return json({ results: [{ index: 1, relevance_score: 0.93, document: 'cats' }] });
       }),
     );
-    expect(await client.rerank({ query: 'cats', documents: ['dogs', 'cats'], top_n: 1 })).toEqual([{ index: 1, score: 0.93, document: 'cats' }]);
+    expect(await client.rerank({ query: 'cats', documents: ['dogs', 'cats'], top_n: 1 })).toEqual([{ index: 1, relevance_score: 0.93, document: 'cats' }]);
   });
 });

@@ -292,6 +292,7 @@ export interface RerankRequest {
 
 export interface RerankResult {
   index: number;
-  score: number;
+  /** Hub field name (core.interfaces.RerankResult). */
+  relevance_score: number;
   document?: string;
 }
