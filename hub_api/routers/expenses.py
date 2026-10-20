@@ -376,6 +376,7 @@ async def scan_receipt(
                 ],
             ),
         ],
+        model=state.hub.receipt_model or None,
         temperature=0.0,
         response_format={"type": "json_object"},
     )

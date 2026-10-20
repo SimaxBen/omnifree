@@ -56,6 +56,10 @@ class HubSettings(BaseSettings):
     # Agent screenshots kept in memory per task (latest frame served over HTTP).
     agent_task_cache: int = 100
 
+    # Receipt reading: a fast vision model. The default thinking models (gemini-flash-latest) take 60-90 s on an
+    # image, past the 60 s serverless limit; flash-lite reads a receipt in ~1 s.
+    receipt_model: str = "gemini-flash-lite-latest"
+
     # Allow PATCH /plugins/{name}/settings to change endpoint/TLS keys (base_url, verify_tls ...).
     allow_endpoint_settings: bool = False
 
