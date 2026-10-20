@@ -14,6 +14,7 @@ from core.config import Settings
 from core.events import EventBus
 from core.registry import PluginRegistry
 from core.router import SmartRouter
+from core.shared_state import RedisOverridesStore, UpstashRest, shared_state_from_settings
 from hub_api.settings import HUB_TOKEN_FALLBACK_KEY, INSTINCT_TOKEN_KEY, HubSettings
 
 __all__ = ["HubState", "InstinctClient", "AgentCache", "get_state", "get_ws_state"]
@@ -123,6 +124,7 @@ class HubState:
     router: SmartRouter
     instinct: InstinctClient
     agent_cache: AgentCache
+    shared_state: UpstashRest | None = None  # Upstash client when Settings.state_backend == "upstash"
 
     def hub_token(self) -> str | None:
         return self.settings.hub_token() or self.settings.secret(HUB_TOKEN_FALLBACK_KEY)
@@ -137,14 +139,19 @@ class HubState:
         registry: PluginRegistry | None = None,
         router: SmartRouter | None = None,
         instinct_transport: httpx.AsyncBaseTransport | None = None,
+        state_transport: httpx.AsyncBaseTransport | None = None,
     ) -> HubState:
-        from core.quota import QuotaStore
+        from core.quota import build_quota_store
 
-        bus = bus or (registry.bus if registry is not None else EventBus())
+        shared = shared_state_from_settings(settings, transport=state_transport)
+        bus = bus or (registry.bus if registry is not None else EventBus(shared=shared))
         if registry is None:
-            registry = PluginRegistry.from_file(settings.providers_path, secret_lookup=settings.secret, bus=bus)
+            overrides = RedisOverridesStore(shared) if shared is not None else None
+            registry = PluginRegistry.from_file(
+                settings.providers_path, secret_lookup=settings.secret, bus=bus, overrides=overrides
+            )
         if router is None:
-            router = SmartRouter(registry, QuotaStore(settings.quota_db_path), bus)
+            router = SmartRouter(registry, build_quota_store(settings, shared), bus)
         instinct = InstinctClient(
             hub.instinct_url,
             settings.secret(INSTINCT_TOKEN_KEY),
@@ -159,6 +166,7 @@ class HubState:
             router=router,
             instinct=instinct,
             agent_cache=AgentCache(hub.agent_task_cache),
+            shared_state=shared,
         )
 
 

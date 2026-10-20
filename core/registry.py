@@ -5,19 +5,23 @@
 * Imports adapter classes lazily (``importlib``) on first use and caches one
   instance per plugin name.
 * Supports runtime enable/disable/reorder/settings changes, persisted back to
-  the YAML file atomically (temp file + ``os.replace``).
+  the YAML file atomically (temp file + ``os.replace``) -- or, when an
+  ``OverridesStore`` is configured (shared Upstash state, read-only serverless
+  filesystems), to an overrides document (enabled flags, priorities, settings
+  patches) that ``apply_overrides()`` layers on top of the YAML at startup/reload.
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import os
 import re
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 import yaml
@@ -41,7 +45,10 @@ __all__ = [
     "RegistryConfig",
     "PluginRegistry",
     "SecretLookup",
+    "OverridesStore",
 ]
+
+log = logging.getLogger("omnifree.registry")
 
 SecretLookup = Callable[[str], str | None]
 
@@ -149,6 +156,26 @@ class RegistryConfig(BaseModel):
         return out
 
 
+class OverridesStore(Protocol):
+    """Where runtime changes are persisted instead of providers.yaml (e.g. RedisOverridesStore).
+
+    Document shape: ``{"plugins": {name: {"enabled": bool, "priority": int, "settings": {key: value|None}}}}``
+    where a ``None`` settings value deletes the key from the YAML settings.
+    """
+
+    async def load(self) -> dict[str, Any]: ...
+
+    async def save(self, doc: dict[str, Any]) -> None: ...
+
+
+def _override_entry(doc: dict[str, Any], name: str) -> dict[str, Any]:
+    plugins = doc.setdefault("plugins", {})
+    entry = plugins.get(name)
+    if not isinstance(entry, dict):
+        entry = plugins[name] = {}
+    return entry
+
+
 class PluginRegistry:
     def __init__(
         self,
@@ -157,8 +184,10 @@ class PluginRegistry:
         secret_lookup: SecretLookup | None = None,
         bus: EventBus | None = None,
         transport_factory: Callable[[PluginSpec], httpx.AsyncBaseTransport | None] | None = None,
+        overrides: OverridesStore | None = None,
     ) -> None:
         self.path = Path(path)
+        self.overrides = overrides
         self.secret_lookup: SecretLookup = secret_lookup or (lambda _key: None)
         self.bus = bus or EventBus()
         self.transport_factory = transport_factory
@@ -188,7 +217,61 @@ class PluginRegistry:
             await self._close_instances()
             self.load()
             self._load_errors.clear()
+            await self._apply_overrides_locked()
         self.bus.publish(EventType.REGISTRY_RELOADED, count=len(self.config.plugins))
+
+    async def apply_overrides(self) -> None:
+        """Layer the persisted overrides document (if any) on top of the YAML-loaded specs."""
+        async with self._lock:
+            await self._apply_overrides_locked()
+
+    async def _apply_overrides_locked(self) -> None:
+        if self.overrides is None:
+            return
+        try:
+            doc = await self.overrides.load()
+        except Exception as exc:  # the YAML config stays usable when the store is down
+            log.warning("registry overrides unavailable, using %s as is: %s", self.path, exc)
+            return
+        plugins = doc.get("plugins")
+        if not isinstance(plugins, dict):
+            return
+        for name, entry in plugins.items():
+            spec = self.config.plugins.get(name)
+            if spec is None or not isinstance(entry, dict):
+                continue
+            await self._apply_entry(spec, entry)
+
+    async def _apply_entry(self, spec: PluginSpec, entry: dict[str, Any]) -> None:
+        changed = False
+        if isinstance(entry.get("enabled"), bool):
+            changed |= spec.enabled != entry["enabled"]
+            spec.enabled = entry["enabled"]
+        if isinstance(entry.get("priority"), int):
+            spec.priority = entry["priority"]
+        settings = entry.get("settings")
+        if isinstance(settings, dict) and settings:
+            self._merge_settings(spec, settings)
+            changed = True
+        if changed:
+            await self._drop_instance(spec.name)
+
+    @staticmethod
+    def _merge_settings(spec: PluginSpec, patch: Mapping[str, Any]) -> None:
+        for key, value in patch.items():
+            if value is None:
+                spec.settings.pop(key, None)
+            else:
+                spec.settings[key] = value
+
+    async def _persist(self, mutate: Callable[[dict[str, Any]], None]) -> None:
+        """Write a change: overrides document when configured (read-modify-write), else the YAML."""
+        if self.overrides is None:
+            self.save()
+            return
+        doc = await self.overrides.load()
+        mutate(doc)
+        await self.overrides.save(doc)
 
     # ------------------------------------------------------------------ queries
     @property
@@ -345,7 +428,7 @@ class PluginRegistry:
             if not enabled:
                 await self._drop_instance(name)
             if persist:
-                self.save()
+                await self._persist(lambda doc: _override_entry(doc, name).update(enabled=enabled))
         self.bus.publish(
             EventType.PLUGIN_ENABLED if enabled else EventType.PLUGIN_DISABLED,
             provider=name,
@@ -358,7 +441,7 @@ class PluginRegistry:
             spec = self.spec(name)
             spec.priority = int(priority)
             if persist:
-                self.save()
+                await self._persist(lambda doc: _override_entry(doc, name).update(priority=spec.priority))
         self.bus.publish(EventType.CHAIN_REORDERED, kind=spec.kind, chain=self.chain(spec.kind))
         return spec
 
@@ -381,7 +464,9 @@ class PluginRegistry:
             for idx, spec in enumerate(ordered, start=1):
                 spec.priority = idx * 10
             if persist:
-                self.save()
+                await self._persist(
+                    lambda doc: [_override_entry(doc, s.name).update(priority=s.priority) for s in ordered]
+                )
         chain = self.chain(kind)
         self.bus.publish(EventType.CHAIN_REORDERED, kind=kind, chain=chain)
         return chain
@@ -392,14 +477,12 @@ class PluginRegistry:
         """Shallow-merge ``patch`` into settings (None deletes a key); re-instantiates."""
         async with self._lock:
             spec = self.spec(name)
-            for key, value in patch.items():
-                if value is None:
-                    spec.settings.pop(key, None)
-                else:
-                    spec.settings[key] = value
+            self._merge_settings(spec, patch)
             await self._drop_instance(name)
             if persist:
-                self.save()
+                await self._persist(
+                    lambda doc: _override_entry(doc, name).setdefault("settings", {}).update(dict(patch))
+                )
         self.bus.publish(EventType.PLUGIN_UPDATED, provider=name, kind=spec.kind)
         return spec
 

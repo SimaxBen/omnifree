@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import Settings, get_settings
@@ -61,6 +61,7 @@ def create_app(
     registry: PluginRegistry | None = None,
     router: SmartRouter | None = None,
     instinct_transport: httpx.AsyncBaseTransport | None = None,
+    state_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """Build the hub. Everything is injectable for tests; production uses the defaults.
 
@@ -71,7 +72,13 @@ def create_app(
     hub_settings = hub_settings or HubSettings()
     logging.basicConfig(level=settings.log_level.upper())
     state = HubState.build(
-        settings, hub_settings, bus=bus, registry=registry, router=router, instinct_transport=instinct_transport
+        settings,
+        hub_settings,
+        bus=bus,
+        registry=registry,
+        router=router,
+        instinct_transport=instinct_transport,
+        state_transport=state_transport,
     )
 
     @asynccontextmanager
@@ -92,6 +99,9 @@ def create_app(
                     await health_task
             await state.instinct.close()
             await state.router.close()
+            await state.bus.flush()
+            if state.shared_state is not None:
+                await state.shared_state.aclose()
 
     production = settings.environment == "production"
     app = FastAPI(
@@ -127,7 +137,20 @@ def create_app(
     @app.get("/events/recent", tags=["meta"], dependencies=protected)
     async def recent_events(limit: int = 100, types: str | None = None) -> list[dict[str, Any]]:
         patterns = [t for t in (types or "").split(",") if t.strip()] or None
-        return [e.model_dump(mode="json") for e in state.bus.recent(min(max(limit, 1), 500), patterns)]
+        events = await state.bus.fetch_recent(min(max(limit, 1), 500), patterns)
+        return [e.model_dump(mode="json") for e in events]
+
+    if state.bus.shared is not None:
+
+        @app.middleware("http")
+        async def _flush_shared_events(
+            request: Request, call_next: Callable[[Request], Awaitable[Response]]
+        ) -> Response:
+            # Serverless instances may be frozen right after the response: push this request's
+            # events to the shared list first (bounded wait, errors are swallowed by the bus).
+            response = await call_next(request)
+            await state.bus.flush()
+            return response
 
     app.include_router(ws.router)  # authenticates itself (query token / subprotocol)
     return app
