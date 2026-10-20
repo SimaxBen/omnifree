@@ -90,7 +90,10 @@ export default function ConnectClaudeView() {
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-ink-950 p-3 font-mono text-[12.5px] leading-relaxed text-ink-100">
             {snippet}
           </pre>
-          <Toggle checked={withToken} onChange={setWithToken} label="Insert my hub token" disabled={!settings.token} />
+          <div className="flex items-center justify-between gap-3 text-sm text-ink-200">
+            <span>Insert my hub token</span>
+            <Toggle checked={withToken} onChange={setWithToken} label="Insert my hub token" disabled={!settings.token} />
+          </div>
           <p className="text-xs text-ink-400">
             {withToken
               ? 'The hub token opens the whole hub. It is fine on your own computer, but never paste it into a shared file or a repo.'
