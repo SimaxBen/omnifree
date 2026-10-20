@@ -33,13 +33,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt asyncpg motor pymongo
-      - name: Install pg_dump 17 (matches Neon / Supabase server versions)
+      - name: Install pg_dump 18 (newer pg_dump can dump older servers; Neon runs 18)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
-          sudo apt-get install -y -qq postgresql-client-17
-          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y -qq postgresql-client-18
+          echo "/usr/lib/postgresql/18/bin" >> "$GITHUB_PATH"
       - name: Restore encrypted vault
         env:
           VAULT_B64: ${{ secrets.OMNIFREE_ENV_VAULT_B64 }}
