@@ -4,6 +4,7 @@ import { Badge, ListRow, riseStyle } from '../components/ui';
 import { useHub, useHubData } from '../lib/hub';
 import { useNav } from '../lib/nav';
 import BudgetView from './BudgetView';
+import ConnectClaudeView from './ConnectClaudeView';
 import DatabaseView from './DatabaseView';
 import ExpensesView from './money/ExpensesView';
 import LinksView from './LinksView';
@@ -31,6 +32,7 @@ export const MORE_PAGES: MorePage[] = [
   { id: 'plugins', title: 'Plugins', short: 'Plugins', subtitle: 'Turn providers on or off and set their order', icon: 'switchboard', group: 'cloud' },
   { id: 'network', title: 'Network', short: 'Network', subtitle: 'DNS blocking and Tailscale nodes', icon: 'network', group: 'cloud' },
   { id: 'data', title: 'Databases', short: 'Data', subtitle: 'Browse tables and run queries', icon: 'database', group: 'cloud' },
+  { id: 'claude', title: 'Connect Claude', short: 'Claude', subtitle: 'Use OmniFree from Claude Code, Desktop or Cursor', icon: 'agent', group: 'app' },
   { id: 'settings', title: 'Settings', short: 'Settings', subtitle: 'Hub address and access token', icon: 'settings', group: 'app' },
 ];
 
@@ -53,6 +55,8 @@ function Page({ id }: { id: string }): ReactNode {
       return <NetworkView />;
     case 'data':
       return <DatabaseView />;
+    case 'claude':
+      return <ConnectClaudeView />;
     case 'settings':
       return <SettingsView onDone={() => go('home')} />;
     default:
