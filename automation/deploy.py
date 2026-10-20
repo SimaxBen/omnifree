@@ -817,6 +817,63 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             self.echo(f"hub: {url}")
         return url
 
+    # ------------------------------------------------------------------ deploy-hub (Vercel Python function)
+    def _vercel_hub_dir(self, target: Path) -> Path:
+        import shutil
+
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True)
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+        for rel in ("core", "plugins", "hub_api", "config"):
+            shutil.copytree(self.cfg.path(rel), target / rel, ignore=ignore)
+        runtime = [line for line in self.cfg.path("requirements.txt").read_text(encoding="utf-8").splitlines()
+                   if line.strip() and not re.match(r"(pytest|respx|uvicorn)", line.strip())]
+        extra = str(self.cfg.section("hub").get("extra_pip", "asyncpg motor pymongo")).split()
+        (target / "requirements.txt").write_text("\n".join([*runtime, *extra]) + "\n", encoding="utf-8")
+        (target / ".python-version").write_text("3.12\n", encoding="utf-8")
+        (target / "api").mkdir()
+        (target / "api" / "index.py").write_text(
+            '"""Vercel entry point: every path is rewritten here (see vercel.json)."""\n'
+            "from hub_api.serverless import app  # noqa: F401\n", encoding="utf-8")
+        (target / "vercel.json").write_text(json.dumps({
+            "rewrites": [{"source": "/(.*)", "destination": "/api/index"}],
+            "functions": {"api/index.py": {"maxDuration": 60}},
+        }, indent=2) + "\n", encoding="utf-8")
+        return target
+
+    def deploy_hub_vercel(self, *, cors: Sequence[str] = (), project: str | None = None) -> str:
+        hub = self.cfg.section("hub")
+        token = self.require("VERCEL_TOKEN")
+        team = self.optional("VERCEL_TEAM_ID")
+        name = project or str(hub.get("vercel_project", "omnifree-hub"))
+        params = {"teamId": team} if team else {}
+        env = self._hub_env_vars(cors)
+        env.pop("EXTRA_PIP", None)  # baked into requirements.txt instead
+        with httpx.Client(base_url="https://api.vercel.com", timeout=60, params=params,
+                          headers={"Authorization": f"Bearer {token}"}) as http:
+            got = http.get(f"/v9/projects/{name}")
+            if got.status_code == 404:
+                got = http.post("/v10/projects", json={"name": name, "framework": None})
+            proj = got.raise_for_status().json()
+            body = [{"key": k, "value": v, "type": "encrypted", "target": ["production", "preview"]}
+                    for k, v in env.items()]
+            http.post(f"/v10/projects/{proj['id']}/env", params={**params, "upsert": "true"},
+                      json=body).raise_for_status()
+        self.echo(f"  vercel project {name}: {len(env)} env vars")
+        staging = self._vercel_hub_dir(self.cfg.path("data/vercel-hub"))
+        run_env = {"VERCEL_PROJECT_ID": proj["id"], "VERCEL_ORG_ID": team or proj.get("accountId", "")}
+        cmd = ["npx", "--yes", "vercel@latest", "deploy", str(staging), "--prod", "--yes", f"--token={token}"]
+        if team:
+            cmd.append(f"--scope={team}")
+        proc = self.runner.run(cmd, env=run_env, capture=True)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        self.echo(out.strip()[-600:])
+        url = f"https://{name}.vercel.app"
+        self.state.set_url("hub", url)
+        self.echo(f"hub: {url}")
+        return url
+
     # ------------------------------------------------------------------ edge worker / PWA
     def _cloudflare_env(self) -> dict[str, str]:
         return {"CLOUDFLARE_API_TOKEN": self.require("CLOUDFLARE_API_TOKEN"),
@@ -1117,8 +1174,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--set-tailnet-dns", action="store_true", help="make Pi-hole the tailnet DNS server")
     s = sub.add_parser("deploy-edge", help="frps (+ WireGuard) on AMD VM2")
     s.add_argument("--wireguard", action="store_true", default=None)
-    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud), Render (free web service) or a Hugging Face Space")
-    s.add_argument("--target", choices=["cloudrun", "render", "hf"], default="cloudrun")
+    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud), Vercel (serverless), Render or a Hugging Face Space")
+    s.add_argument("--target", choices=["cloudrun", "vercel", "render", "hf"], default="cloudrun")
     s.add_argument("--space", help="hf target: owner/name of the Space (default <user>/omnifree-hub)")
     s.add_argument("--project")
     s.add_argument("--region")
@@ -1171,6 +1228,8 @@ async def _dispatch(args: argparse.Namespace, deployer: Deployer) -> int:
         await deployer.deploy_pihole(set_tailnet_dns=args.set_tailnet_dns)
     elif cmd == "deploy-edge":
         await deployer.deploy_edge(wireguard=args.wireguard)
+    elif cmd == "deploy-hub" and args.target == "vercel":
+        await asyncio.to_thread(deployer.deploy_hub_vercel, cors=args.cors)
     elif cmd == "deploy-hub" and args.target == "render":
         await asyncio.to_thread(deployer.deploy_hub_render, cors=args.cors, region=args.region)
     elif cmd == "deploy-hub" and args.target == "hf":

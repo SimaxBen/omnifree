@@ -490,3 +490,14 @@ def test_hub_env_vars_for_render(tmp_path: Path) -> None:
     assert env["GROQ_API_KEY"] == "gsk_x" and env["HUB_API_TOKEN"] == "hub" and "HF_TOKEN" not in env
     assert env["OMNIFREE_CORS_ORIGINS"] == "https://app.example,https://omnifree-pwa.pages.dev"
     assert env["EXTRA_PIP"] == "asyncpg motor pymongo" and env["OMNIFREE_ENVIRONMENT"] == "production"
+
+
+def test_vercel_hub_dir_bundles_serverless_entry(tmp_path: Path) -> None:
+    d, _ = _deployer(tmp_path, {})
+    out = d._vercel_hub_dir(tmp_path / "vh")
+    assert "from hub_api.serverless import app" in (out / "api" / "index.py").read_text(encoding="utf-8")
+    cfg = json.loads((out / "vercel.json").read_text(encoding="utf-8"))
+    assert cfg["rewrites"] == [{"source": "/(.*)", "destination": "/api/index"}]
+    reqs = (out / "requirements.txt").read_text(encoding="utf-8")
+    assert "fastapi" in reqs and "asyncpg" in reqs and "pytest" not in reqs and "uvicorn" not in reqs
+    assert (out / "hub_api" / "serverless.py").is_file() and not (out / ".env.vault").exists()
