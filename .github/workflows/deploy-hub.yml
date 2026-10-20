@@ -1,4 +1,4 @@
-name: Deploy hub to Cloud Run
+name: Deploy hub
 
 # Builds hub_api (+ Tailscale userspace layer) with Cloud Build and deploys it with
 # `python -m automation.deploy deploy-hub`, the same code path as a local deploy.
@@ -46,7 +46,7 @@ jobs:
 
   deploy:
     needs: test
-    # Cloud Run needs a GCP billing account; until then the hub runs on a Hugging Face Space.
+    # Cloud Run needs a GCP billing account; until then the hub runs on Vercel (deploy-vercel below).
     if: vars.HUB_TARGET == 'cloudrun'
     runs-on: ubuntu-latest
     environment: production
@@ -83,3 +83,47 @@ jobs:
         run: |
           url=$(python -c "import json,os;print(json.load(open(os.environ['RUNNER_TEMP']+'/deploy_state.json'))['urls']['hub'])")
           curl -fsS --retry 5 --retry-delay 5 "$url/healthz"
+
+  deploy-vercel:
+    needs: test
+    # Default while there is no card: the serverless hub on Vercel (automation.deploy deploy-hub --target vercel).
+    if: vars.HUB_TARGET == '' || vars.HUB_TARGET == 'vercel'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      OMNIFREE_VAULT_PASSPHRASE: ${{ secrets.OMNIFREE_VAULT_PASSPHRASE }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install -r requirements.txt && npm install -g vercel@latest
+        # (the deploy step below needs both vault secrets; without them the job ends green with a notice)
+      - name: Restore encrypted vault
+        id: vault
+        env:
+          VAULT_B64: ${{ secrets.OMNIFREE_ENV_VAULT_B64 }}
+        run: |
+          if [ -z "$VAULT_B64" ] || [ -z "$OMNIFREE_VAULT_PASSPHRASE" ]; then
+            echo "::notice::Vercel hub not redeployed: add the OMNIFREE_ENV_VAULT_B64 and OMNIFREE_VAULT_PASSPHRASE secrets"
+            echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "$VAULT_B64" | base64 -d > .env.vault && echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Deploy
+        if: steps.vault.outputs.ready == 'true'
+        run: |
+          origins="${{ vars.OMNIFREE_CORS_ORIGINS }}"
+          origins="${origins:-https://omnifree.ilyasouhnine.tech,https://omnifree-pwa.pages.dev,https://omnifree-pwa.vercel.app,https://omnifree-pwa.netlify.app,https://simaxben.github.io,https://omnifree-edge.simaxben.workers.dev}"
+          args=()
+          IFS=',' read -ra list <<< "$origins"
+          for o in "${list[@]}"; do [ -n "$o" ] && args+=(--cors "$o"); done
+          python -m automation.deploy --state "$RUNNER_TEMP/deploy_state.json" deploy-hub --target vercel "${args[@]}"
+      - name: Smoke test
+        if: steps.vault.outputs.ready == 'true'
+        run: curl -fsS --retry 5 --retry-delay 5 https://omnifree-hub.vercel.app/healthz

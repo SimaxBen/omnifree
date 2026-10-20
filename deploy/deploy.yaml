@@ -76,6 +76,9 @@ hub:
   passphrase_secret: omnifree-vault-passphrase
   tailscale_secret: omnifree-tailscale-authkey
   chat_path: /llm/chat
+  # Serverless hub (deploy-hub --target vercel): plugins that need a server the hub cannot reach yet.
+  # Plugins whose required secrets are missing from the vault are left out automatically as well.
+  serverless_disable: [freellmapi, ollama, oracle_block_storage, pihole]
 
 pwa:
   dir: mobile_app

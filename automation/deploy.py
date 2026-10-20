@@ -42,6 +42,7 @@ from typing import Any, TextIO
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 
 from automation.deploy_common import (
     PROJECT_ROOT,
@@ -673,10 +674,10 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         "FREELLMAPI_ADMIN_PASSWORD", "GITHUB_TOKEN_CLASSIC",
     })
 
-    def hub_secret_names(self) -> list[str]:
+    def hub_secret_names(self, providers: dict[str, Any] | None = None) -> list[str]:
         """Vault keys the hub can use: secrets of enabled plugins plus the hub/instinct tokens."""
         names: dict[str, None] = {"HUB_API_TOKEN": None, "INSTINCT_API_TOKEN": None}
-        for spec in (self.cfg.providers.get("plugins") or {}).values():
+        for spec in ((providers or self.cfg.providers).get("plugins") or {}).values():
             if not isinstance(spec, dict) or not spec.get("enabled", True):
                 continue
             for group in ("secrets", "optional_secrets"):
@@ -750,9 +751,9 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         return url
 
     # ------------------------------------------------------------------ deploy-hub (Render free web service)
-    def _hub_env_vars(self, cors: Sequence[str]) -> dict[str, str]:
+    def _hub_env_vars(self, cors: Sequence[str], providers: dict[str, Any] | None = None) -> dict[str, str]:
         hub = self.cfg.section("hub")
-        env = {name: value for name in self.hub_secret_names() if (value := self.optional(name))}
+        env = {name: value for name in self.hub_secret_names(providers) if (value := self.optional(name))}
         origins = [o for o in [*cors, self.state.urls.get("edge", ""), self.state.urls.get("pwa", ""),
                                *self.state.data.get("pwa_mirrors", [])] if o]
         env.update({"OMNIFREE_ENVIRONMENT": "production", "OMNIFREE_VAULT_REQUIRED": "false",
@@ -818,6 +819,64 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         return url
 
     # ------------------------------------------------------------------ deploy-hub (Vercel Python function)
+    def serverless_providers(self) -> dict[str, Any]:
+        """providers.yaml for the serverless hub: disable plugins it cannot use (missing secrets / no server)."""
+        import copy
+
+        doc = copy.deepcopy(self.cfg.providers)
+        unreachable = set(self.cfg.section("hub").get("serverless_disable") or [])
+        for name, spec in (doc.get("plugins") or {}).items():
+            if not isinstance(spec, dict) or not spec.get("enabled", True):
+                continue
+            missing = [key for key in (spec.get("secrets") or {}).values() if not self.secret(str(key))]
+            if name in unreachable or missing:
+                spec["enabled"] = False
+        return doc
+
+    def _vercel_project(self, name: str) -> dict[str, Any]:
+        """Get or create a Vercel project (idempotent); returns the project JSON (``id``, ``accountId``)."""
+        team = self.optional("VERCEL_TEAM_ID")
+        params = {"teamId": team} if team else {}
+        with httpx.Client(base_url="https://api.vercel.com", timeout=60, params=params,
+                          headers={"Authorization": f"Bearer {self.require('VERCEL_TOKEN')}"}) as http:
+            got = http.get(f"/v9/projects/{name}")
+            if got.status_code == 404:
+                got = http.post("/v10/projects", json={"name": name, "framework": None})
+            return dict(got.raise_for_status().json())
+
+    def _netlify_site(self, name: str) -> str:
+        """Get or create a Netlify site by name; returns its site id."""
+        with httpx.Client(base_url="https://api.netlify.com/api/v1", timeout=60,
+                          headers={"Authorization": f"Bearer {self.require('NETLIFY_TOKEN')}"}) as http:
+            found = [s for s in http.get("/sites", params={"name": name, "filter": "all"}).raise_for_status().json()
+                     if s.get("name") == name]
+            if found:
+                site = found[0]
+            else:
+                created = http.post("/sites", json={"name": name})
+                if created.status_code >= 400:
+                    raise DeployError(f"Netlify site {name!r} could not be created: "
+                                      f"{created.status_code} {created.text[:200]}")
+                site = created.json()
+            if site.get("sso_login"):
+                # New team sites default to "Netlify team login" visitor access: a public mirror must be open.
+                http.patch(f"/sites/{site['id']}", json={"sso_login": False}).raise_for_status()
+            return str(site["id"])
+
+    @staticmethod
+    def _spa_copy(dist: Path, target: Path) -> Path:
+        """Copy the PWA build and add SPA fallbacks for Vercel (vercel.json) and Netlify (_redirects)."""
+        import shutil
+
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(dist, target)
+        (target / "vercel.json").write_text(json.dumps(
+            {"rewrites": [{"source": "/((?!assets/|icons/|sw.js|manifest).*)", "destination": "/index.html"}]},
+            indent=2) + "\n", encoding="utf-8")
+        (target / "_redirects").write_text("/*    /index.html   200\n", encoding="utf-8")
+        return target
+
     def _vercel_hub_dir(self, target: Path) -> Path:
         import shutil
 
@@ -827,6 +886,10 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
         for rel in ("core", "plugins", "hub_api", "config"):
             shutil.copytree(self.cfg.path(rel), target / rel, ignore=ignore)
+        trimmed = self.serverless_providers()
+        (target / "config" / "providers.yaml").write_text(
+            "# Generated by deploy-hub --target vercel from config/providers.yaml (unreachable plugins disabled).\n"
+            + yaml.safe_dump(trimmed, sort_keys=False, allow_unicode=True), encoding="utf-8")
         runtime = [line for line in self.cfg.path("requirements.txt").read_text(encoding="utf-8").splitlines()
                    if line.strip() and not re.match(r"(pytest|respx|uvicorn)", line.strip())]
         extra = str(self.cfg.section("hub").get("extra_pip", "asyncpg motor pymongo")).split()
@@ -848,14 +911,11 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         team = self.optional("VERCEL_TEAM_ID")
         name = project or str(hub.get("vercel_project", "omnifree-hub"))
         params = {"teamId": team} if team else {}
-        env = self._hub_env_vars(cors)
+        env = self._hub_env_vars(cors, self.serverless_providers())
         env.pop("EXTRA_PIP", None)  # baked into requirements.txt instead
+        proj = self._vercel_project(name)
         with httpx.Client(base_url="https://api.vercel.com", timeout=60, params=params,
                           headers={"Authorization": f"Bearer {token}"}) as http:
-            got = http.get(f"/v9/projects/{name}")
-            if got.status_code == 404:
-                got = http.post("/v10/projects", json={"name": name, "framework": None})
-            proj = got.raise_for_status().json()
             body = [{"key": k, "value": v, "type": "encrypted", "target": ["production", "preview"]}
                     for k, v in env.items()]
             http.post(f"/v10/projects/{proj['id']}/env", params={**params, "upsert": "true"},
@@ -957,17 +1017,22 @@ chown {q(user)}:{q(user)} {q(mount_path)}
             self.echo((proc.stdout or "").strip()[-800:])
             url = f"https://{project}.pages.dev"
         elif target == "vercel":
-            cmd = [*self._cli("vercel@latest", "vercel"), "deploy", str(dist), "--prod", "--yes",
-                   f"--token={self.require('VERCEL_TOKEN')}"]
+            project = str(pwa.get("vercel_project", "omnifree-pwa"))
+            proj = self._vercel_project(project)
             team = self.optional("VERCEL_TEAM_ID")
+            site = self._spa_copy(dist, self.cfg.path("data/pwa-vercel"))
+            cmd = [*self._cli("vercel@latest", "vercel"), "deploy", str(site), "--prod", "--yes",
+                   f"--token={self.require('VERCEL_TOKEN')}"]
             if team:
                 cmd.append(f"--scope={team}")
-            proc = self.runner.run(cmd, capture=True)
-            urls = re.findall(r"https://[A-Za-z0-9.\-]+\.vercel\.app", proc.stdout or "")
-            url = urls[-1] if urls else ""
+            self.runner.run(cmd, capture=True,
+                            env={"VERCEL_PROJECT_ID": proj["id"], "VERCEL_ORG_ID": team or proj.get("accountId", "")})
+            url = f"https://{project}.vercel.app"
         elif target == "netlify":
-            site = str((self.cfg.plugin_settings("netlify").get("sites") or ["omnifree-pwa"])[0])
-            proc = self.runner.run([*self._cli("netlify-cli", "netlify"), "deploy", "--prod", f"--dir={dist}",
+            name = str((self.cfg.plugin_settings("netlify").get("sites") or ["omnifree-pwa"])[0])
+            site = self._netlify_site(name)
+            folder = self._spa_copy(dist, self.cfg.path("data/pwa-netlify"))
+            proc = self.runner.run([*self._cli("netlify-cli", "netlify"), "deploy", "--prod", f"--dir={folder}",
                                     f"--site={site}", "--json"],
                                    env={"NETLIFY_AUTH_TOKEN": self.require("NETLIFY_TOKEN")}, capture=True)
             try:

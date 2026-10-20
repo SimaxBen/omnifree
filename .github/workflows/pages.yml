@@ -1,0 +1,50 @@
+name: PWA mirror (GitHub Pages)
+
+# Third PWA mirror at https://simaxben.github.io/omnifree/ (the edge Worker falls back to it when
+# Cloudflare Pages, Vercel and Netlify all fail). Same build as the other mirrors, served under /omnifree/.
+# Repository variable (optional): OMNIFREE_HUB_URL (default: the edge Worker's /api).
+
+on:
+  push:
+    branches: [main]
+    paths: ["mobile_app/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile_app/package-lock.json
+      - working-directory: mobile_app
+        env:
+          VITE_HUB_URL: ${{ vars.OMNIFREE_HUB_URL || 'https://omnifree-edge.simaxben.workers.dev/api' }}
+        run: |
+          npm ci --no-audit --no-fund
+          npx vite build --base=/omnifree/
+          cp dist/index.html dist/404.html   # SPA fallback for deep links
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: mobile_app/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

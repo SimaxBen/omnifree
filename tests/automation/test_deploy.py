@@ -505,3 +505,28 @@ def test_vercel_hub_dir_bundles_serverless_entry(tmp_path: Path) -> None:
     reqs = (out / "requirements.txt").read_text(encoding="utf-8")
     assert "fastapi" in reqs and "asyncpg" in reqs and "pytest" not in reqs and "uvicorn" not in reqs
     assert (out / "hub_api" / "serverless.py").is_file() and not (out / ".env.vault").exists()
+
+
+def test_serverless_providers_disable_unreachable_and_secretless(tmp_path: Path) -> None:
+    d, _ = _deployer(tmp_path, {"GROQ_API_KEY": "g", "PIHOLE_PASSWORD": "p", "B2_KEY_ID": "k", "B2_APPLICATION_KEY": "a"})
+    plugins = d.serverless_providers()["plugins"]
+    assert plugins["groq"]["enabled"] is True and plugins["backblaze_b2"]["enabled"] is True
+    assert plugins["pihole"]["enabled"] is False  # has its secret but no server (deploy.yaml serverless_disable)
+    assert plugins["oracle_block_storage"]["enabled"] is False and plugins["ollama"]["enabled"] is False
+    assert plugins["gemini"]["enabled"] is False  # GEMINI_API_KEY missing in this fake vault
+    assert d.cfg.providers["plugins"]["gemini"].get("enabled", True) is True  # repo config untouched
+
+
+def test_vercel_bundle_uses_trimmed_providers(tmp_path: Path) -> None:
+    d, _ = _deployer(tmp_path, {"GROQ_API_KEY": "g"})
+    out = d._vercel_hub_dir(tmp_path / "vh")
+    bundled = yaml.safe_load((out / "config" / "providers.yaml").read_text(encoding="utf-8"))
+    assert bundled["plugins"]["groq"]["enabled"] is True and bundled["plugins"]["oracle_compute"]["enabled"] is False
+
+
+def test_spa_copy_adds_vercel_and_netlify_fallbacks(tmp_path: Path) -> None:
+    write_file(tmp_path / "dist" / "index.html", "<html></html>")
+    out = Deployer._spa_copy(tmp_path / "dist", tmp_path / "site")
+    assert (out / "index.html").is_file()
+    assert json.loads((out / "vercel.json").read_text(encoding="utf-8"))["rewrites"][0]["destination"] == "/index.html"
+    assert (out / "_redirects").read_text(encoding="utf-8").split() == ["/*", "/index.html", "200"]

@@ -101,7 +101,7 @@ plugins:
     kind: llm
     group: llm_pool
     enabled: true
-    priority: 50
+    priority: 25  # before Gemini: no daily cap (40 RPM) vs Gemini's ~100 requests/day
     description: NVIDIA NIM hosted API (build.nvidia.com), OpenAI-compatible. Free for development/prototyping only (not production; inputs may be logged), about 40 RPM; no rate-limit increases, and the old signup credits were reportedly phased out (unverified, no daily cap enforced here). Live list via GET /v1/models; settings.models is the fallback.
     limits:
       - {metric: requests, window: minute, limit: 40}
@@ -126,8 +126,9 @@ plugins:
       api_key: ZAI_API_KEY
     settings:
       base_url: https://api.z.ai/api/paas/v4
-      default_model: glm-4.7-flash
-      models: [glm-4.7-flash, glm-4.5-flash, glm-4.6v-flash]
+      # 2026-10-20: glm-4.7-flash answers 429 on the free tier; glm-4.5-flash works.
+      default_model: glm-4.5-flash
+      models: [glm-4.5-flash, glm-4.7-flash, glm-4.6v-flash]
   cloudflare_ai:
     module: plugins.llm_pool.cloudflare_ai:CloudflareWorkersAIAdapter
     kind: llm
@@ -142,7 +143,8 @@ plugins:
       api_key: CLOUDFLARE_AI_API_TOKEN
     settings:
       base_url: https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1
-      default_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
+      # gpt-oss-20b stretches the 10,000 neurons/day much further than the 70B default did.
+      default_model: '@cf/openai/gpt-oss-20b'
       models: ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/openai/gpt-oss-120b', '@cf/openai/gpt-oss-20b', '@cf/meta/llama-4-scout-17b-16e-instruct', '@cf/qwen/qwen3.8-27b', '@cf/qwen/qwen3-30b-a3b-fp8', '@cf/google/gemma-4-26b-a4b-it', '@cf/mistralai/mistral-small-3.1-24b-instruct', '@cf/deepseek-ai/deepseek-v4-flash-0731']
       embedding_models: ['@cf/qwen/qwen3-embedding-0.6b', '@cf/baai/bge-m3']
       default_embedding_model: '@cf/qwen/qwen3-embedding-0.6b'
