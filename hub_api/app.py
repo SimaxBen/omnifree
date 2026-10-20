@@ -22,9 +22,9 @@ from hub_api.errors import install_error_handlers
 from hub_api.mcp_server import mount_mcp
 from hub_api.routers import agent, compute, cron, db, dns, drive, expenses, links, llm, notes, plugins, ws
 from hub_api.routers import budget as budget_router
-from hub_api.routers import rag as rag_router
 from hub_api.routers import digest as digest_router
 from hub_api.routers import inbox as inbox_router
+from hub_api.routers import rag as rag_router
 from hub_api.routers.llm import ROUTED_VIA_HEADER
 from hub_api.settings import HubSettings
 from hub_api.state import HubState
