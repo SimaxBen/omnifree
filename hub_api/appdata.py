@@ -84,6 +84,28 @@ class AppDB:
                 await asyncio.wait_for(adapter.execute(stmt, None), self._timeout_s)
             self._ready.add(name)
 
+    async def add_columns(self, name: str, table: str, columns: Sequence[tuple[str, str]]) -> None:
+        """Idempotent ``ALTER TABLE ... ADD COLUMN`` (SQLite/D1 have no ``IF NOT EXISTS`` for columns).
+
+        Runs once per process for migration ``name``; a "duplicate column" error means the column is
+        already there and is ignored, anything else propagates.
+        """
+        if name in self._ready:
+            return
+        async with self._lock:
+            if name in self._ready:
+                return
+            adapter = await self._adapter()
+            for column, decl in columns:
+                try:
+                    await asyncio.wait_for(adapter.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}", None), self._timeout_s)
+                except TimeoutError:
+                    raise
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            self._ready.add(name)
+
     async def fetch(self, sql: str, params: Sequence[Any] = (), *, limit: int = _MAX_ROWS) -> list[dict[str, Any]]:
         adapter = await self._adapter()
         result = await asyncio.wait_for(adapter.query(sql, list(params), limit), self._timeout_s)

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Icon } from '../components/icons';
-import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, SectionTitle, Spinner, StatusDot, cx, inputClass } from '../components/ui';
+import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, SectionTitle, Spinner, StatusDot, Toggle, cx, inputClass } from '../components/ui';
 import { SCHEDULE_PRESETS, checkJsonBody, describeCron, isValidCron } from '../lib/cron';
+import { gmailSyncTemplate, scheduleHeaders } from '../lib/digest';
 import { formatDateTime } from '../lib/format';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import type { CronJob, CronJobCreate, CronProvider } from '../lib/types';
@@ -18,7 +19,7 @@ function providerTone(p: CronProvider): 'ok' | 'warn' | 'bad' | 'off' {
 const jobKey = (j: CronJob) => `${j.provider}/${j.id}`;
 
 function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvider[]; onCreated: (job: CronJob) => void; onCancel: () => void }) {
-  const { client } = useHub();
+  const { client, settings } = useHub();
   const usable = providers.filter((p) => p.enabled);
   const [provider, setProvider] = useState(usable[0]?.name ?? '');
   const [name, setName] = useState('');
@@ -27,6 +28,7 @@ function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvide
   const [target, setTarget] = useState('');
   const [method, setMethod] = useState('POST');
   const [body, setBody] = useState('');
+  const [withToken, setWithToken] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,10 +49,9 @@ function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvide
     setBusy(true);
     setError(null);
     const job: CronJobCreate = { provider, name: name.trim(), schedule, target: target.trim(), method };
-    if (bodyCheck.body) {
-      job.body = bodyCheck.body;
-      job.headers = { 'Content-Type': 'application/json' };
-    }
+    if (bodyCheck.body) job.body = bodyCheck.body;
+    const headers = scheduleHeaders({ body: bodyCheck.body, token: settings.token, withToken });
+    if (headers) job.headers = headers;
     try {
       onCreated(await client.createCronJob(job));
     } catch (err) {
@@ -60,9 +61,28 @@ function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvide
     }
   };
 
+  const useGmailTemplate = () => {
+    const t = gmailSyncTemplate(settings.hubUrl);
+    setName(t.name);
+    setPreset(t.preset);
+    setTarget(t.target);
+    setMethod(t.method);
+    setBody(t.body);
+    setWithToken(true);
+  };
+
   return (
     <Card className="p-3">
       <form className="space-y-3" onSubmit={(e) => void submit(e)}>
+        <button
+          type="button"
+          onClick={useGmailTemplate}
+          className="press flex min-h-[44px] w-full items-center gap-2 rounded-row bg-ink-850 px-3 text-left text-[14px] text-ink-200 ring-1 ring-inset ring-ink-700"
+        >
+          <Icon name="mail" size={16} className="text-[#A9CBFF]" />
+          <span className="min-w-0 flex-1 truncate">Template: import email receipts daily</span>
+          <Icon name="right" size={16} className="text-ink-500" />
+        </button>
         <div className="grid grid-cols-2 gap-2">
           <label className="block space-y-1 text-xs text-ink-400">
             Provider
@@ -148,6 +168,14 @@ function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvide
           />
           {bodyCheck.error && <span className="block text-[11px] text-danger-400">{bodyCheck.error}</span>}
         </label>
+
+        <div className="flex items-center justify-between gap-3 px-1">
+          <span className="min-w-0 text-xs text-ink-400">
+            <span className="block text-ink-200">Send my hub token</span>
+            Adds the Authorization header, for targets on this hub
+          </span>
+          <Toggle checked={withToken} onChange={setWithToken} label="Send my hub token" />
+        </div>
 
         {error && <ErrorNote message={error} />}
         <div className="flex justify-end gap-2">

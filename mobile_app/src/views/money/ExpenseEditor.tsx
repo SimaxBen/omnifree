@@ -4,6 +4,7 @@ import { Sheet, useConfirm } from '../../components/Sheet';
 import { Badge, Button, Chip, ErrorNote, Field, IconButton, cx, haptic, inputClass } from '../../components/ui';
 import { isoDay } from '../../lib/apps';
 import { announce } from '../../lib/bus';
+import { emailMailbox } from '../../lib/digest';
 import { errorText, useHub } from '../../lib/hub';
 import { EXPENSE_CATEGORIES, type Expense, type ExpenseCategory, type ExpenseCreate, type ExpenseItem } from '../../lib/types';
 
@@ -229,6 +230,13 @@ export default function ExpenseEditor({ open, mode, onClose }: { open: boolean; 
               ))}
             </div>
           </div>
+
+          {expense?.source === 'email' && (
+            <p className="flex items-center gap-2 rounded-row bg-signal/10 px-3 py-2 text-[13px] text-signal">
+              <Icon name="mail" size={15} className="shrink-0" />
+              <span className="min-w-0 truncate">Imported from {emailMailbox(expense.source_ref) ?? 'email'}</span>
+            </p>
+          )}
 
           <Field label="Note">
             <input value={form.note} onChange={(e) => set('note', e.target.value)} placeholder="Optional" className={inputClass} />
