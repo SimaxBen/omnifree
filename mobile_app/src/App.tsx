@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { registerSW } from 'virtual:pwa-register';
 import { Icon, type IconName } from './components/icons';
+import ErrorBoundary from './components/ErrorBoundary';
 import { cx, IconButton, StatusDot } from './components/ui';
 import { useHub } from './lib/hub';
 import { readPref, writePref } from './lib/settings';
@@ -30,7 +31,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(() => !settings.token);
   const [updateReady, setUpdateReady] = useState<null | (() => void)>(null);
 
-  useEffect(() => writePref('tab', tab), [tab]);
+  useEffect(() => {
+    writePref('tab', tab);
+  }, [tab]);
 
   useEffect(() => {
     const update = registerSW({
@@ -39,7 +42,7 @@ export default function App() {
   }, []);
 
   const current = TABS.find((t) => t.id === tab) ?? TABS[0];
-  const connTone = connection === 'open' ? 'ok' : connection === 'connecting' ? 'warn' : 'bad';
+  const connTone = connection === 'open' || connection === 'polling' ? 'ok' : connection === 'connecting' ? 'warn' : 'bad';
 
   return (
     <div className="backdrop-grid mx-auto flex h-full max-w-3xl flex-col">
@@ -71,17 +74,19 @@ export default function App() {
       )}
 
       <main className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4">
-        {showSettings ? (
-          <SettingsView onDone={() => setShowSettings(false)} />
-        ) : (
-          <>
-            {tab === 'llm' && <LlmView />}
-            {tab === 'drive' && <DriveView />}
-            {tab === 'network' && <NetworkView />}
-            {tab === 'db' && <DatabaseView />}
-            {tab === 'plugins' && <SwitchboardView />}
-          </>
-        )}
+        <ErrorBoundary key={showSettings ? 'settings' : tab}>
+          {showSettings ? (
+            <SettingsView onDone={() => setShowSettings(false)} />
+          ) : (
+            <>
+              {tab === 'llm' && <LlmView />}
+              {tab === 'drive' && <DriveView />}
+              {tab === 'network' && <NetworkView />}
+              {tab === 'db' && <DatabaseView />}
+              {tab === 'plugins' && <SwitchboardView />}
+            </>
+          )}
+        </ErrorBoundary>
       </main>
 
       <nav className="pb-safe sticky bottom-0 z-20 border-t border-ink-800 bg-ink-950/95 backdrop-blur" aria-label="Sections">

@@ -26,7 +26,13 @@ const HubContext = createContext<HubContextValue | null>(null);
 export function HubProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<HubSettings>(() => loadSettings());
   const client = useMemo(() => new HubClient(settings), [settings]);
-  const events = useMemo(() => new EventStream(client.wsUrl(SUBSCRIBED_TYPES), client.wsProtocols()), [client]);
+  const events = useMemo(
+    () =>
+      new EventStream(client.wsUrl(SUBSCRIBED_TYPES), client.wsProtocols(), {
+        poll: (signal) => client.recentEvents(100, SUBSCRIBED_TYPES, signal),
+      }),
+    [client],
+  );
   const [connection, setConnection] = useState<ConnectionState>('idle');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
@@ -76,7 +82,10 @@ export function useHubEvents(patterns: string[], handler: (e: HubEvent) => void)
   const ref = useRef(handler);
   ref.current = handler;
   const key = patterns.join('|');
-  useEffect(() => events.on(key.split('|'), (e) => ref.current(e)), [events, key]);
+  useEffect(() => {
+    const off = events.on(key.split('|'), (e) => ref.current(e));
+    return () => off();
+  }, [events, key]);
 }
 
 interface AsyncState<T> {

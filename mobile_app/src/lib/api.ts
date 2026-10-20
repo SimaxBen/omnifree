@@ -14,6 +14,7 @@ import type {
   DNSQueryLogEntry,
   DNSStatus,
   HealthStatus,
+  HubEvent,
   ModelInfo,
   ProviderStatus,
   QueryResult,
@@ -169,6 +170,12 @@ export class HubClient {
     return this.request('GET', '/healthz', { signal });
   }
 
+  /** `GET /events/recent`: the hub's event history, oldest first (polling fallback for /ws). */
+  async recentEvents(limit: number, types: string[], signal?: AbortSignal): Promise<HubEvent[]> {
+    const body = await this.request<unknown>('GET', '/events/recent', { query: { limit, types: types.join(',') }, signal });
+    return listOf<HubEvent>(body, 'events');
+  }
+
   // ------------------------------------------------------------------ LLM
 
   async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResult> {
@@ -182,6 +189,18 @@ export class HubClient {
     const res = await this.raw('POST', '/llm/stream', { json: { ...req, stream: true }, signal, accept: 'text/event-stream' });
     const header = res.headers.get('X-Routed-Via');
     if (header) handlers.onRoutedVia?.(header);
+    // Serverless deployments may buffer the reply and answer with one plain JSON ChatResponse.
+    if ((res.headers.get('content-type') ?? '').includes('application/json')) {
+      const response = (await res.json()) as ChatResponse;
+      handlers.onChunk({
+        delta: typeof response.content === 'string' ? response.content : '',
+        model: response.model ?? '',
+        finish_reason: response.finish_reason ?? null,
+        usage: response.usage ?? null,
+        routed_via: header || response.routed_via || '',
+      });
+      return;
+    }
     if (!res.body) throw new HubError('Streaming is not supported by this browser', 0);
     // hub_api sends `event: chunk` (ChatChunk JSON) ..., then `event: done` or `event: error`.
     // A bare `data: [DONE]` (OpenAI style) also ends the stream.

@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import ErrorBoundary from './components/ErrorBoundary';
 import { HubProvider } from './lib/hub';
 import './index.css';
 
@@ -9,8 +10,10 @@ if (!root) throw new Error('Missing #root element');
 
 createRoot(root).render(
   <StrictMode>
-    <HubProvider>
-      <App />
-    </HubProvider>
+    <ErrorBoundary>
+      <HubProvider>
+        <App />
+      </HubProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

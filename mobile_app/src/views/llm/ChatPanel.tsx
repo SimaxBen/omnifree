@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Icon } from '../../components/icons';
 import { Badge, Button, Card, ErrorNote, IconButton, Toggle, cx, inputClass } from '../../components/ui';
+import { scrollToEnd } from '../../lib/dom';
 import { formatMs } from '../../lib/format';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { readPref, writePref } from '../../lib/settings';
@@ -35,12 +36,30 @@ export default function ChatPanel() {
   const idRef = useRef(1);
   const endRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => writePref('chat.model', choice), [choice]);
-  useEffect(() => writePref('chat.stream', streaming), [streaming]);
-  useEffect(() => writePref('chat.fallback', allowFallback), [allowFallback]);
-  useEffect(() => writePref('chat.system', system), [system]);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [turns]);
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // Effect bodies are blocks on purpose: whatever an effect returns becomes its cleanup, and
+  // Element.scrollIntoView() returns a Promise in recent Chromium, which React then calls as a
+  // function on the next commit ("TypeError: n is not a function", whole-app black screen).
+  useEffect(() => {
+    writePref('chat.model', choice);
+  }, [choice]);
+  useEffect(() => {
+    writePref('chat.stream', streaming);
+  }, [streaming]);
+  useEffect(() => {
+    writePref('chat.fallback', allowFallback);
+  }, [allowFallback]);
+  useEffect(() => {
+    writePref('chat.system', system);
+  }, [system]);
+  useEffect(() => {
+    scrollToEnd(endRef.current);
+  }, [turns]);
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
 
   const patch = (id: number, fn: (t: Turn) => Turn) => setTurns((ts) => ts.map((t) => (t.id === id ? fn(t) : t)));
 

@@ -91,6 +91,28 @@ describe('HubClient', () => {
     expect(rv).toBe('groq');
   });
 
+  it('accepts a non-streamed JSON reply from the stream endpoint', async () => {
+    const body = { id: '1', model: 'm', content: 'whole reply', role: 'assistant', usage: { total_tokens: 3 }, routed_via: 'groq', attempts: [] };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const chunks: string[] = [];
+    await client.stream({ messages: [] }, { onChunk: (c) => chunks.push(`${c.delta}|${c.routed_via}`) });
+    expect(chunks).toEqual(['whole reply|groq']);
+  });
+
+  it('polls GET /events/recent with the bearer token', async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe('https://hub.example/events/recent?limit=100&types=router.*');
+      expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok');
+      return new Response(JSON.stringify([{ id: 'e1', type: 'router.failover', ts: 'x', data: {} }]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const events = await client.recentEvents(100, ['router.*']);
+    expect(events.map((e) => e.id)).toEqual(['e1']);
+  });
+
   it('raises on an SSE error event', async () => {
     const sse = 'event: error\ndata: {"detail":"No provider available"}\n\n';
     vi.stubGlobal('fetch', vi.fn(async () => new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })));

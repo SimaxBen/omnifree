@@ -92,8 +92,8 @@ export default function SettingsView({ onDone }: { onDone: () => void }) {
         <SectionTitle>Live events</SectionTitle>
         <Card className="p-3">
           <p className="mb-2 flex items-center gap-2 text-sm text-ink-200">
-            <StatusDot tone={connection === 'open' ? 'ok' : connection === 'connecting' ? 'warn' : 'bad'} />
-            WebSocket {connection}
+            <StatusDot tone={connection === 'open' || connection === 'polling' ? 'ok' : connection === 'connecting' ? 'warn' : 'bad'} />
+            {connection === 'polling' ? 'WebSocket unavailable, polling every 10 s' : `WebSocket ${connection}`}
           </p>
           <ul className="scroll-thin max-h-48 space-y-0.5 overflow-y-auto font-mono text-[11px] text-ink-400">
             {events.recent.length === 0 && <li>No events received yet.</li>}
