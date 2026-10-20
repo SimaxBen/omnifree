@@ -30,7 +30,7 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
         navigateFallback: '/index.html',
         // The hub API is always live data: never serve it from the service worker cache.
-        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|ws|healthz|events|compute|api)\b/],
+        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api)\b/],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',

@@ -36,6 +36,8 @@ below are what hub_api returns.
 | `GET /llm/quotas` | optional `?kind=` (default `llm`) | `{kind, providers: {name: {quotas: QuotaInfo[] (+remaining, fraction_used), exhausted_until, breaker}}}` | The gauges use the highest `used/limit` per provider. |
 | `GET /llm/models` | none | `{providers: {name: ModelInfo[]}, chain: [names]}` | |
 | `POST /llm/embed` | `EmbeddingRequest` | `EmbeddingResponse` + `X-Routed-Via` | not used by the PWA yet |
+| `POST /llm/transcribe` | `multipart/form-data`: `file` (required), `model?`, `language?` | `{text, model?, language?, duration?}` | Chat panel, mic button: "Transcribe" card (audio file or MediaRecorder voice note); "Send to chat" puts the text in the message box. |
+| `POST /llm/rerank` | `{query, documents: str[], top_n?}` | `{results: [{index, score, document?}]}` | `HubClient.rerank()`; no UI yet. |
 
 ## Agent (Instinct)
 
@@ -57,10 +59,12 @@ below are what hub_api returns.
 | `GET /drive/files?prefix=&provider=&limit=` | query | `{items: StoredObject[], count, errors: {provider: msg}}` | Used when the search box is empty. |
 | `GET /drive/search?q=&prefix=&limit=` | `q` required | `{query, items, count, errors}` | Substring match on key and metadata values; used when the search box is not empty. |
 | `GET /drive/usage` | none | `{backends: [{provider, description, used, limit, remaining, fraction_used, source}], total: {used, limit}, strategy}` | Bytes. The quota bars and the upload target list come from `backends`. |
+| `POST /drive/upload-url` | `{filename, size, content_type, prefix?}` | `{provider, key, method, url, headers, expires_at}` | Used for files over `DIRECT_UPLOAD_THRESHOLD` (4 MiB): the PWA then sends the file with XHR to `url` using `method` and exactly `headers` (no bearer token, typeless body so the browser adds no Content-Type of its own) and refreshes the listing. 404/405/422/501 -> "Large uploads need a storage backend with direct uploads (B2 or R2)". Large files are never sent through the hub (serverless ~4.5 MB limit). |
 | `POST /drive/upload` | `multipart/form-data`: `file`, `key` (optional, defaults to `prefix/filename`), `prefix` (optional), `provider` (optional; absent = most free space, with fallback) | 201 + `StoredObject` | Progress from XHR upload events. Over 32 MiB -> 413; keys with `..` -> 400. |
-| `GET /drive/files/{provider}/{key}` | path (each `key` segment URL-encoded, `/` kept) | raw bytes, `Content-Disposition: attachment`, `X-Storage-Backend` | Fetched as a blob with the bearer header, then saved by the browser. `?inline=true` for inline. |
+| `GET /drive/presign/{provider}/{key}` | path | `{url, provider, key, expires_s, method}` | Downloads: the PWA opens `url` in a new tab (pre-opened during the tap so popup blockers allow it). A 4xx (backend without presign) falls back to `GET /drive/files/...`. |
+| `GET /drive/files/{provider}/{key}` | path (each `key` segment URL-encoded, `/` kept) | raw bytes, `Content-Disposition: attachment`, `X-Storage-Backend` | Fallback only (responses over ~4.5 MB fail on the serverless hub). Fetched as a blob with the bearer header, then saved by the browser. `?inline=true` for inline. |
 | `DELETE /drive/files/{provider}/{key}` | path | `{deleted, provider}` | `router.storage_delete`. |
-| `GET /drive/locate/{key}`, `GET /drive/presign/{provider}/{key}` | path | `StoredObject` / `{url, provider, key, expires_s, method}` | not used by the PWA yet |
+| `GET /drive/locate/{key}` | path | `StoredObject` | not used by the PWA yet |
 
 ## DNS & Network
 
@@ -92,6 +96,18 @@ below are what hub_api returns.
 | `POST /plugins/{name}/health` | none | `HealthStatus` | `router.health_check(name)` |
 | `POST /plugins/{name}/reset` | none | the updated entry | Clears the breaker and quota cooldown. |
 | `GET /plugins/{name}`, `GET /plugins/chains`, `PUT /plugins/{name}/priority`, `PATCH /plugins/{name}/settings`, `POST /plugins/reload` | | | not used by the PWA yet |
+
+## Schedules (cron)
+
+Lives in the Plugins tab ("Switchboard | Schedules" toggle). Times are UTC 5-field cron expressions.
+
+| method + path | request | response | notes |
+|---|---|---|---|
+| `GET /cron/providers` | none | `{providers: [{name, enabled, healthy, description}]}` | Filter chips; only `enabled` providers are offered in the create form. |
+| `GET /cron/jobs?provider=` | optional `provider` | `{jobs: CronJob[], errors: {provider: message}}` | `CronJob` = `{id, name, schedule, target, method, headers, body: str\|null, enabled, provider, last_run_at, next_run_at}`. Polled every 60 s. |
+| `POST /cron/jobs` | `{provider, name, schedule, target, method?, headers?, body?}` | 201 + `CronJob` | A JSON body is validated client-side and sent as a string with `headers: {"Content-Type": "application/json"}`. |
+| `DELETE /cron/jobs/{provider}/{id}` | none | 204 | Confirmed in-page. |
+| `POST /cron/jobs/{provider}/{id}/trigger` | none | 202 | "Run now". |
 
 ## WebSocket `/ws`
 

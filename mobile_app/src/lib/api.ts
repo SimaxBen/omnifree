@@ -10,19 +10,36 @@ import type {
   ChatChunk,
   ChatRequest,
   ChatResponse,
+  CronJob,
+  CronJobCreate,
+  CronProvider,
   DBProvider,
+  DirectUploadTarget,
   DNSQueryLogEntry,
   DNSStatus,
   HealthStatus,
   HubEvent,
   ModelInfo,
+  PresignedUrl,
   ProviderStatus,
   QueryResult,
   QuotaInfo,
+  RerankRequest,
+  RerankResult,
   StoredObject,
   TableInfo,
+  TranscriptionResult,
+  UploadUrlRequest,
   VMInstance,
 } from './types';
+
+/**
+ * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
+ * through `POST /drive/upload`: they are sent straight to the storage backend via `POST /drive/upload-url`.
+ */
+export const DIRECT_UPLOAD_THRESHOLD = 4 * 1024 * 1024;
+
+export const DIRECT_UPLOAD_UNSUPPORTED = 'Large uploads need a storage backend with direct uploads (B2 or R2)';
 
 export class HubError extends Error {
   constructor(
@@ -80,6 +97,70 @@ export interface UploadOptions {
   key?: string;
   provider?: string;
   onProgress?: (fraction: number) => void;
+}
+
+export interface SmartUploadOptions extends UploadOptions {
+  prefix?: string;
+}
+
+export interface SmartUploadResult {
+  key: string;
+  provider: string;
+  /** True when the bytes went straight to the storage backend (presigned upload). */
+  direct: boolean;
+}
+
+export interface CronJobListing {
+  jobs: CronJob[];
+  errors: Record<string, string>;
+}
+
+export interface TranscribeOptions {
+  model?: string;
+  language?: string;
+  /** File name for the multipart part; recorded blobs have none. */
+  filename?: string;
+}
+
+interface XhrResult {
+  status: number;
+  statusText: string;
+  text: string;
+}
+
+/** XMLHttpRequest wrapped in a Promise, for upload progress events (fetch has none). */
+function xhrSend(
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body: XMLHttpRequestBodyInit,
+  onProgress?: (fraction: number) => void,
+): Promise<XhrResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    for (const [k, v] of Object.entries(headers)) {
+      try {
+        xhr.setRequestHeader(k, v);
+      } catch {
+        // Headers the browser manages itself (Content-Length, Host) cannot be set; it sends them anyway.
+      }
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onerror = () => reject(new TypeError('network error'));
+    xhr.onload = () => resolve({ status: xhr.status, statusText: xhr.statusText, text: xhr.responseText });
+    xhr.send(body);
+  });
+}
+
+function parseBody(text: string): unknown {
+  try {
+    return text ? JSON.parse(text) : undefined;
+  } catch {
+    return text;
+  }
 }
 
 export class HubClient {
@@ -233,6 +314,22 @@ export class HubClient {
     return groupModels(await this.request<unknown>('GET', '/llm/models', { signal }));
   }
 
+  /** `POST /llm/transcribe` (multipart): speech to text. */
+  transcribe(audio: Blob, opts: TranscribeOptions = {}, signal?: AbortSignal): Promise<TranscriptionResult> {
+    const form = new FormData();
+    const name = opts.filename ?? (typeof File !== 'undefined' && audio instanceof File ? audio.name : 'recording.webm');
+    form.append('file', audio, name);
+    if (opts.model) form.append('model', opts.model);
+    if (opts.language) form.append('language', opts.language);
+    return this.request<TranscriptionResult>('POST', '/llm/transcribe', { form, signal });
+  }
+
+  /** `POST /llm/rerank`: documents ordered by relevance to `query`. */
+  async rerank(req: RerankRequest, signal?: AbortSignal): Promise<RerankResult[]> {
+    const body = await this.request<unknown>('POST', '/llm/rerank', { json: req, signal });
+    return listOf<RerankResult>(body, 'results');
+  }
+
   // ------------------------------------------------------------------ agent
 
   async agentTasks(signal?: AbortSignal): Promise<AgentTask[]> {
@@ -262,32 +359,82 @@ export class HubClient {
     return normalizeDriveUsage(await this.request<unknown>('GET', '/drive/usage', { signal }));
   }
 
-  /** Multipart upload through XHR so the UI can show progress. */
-  driveUpload(file: File, opts: UploadOptions = {}): Promise<StoredObject> {
-    return new Promise((resolve, reject) => {
-      const form = new FormData();
-      form.append('file', file, file.name);
-      if (opts.key) form.append('key', opts.key);
-      if (opts.provider) form.append('provider', opts.provider);
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', this.url('/drive/upload'));
-      for (const [k, v] of Object.entries(this.headers({ Accept: 'application/json' }))) xhr.setRequestHeader(k, v);
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) opts.onProgress?.(e.loaded / e.total);
-      };
-      xhr.onerror = () => reject(new HubError(`Cannot reach hub at ${this.baseUrl}`, 0));
-      xhr.onload = () => {
-        let parsed: unknown = xhr.responseText;
-        try {
-          parsed = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
-        } catch {
-          parsed = xhr.responseText;
-        }
-        if (xhr.status >= 200 && xhr.status < 300) resolve(parsed as StoredObject);
-        else reject(new HubError(detailMessage(parsed, `${xhr.status} ${xhr.statusText}`), xhr.status, parsed));
-      };
-      xhr.send(form);
-    });
+  /** Multipart upload through the hub (XHR so the UI can show progress). Only for files up to DIRECT_UPLOAD_THRESHOLD. */
+  async driveUpload(file: File, opts: UploadOptions = {}): Promise<StoredObject> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (opts.key) form.append('key', opts.key);
+    if (opts.provider) form.append('provider', opts.provider);
+    let res: XhrResult;
+    try {
+      res = await xhrSend('POST', this.url('/drive/upload'), this.headers({ Accept: 'application/json' }), form, opts.onProgress);
+    } catch {
+      throw new HubError(`Cannot reach hub at ${this.baseUrl}`, 0);
+    }
+    const parsed = parseBody(res.text);
+    if (res.status >= 200 && res.status < 300) return parsed as StoredObject;
+    throw new HubError(detailMessage(parsed, `${res.status} ${res.statusText}`), res.status, parsed);
+  }
+
+  /** `POST /drive/upload-url`: a presigned target for sending a file straight to a storage backend. */
+  driveUploadUrl(req: UploadUrlRequest, signal?: AbortSignal): Promise<DirectUploadTarget> {
+    return this.request<DirectUploadTarget>('POST', '/drive/upload-url', { json: req, signal });
+  }
+
+  /**
+   * Sends `file` to a presigned target with exactly the returned method and headers (no bearer
+   * token: the URL carries its own signature).
+   */
+  async driveDirectUpload(file: Blob, target: DirectUploadTarget, onProgress?: (fraction: number) => void): Promise<void> {
+    // A typeless view of the bytes, so the browser adds no Content-Type beyond the returned headers.
+    const body = file.slice(0, file.size, '');
+    let res: XhrResult;
+    try {
+      res = await xhrSend(target.method || 'PUT', target.url, target.headers ?? {}, body, onProgress);
+    } catch {
+      throw new HubError(`Direct upload to ${target.provider} failed (network or CORS error)`, 0);
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const parsed = parseBody(res.text);
+      const detail = typeof parsed === 'string' ? parsed.slice(0, 200) : detailMessage(parsed, '');
+      throw new HubError(
+        `Direct upload to ${target.provider} failed: ${res.status} ${res.statusText}`.trim() + (detail ? ` (${detail})` : ''),
+        res.status,
+        parsed,
+      );
+    }
+  }
+
+  /**
+   * Uploads through the hub up to DIRECT_UPLOAD_THRESHOLD, and straight to the storage backend
+   * above it. A large file is never sent through the hub, which would reject it anyway.
+   */
+  async driveUploadFile(file: File, opts: SmartUploadOptions = {}): Promise<SmartUploadResult> {
+    if (file.size <= DIRECT_UPLOAD_THRESHOLD) {
+      const obj = await this.driveUpload(file, opts);
+      return { key: obj?.key ?? opts.key ?? file.name, provider: obj?.backend ?? '', direct: false };
+    }
+    let target: DirectUploadTarget;
+    try {
+      target = await this.driveUploadUrl({
+        filename: file.name,
+        size: file.size,
+        content_type: file.type || 'application/octet-stream',
+        ...(opts.prefix ? { prefix: opts.prefix } : {}),
+      });
+    } catch (err) {
+      if (err instanceof HubError && [404, 405, 422, 501].includes(err.status)) {
+        throw new HubError(DIRECT_UPLOAD_UNSUPPORTED, err.status, err.body);
+      }
+      throw err;
+    }
+    await this.driveDirectUpload(file, target, opts.onProgress);
+    return { key: target.key, provider: target.provider, direct: true };
+  }
+
+  /** `GET /drive/presign/{provider}/{key}`: a short-lived URL that serves the object without the hub. */
+  drivePresign(key: string, provider: string, signal?: AbortSignal): Promise<PresignedUrl> {
+    return this.request<PresignedUrl>('GET', driveObjectPath(provider, key, '/drive/presign'), { signal });
   }
 
   async driveDownload(key: string, provider: string): Promise<Blob> {
@@ -297,6 +444,29 @@ export class HubClient {
 
   driveDelete(key: string, provider: string): Promise<unknown> {
     return this.request('DELETE', driveObjectPath(provider, key));
+  }
+
+  // ------------------------------------------------------------------ cron / schedules
+
+  async cronProviders(signal?: AbortSignal): Promise<CronProvider[]> {
+    const body = await this.request<unknown>('GET', '/cron/providers', { signal });
+    return listOf<CronProvider>(body, 'providers');
+  }
+
+  async cronJobs(provider?: string, signal?: AbortSignal): Promise<CronJobListing> {
+    return normalizeCronJobs(await this.request<unknown>('GET', '/cron/jobs', { query: { provider }, signal }));
+  }
+
+  createCronJob(job: CronJobCreate): Promise<CronJob> {
+    return this.request<CronJob>('POST', '/cron/jobs', { json: job });
+  }
+
+  deleteCronJob(provider: string, id: string): Promise<void> {
+    return this.request<void>('DELETE', cronJobPath(provider, id));
+  }
+
+  triggerCronJob(provider: string, id: string): Promise<unknown> {
+    return this.request('POST', `${cronJobPath(provider, id)}/trigger`);
   }
 
   // ------------------------------------------------------------------ DNS & network
@@ -372,10 +542,21 @@ export class HubClient {
 
 // ------------------------------------------------------------------ normalisers
 
-/** `/drive/files/{provider}/{key}`: each key segment is encoded, `/` separators are kept. */
-export function driveObjectPath(provider: string, key: string): string {
+/** `/drive/files/{provider}/{key}` (or another base): each key segment is encoded, `/` separators are kept. */
+export function driveObjectPath(provider: string, key: string, base = '/drive/files'): string {
   const segments = key.split('/').filter(Boolean).map(encodeURIComponent);
-  return `/drive/files/${encodeURIComponent(provider)}/${segments.join('/')}`;
+  return `${base}/${encodeURIComponent(provider)}/${segments.join('/')}`;
+}
+
+export function cronJobPath(provider: string, id: string): string {
+  return `/cron/jobs/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`;
+}
+
+/** `GET /cron/jobs`: `{jobs: CronJob[], errors: {provider: message}}` (a flat array is accepted too). */
+export function normalizeCronJobs(body: unknown): CronJobListing {
+  const listing: CronJobListing = { jobs: listOf<CronJob>(body, 'jobs'), errors: {} };
+  if (isRecord(body) && isRecord(body.errors)) for (const [k, v] of Object.entries(body.errors)) listing.errors[k] = String(v);
+  return listing;
 }
 
 /**

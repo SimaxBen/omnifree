@@ -9,8 +9,8 @@ import DatabaseView from './views/DatabaseView';
 import DriveView from './views/DriveView';
 import LlmView from './views/llm/LlmView';
 import NetworkView from './views/NetworkView';
+import PluginsView from './views/PluginsView';
 import SettingsView from './views/SettingsView';
-import SwitchboardView from './views/SwitchboardView';
 
 type Tab = 'llm' | 'drive' | 'network' | 'db' | 'plugins';
 
@@ -19,7 +19,7 @@ const TABS: { id: Tab; label: string; title: string; icon: IconName }[] = [
   { id: 'drive', label: 'Drive', title: 'Unified Drive', icon: 'drive' },
   { id: 'network', label: 'Network', title: 'DNS & Network', icon: 'network' },
   { id: 'db', label: 'Data', title: 'Database Explorer', icon: 'database' },
-  { id: 'plugins', label: 'Plugins', title: 'Plugin Switchboard', icon: 'switchboard' },
+  { id: 'plugins', label: 'Plugins', title: 'Plugins & Schedules', icon: 'switchboard' },
 ];
 
 export default function App() {
@@ -83,7 +83,7 @@ export default function App() {
               {tab === 'drive' && <DriveView />}
               {tab === 'network' && <NetworkView />}
               {tab === 'db' && <DatabaseView />}
-              {tab === 'plugins' && <SwitchboardView />}
+              {tab === 'plugins' && <PluginsView />}
             </>
           )}
         </ErrorBoundary>

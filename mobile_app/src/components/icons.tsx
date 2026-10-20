@@ -25,6 +25,10 @@ const PATHS = {
   x: 'M6 6l12 12 M18 6L6 18',
   pulse: 'M3 12h4l3-7 4 14 3-7h4',
   agent: 'M12 3a4 4 0 110 8 4 4 0 010-8z M5 21c0-4 3-7 7-7s7 3 7 7 M9 7h.01 M15 7h.01',
+  clock: 'M12 3a9 9 0 110 18 9 9 0 010-18z M12 7v5l3 2',
+  plus: 'M12 5v14 M5 12h14',
+  copy: 'M9 9h11v11H9z M5 15H4V4h11v1',
+  mic: 'M12 3a3 3 0 013 3v5a3 3 0 01-6 0V6a3 3 0 013-3z M5 11a7 7 0 0014 0 M12 18v3',
 } as const;
 
 export type IconName = keyof typeof PATHS;
