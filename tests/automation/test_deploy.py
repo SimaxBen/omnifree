@@ -480,3 +480,13 @@ def test_hf_space_dir_has_docker_readme_and_sources(tmp_path: Path) -> None:
         assert (space / rel).is_file()
     assert not list(space.rglob("__pycache__"))
     assert not (space / ".env.vault").exists()
+
+
+def test_hub_env_vars_for_render(tmp_path: Path) -> None:
+    state = DeployState(tmp_path / "state.json")
+    state.set_url("pwa", "https://omnifree-pwa.pages.dev")
+    d, _ = _deployer(tmp_path, {"GROQ_API_KEY": "gsk_x", "HUB_API_TOKEN": "hub", "HF_TOKEN": "hf_no"}, state=state)
+    env = d._hub_env_vars(["https://app.example"])
+    assert env["GROQ_API_KEY"] == "gsk_x" and env["HUB_API_TOKEN"] == "hub" and "HF_TOKEN" not in env
+    assert env["OMNIFREE_CORS_ORIGINS"] == "https://app.example,https://omnifree-pwa.pages.dev"
+    assert env["EXTRA_PIP"] == "asyncpg motor pymongo" and env["OMNIFREE_ENVIRONMENT"] == "production"

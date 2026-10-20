@@ -749,6 +749,74 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         self.echo(f"hub: {url}")
         return url
 
+    # ------------------------------------------------------------------ deploy-hub (Render free web service)
+    def _hub_env_vars(self, cors: Sequence[str]) -> dict[str, str]:
+        hub = self.cfg.section("hub")
+        env = {name: value for name in self.hub_secret_names() if (value := self.optional(name))}
+        origins = [o for o in [*cors, self.state.urls.get("edge", ""), self.state.urls.get("pwa", ""),
+                               *self.state.data.get("pwa_mirrors", [])] if o]
+        env.update({"OMNIFREE_ENVIRONMENT": "production", "OMNIFREE_VAULT_REQUIRED": "false",
+                    # Docker build arg (Render passes env vars to `docker build`): optional SDKs.
+                    "EXTRA_PIP": str(hub.get("extra_pip", "asyncpg motor pymongo"))})
+        if origins:
+            env["OMNIFREE_CORS_ORIGINS"] = ",".join(dict.fromkeys(origins))
+        return env
+
+    def deploy_hub_render(self, *, cors: Sequence[str] = (), region: str | None = None,
+                          wait_s: float = 1200.0, poll_s: float = 15.0) -> str:
+        import time
+
+        hub = self.cfg.section("hub")
+        api = "https://api.render.com/v1"
+        headers = {"Authorization": f"Bearer {self.require('RENDER_API_KEY')}", "Accept": "application/json"}
+        name = str(hub.get("service") or "omnifree-hub")
+        repo = str(hub.get("repo_url") or "https://github.com/SimaxBen/omnifree")
+        env = self._hub_env_vars(cors)
+        env_list = [{"key": k, "value": v} for k, v in env.items()]
+        with httpx.Client(timeout=60, headers=headers) as http:
+            owner = http.get(f"{api}/owners", params={"limit": 20}).raise_for_status().json()[0]["owner"]["id"]
+            found = http.get(f"{api}/services", params={"name": name, "ownerId": owner, "limit": 20}).raise_for_status()
+            existing = [s["service"] for s in found.json() if s["service"]["name"] == name]
+            if existing:
+                service = existing[0]
+                http.put(f"{api}/services/{service['id']}/env-vars", json=env_list).raise_for_status()
+                deploy = http.post(f"{api}/services/{service['id']}/deploys", json={"clearCache": "do_not_clear"})
+                deploy_id = deploy.raise_for_status().json()["id"]
+            else:
+                body = {
+                    "type": "web_service", "name": name, "ownerId": owner, "repo": repo, "branch": "main",
+                    "autoDeploy": "yes", "envVars": env_list,
+                    "serviceDetails": {
+                        "runtime": "docker", "plan": "free", "region": region or str(hub.get("render_region", "frankfurt")),
+                        "healthCheckPath": "/healthz",
+                        "envSpecificDetails": {"dockerfilePath": "./hub_api/Dockerfile", "dockerContext": "."},
+                    },
+                }
+                created = http.post(f"{api}/services", json=body)
+                if created.status_code >= 400:
+                    raise DeployError(f"Render create service failed: {created.status_code} {created.text[:400]}")
+                payload = created.json()
+                service, deploy_id = payload["service"], payload.get("deployId")
+            url = str(service.get("serviceDetails", {}).get("url") or "")
+            self.echo(f"  render service {service['id']} ({len(env)} env vars), deploy {deploy_id}")
+            deadline = time.monotonic() + wait_s
+            status = ""
+            while deploy_id and time.monotonic() < deadline:
+                status = http.get(f"{api}/services/{service['id']}/deploys/{deploy_id}").raise_for_status().json()["status"]
+                if status in ("live", "build_failed", "update_failed", "canceled", "deactivated"):
+                    break
+                time.sleep(poll_s)
+            self.echo(f"  deploy status: {status}")
+            if deploy_id and status != "live":
+                raise DeployError(f"Render deploy ended in {status!r}: https://dashboard.render.com/web/{service['id']}")
+            if not url:
+                url = str(http.get(f"{api}/services/{service['id']}").raise_for_status()
+                          .json().get("serviceDetails", {}).get("url") or "")
+        if url:
+            self.state.set_url("hub", url)
+            self.echo(f"hub: {url}")
+        return url
+
     # ------------------------------------------------------------------ edge worker / PWA
     def _cloudflare_env(self) -> dict[str, str]:
         return {"CLOUDFLARE_API_TOKEN": self.require("CLOUDFLARE_API_TOKEN"),
@@ -1049,8 +1117,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--set-tailnet-dns", action="store_true", help="make Pi-hole the tailnet DNS server")
     s = sub.add_parser("deploy-edge", help="frps (+ WireGuard) on AMD VM2")
     s.add_argument("--wireguard", action="store_true", default=None)
-    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud) or a Hugging Face Space")
-    s.add_argument("--target", choices=["cloudrun", "hf"], default="cloudrun")
+    s = sub.add_parser("deploy-hub", help="build + deploy hub_api to Cloud Run (gcloud), Render (free web service) or a Hugging Face Space")
+    s.add_argument("--target", choices=["cloudrun", "render", "hf"], default="cloudrun")
     s.add_argument("--space", help="hf target: owner/name of the Space (default <user>/omnifree-hub)")
     s.add_argument("--project")
     s.add_argument("--region")
@@ -1103,6 +1171,8 @@ async def _dispatch(args: argparse.Namespace, deployer: Deployer) -> int:
         await deployer.deploy_pihole(set_tailnet_dns=args.set_tailnet_dns)
     elif cmd == "deploy-edge":
         await deployer.deploy_edge(wireguard=args.wireguard)
+    elif cmd == "deploy-hub" and args.target == "render":
+        await asyncio.to_thread(deployer.deploy_hub_render, cors=args.cors, region=args.region)
     elif cmd == "deploy-hub" and args.target == "hf":
         await asyncio.to_thread(deployer.deploy_hub_hf, space=args.space, cors=args.cors)
     elif cmd == "deploy-hub":
