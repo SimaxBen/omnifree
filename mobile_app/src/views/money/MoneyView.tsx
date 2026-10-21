@@ -9,12 +9,14 @@ import { cashflowBars, compactAmount, fxLabel, monthInitial, monthRangeLabel, sa
 import { useNav, usePullRefresh } from '../../lib/nav';
 import type { ExpenseCategory, MoneyAccount, MoneyOverview, RecurringExpense } from '../../lib/types';
 import { CATEGORY_COLOR } from './ExpenseEditor';
+import { BankSmsSheet } from './BankSmsSheet';
 import { AccountSheet, BudgetSheet, INCOME_LABEL, RecurringSheet } from './MoneySheets';
 
 type LocalSheet =
   | { kind: 'recurring'; item: RecurringExpense | null }
   | { kind: 'budget'; category: ExpenseCategory | null; current: { amount: number; currency: string } | null }
-  | { kind: 'account'; account: MoneyAccount | null };
+  | { kind: 'account'; account: MoneyAccount | null }
+  | { kind: 'sms' };
 
 const MAD = 'MAD';
 
@@ -360,8 +362,24 @@ export default function MoneyView() {
             <span className="min-w-0 flex-1">
               <span className="block text-[15px] text-ink-100">Expenses</span>
               <span className="block truncate text-[13px] text-ink-400">
-                {ov.spent.count} this month, {formatMoney(ov.spent.expenses, MAD)}: receipts, email and voice
+                {ov.spent.count} this month, {formatMoney(ov.spent.expenses, MAD)}: receipts, email, SMS and voice
               </span>
+            </span>
+            <Icon name="right" size={18} className="text-ink-500" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => open({ kind: 'sms' })}
+            className="press rise flex min-h-[60px] w-full items-center gap-3 rounded-card bg-ink-900 px-4 py-2 text-left ring-1 ring-inset ring-ink-800"
+            style={riseStyle(8)}
+          >
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#7FA8FF]/15 text-[#A9CBFF]">
+              <Icon name="chat" size={20} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[15px] text-ink-100">Bank SMS</span>
+              <span className="block truncate text-[13px] text-ink-400">Card payments and transfers from your bank's alerts</span>
             </span>
             <Icon name="right" size={18} className="text-ink-500" />
           </button>
@@ -381,6 +399,7 @@ export default function MoneyView() {
       {sheet?.kind === 'recurring' && <RecurringSheet key={sheet.id} open={sheet.open} item={sheet.item} onClose={close} />}
       {sheet?.kind === 'budget' && <BudgetSheet key={sheet.id} open={sheet.open} category={sheet.category} current={sheet.current} onClose={close} />}
       {sheet?.kind === 'account' && <AccountSheet key={sheet.id} open={sheet.open} account={sheet.account} onClose={close} />}
+      {sheet?.kind === 'sms' && <BankSmsSheet key={sheet.id} open={sheet.open} onClose={close} />}
     </div>
   );
 }

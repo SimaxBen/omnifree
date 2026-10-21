@@ -26,6 +26,7 @@ from hub_api.routers import chats as chats_router
 from hub_api.routers import digest as digest_router
 from hub_api.routers import inbox as inbox_router
 from hub_api.routers import rag as rag_router
+from hub_api.routers import sms as sms_router
 from hub_api.routers.llm import ROUTED_VIA_HEADER
 from hub_api.settings import HubSettings
 from hub_api.state import HubState
@@ -144,7 +145,9 @@ def create_app(
         app.include_router(module.router, dependencies=protected)
     for module in (notes, expenses, money, links, inbox_router, digest_router, chats_router):  # personal apps (data in D1)
         app.include_router(module.router, dependencies=protected)
+    app.include_router(sms_router.router, dependencies=protected)  # /money/sms/log, /money/sms/setup
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)
+    app.include_router(sms_router.webhook_router)  # POST /money/sms: hub token or SMS_WEBHOOK_TOKEN (header or ?token=)
 
     @app.get("/events/recent", tags=["meta"], dependencies=protected)
     async def recent_events(limit: int = 100, types: str | None = None) -> list[dict[str, Any]]:
