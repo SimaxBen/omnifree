@@ -21,7 +21,7 @@ from core.interfaces import ChatMessage, ChatRequest, ProviderError, Transcripti
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "resolve_due", "derive_title", "SCHEMA"]
+__all__ = ["router", "resolve_due", "derive_title", "SCHEMA", "store_and_transcribe"]
 
 log = logging.getLogger("omnifree.hub.notes")
 
@@ -333,25 +333,16 @@ async def voice_note(
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
-    audio = await read_upload(file, state.hub.max_upload_bytes)
     today = local_today()
-    audio_id = new_id()
-    ext = _audio_ext(file.filename, file.content_type)
-    key = f"voice/{today:%Y}/{today:%m}/{audio_id}.{ext}"
-    content_type = file.content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
-    meta = {"original-filename": file.filename} if file.filename else None
-    await state.router.storage_put(key, audio, content_type, meta)
-
-    tr = await state.router.transcribe(
-        TranscriptionRequest(audio=audio, filename=f"{audio_id}.{ext}", language=language or None)
-    )
-    transcript = (tr.text or "").strip()
-    if not transcript:
-        raise HTTPException(422, detail="no speech detected in the recording")
+    key, transcript = await store_and_transcribe(state, file, today, language)
 
     structured = await _structure(state, transcript, today, language)
     tasks_in = structured["tasks"] if mode != "note" else []
-    save_note = mode in ("note", "both", "auto") or not tasks_in  # "tasks" with nothing actionable keeps the note
+    # "auto" also records money the speaker spent or received; a memo that is only about money
+    # ("j'ai payé 45 dh de taxi") then makes no note.
+    money_in = structured["money"] if mode == "auto" else []
+    money_only = bool(money_in) and structured["money_only"] and not tasks_in
+    save_note = (mode in ("note", "both", "auto") and not money_only) or (mode == "tasks" and not tasks_in)
 
     note: dict[str, Any] | None = None
     if save_note:
@@ -376,7 +367,36 @@ async def voice_note(
         )
         for t in tasks_in
     ]
-    return {"transcript": transcript, "note": note, "tasks": tasks, "audio_key": key}
+    created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": []}
+    if money_in:
+        from hub_api.routers import money  # money imports this module
+
+        created = await money.create_entries(db, money_in, audio_key=key)
+    return {"transcript": transcript, "note": note, "tasks": tasks, "audio_key": key, **created}
+
+
+async def store_and_transcribe(
+    state: HubState, file: UploadFile, today: date, language: str | None
+) -> tuple[str, str]:
+    """Keep the recording under ``voice/<yyyy>/<mm>/`` in the Drive and transcribe it: (key, transcript).
+
+    Answers 422 when no speech is heard. Shared with ``POST /money/voice``.
+    """
+    audio = await read_upload(file, state.hub.max_upload_bytes)
+    audio_id = new_id()
+    ext = _audio_ext(file.filename, file.content_type)
+    key = f"voice/{today:%Y}/{today:%m}/{audio_id}.{ext}"
+    content_type = file.content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
+    meta = {"original-filename": file.filename} if file.filename else None
+    await state.router.storage_put(key, audio, content_type, meta)
+
+    tr = await state.router.transcribe(
+        TranscriptionRequest(audio=audio, filename=f"{audio_id}.{ext}", language=language or None)
+    )
+    transcript = (tr.text or "").strip()
+    if not transcript:
+        raise HTTPException(422, detail="no speech detected in the recording")
+    return key, transcript
 
 
 _AUDIO_EXT = {
@@ -404,16 +424,24 @@ def _voice_prompt(today: date) -> str:
         "Answer with ONE JSON object only, no prose, no code fences, with exactly these keys:\n"
         '{"title": "short title (max 8 words)", "body": "the memo rewritten as clean markdown, same language, '
         'nothing invented", "tags": ["lowercase", "keywords"], "tasks": [{"title": "imperative action", '
-        '"due": "YYYY-MM-DD or null", "priority": "low|normal|high", "details": "string or null"}]}\n'
+        '"due": "YYYY-MM-DD or null", "priority": "low|normal|high", "details": "string or null"}], '
+        '"money": [{"type": "expense|income", "amount": number, "currency": "ISO 4217 code (dh/dirham = MAD) or null", '
+        '"merchant": "who was paid, or who paid", "category": "string", "date": "YYYY-MM-DD or null", '
+        '"note": "string or null"}], "money_only": true|false}\n'
         "Rules: tasks only for concrete actionable items the speaker must do (otherwise an empty list); "
         "convert every relative date (tomorrow, friday, next week ...) to an absolute YYYY-MM-DD using today's date; "
-        "due is null when no date is mentioned; priority 'high' only when urgency is expressed."
+        "due is null when no date is mentioned; priority 'high' only when urgency is expressed. "
+        "money: only amounts the speaker already spent or received (e.g. \"j'ai payé 45 dh de taxi\", "
+        "\"I got my salary\"), never plans, prices or bills still to pay (those are tasks); otherwise an empty list. "
+        "money_only is true when the memo is about nothing but those amounts."
     )
 
 
 async def _structure(state: HubState, transcript: str, today: date, language: str | None) -> dict[str, Any]:
     """LLM pass over the transcript; falls back to a plain note when the answer is unusable."""
-    fallback: dict[str, Any] = {"title": derive_title(transcript), "body": transcript, "tags": [], "tasks": []}
+    fallback: dict[str, Any] = {
+        "title": derive_title(transcript), "body": transcript, "tags": [], "tasks": [], "money": [], "money_only": False,
+    }
     request = ChatRequest(
         messages=[
             ChatMessage(role="system", content=_voice_prompt(today)),
@@ -452,7 +480,15 @@ async def _structure(state: HubState, transcript: str, today: date, language: st
                 "details": details.strip() if isinstance(details, str) and details.strip() else None,
             }
         )
-    return {"title": title, "body": body, "tags": _clean_tags(data.get("tags")), "tasks": tasks}
+    money: list[dict[str, Any]] = []
+    if isinstance(data.get("money"), list) and data["money"]:
+        from hub_api.routers.money import parse_money_entries  # money imports this module
+
+        money = parse_money_entries({"entries": data["money"]}, today)
+    return {
+        "title": title, "body": body, "tags": _clean_tags(data.get("tags")), "tasks": tasks,
+        "money": money, "money_only": data.get("money_only") is True,
+    }
 
 
 @router.get("/notes/{note_id}")

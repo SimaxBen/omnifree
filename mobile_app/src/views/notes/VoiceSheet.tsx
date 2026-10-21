@@ -2,45 +2,81 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '../../components/icons';
 import { RecordButton, canRecord, formatClock, useRecorder } from '../../components/Recorder';
 import { Sheet } from '../../components/Sheet';
-import { Button, Chip, ErrorNote, Segmented, riseStyle } from '../../components/ui';
+import { Badge, Button, Chip, ErrorNote, Segmented, riseStyle } from '../../components/ui';
+import { formatMoney } from '../../lib/apps';
 import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
+import { voiceMoneySummary } from '../../lib/money';
 import { readPref, writePref } from '../../lib/settings';
-import type { Note, Task, VoiceMode, VoiceNoteResult } from '../../lib/types';
+import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
+import { CATEGORY_COLOR } from '../money/ExpenseEditor';
+import { INCOME_LABEL } from '../money/MoneySheets';
 import { TaskRow } from './TaskRow';
 
+// 'both' behaves like 'auto' on the hub (a note plus any task), so the phone shows four clear choices.
 const MODES: { value: VoiceMode; label: string }[] = [
   { value: 'auto', label: 'Auto' },
   { value: 'note', label: 'Note' },
   { value: 'tasks', label: 'Tasks' },
-  { value: 'both', label: 'Both' },
+  { value: 'money', label: 'Money' },
 ];
 
 const MODE_HINT: Record<VoiceMode, string> = {
-  auto: 'Always a note; tasks too when you say something to do.',
+  auto: 'A note, plus tasks and money when you mention them.',
   note: 'A cleaned-up note only.',
   tasks: 'Tasks only (a note is kept if no task is heard).',
   both: 'A note and every task in it.',
+  money: 'Say what you spent or received: "45 dh taxi, 30 dh coffee".',
 };
 
-/** Record, send to POST /notes/voice, show what the hub made of it. */
-export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolean; onClose: () => void; onOpenNote: (n: Note) => void }) {
-  const { client } = useHub();
+const MONEY_KINDS: { value: VoiceMoneyKind; label: string }[] = [
+  { value: 'auto', label: 'Spent or received' },
+  { value: 'expense', label: 'Spent' },
+  { value: 'income', label: 'Received' },
+];
+
+function storedMode(): VoiceMode {
+  const m = readPref<VoiceMode>('voice.mode', 'auto');
+  return m === 'both' || !MODES.some((x) => x.value === m) ? 'auto' : m;
+}
+
+/** Record, send to POST /notes/voice (POST /money/voice in money mode), show what the hub made of it. */
+export default function VoiceSheet({
+  open,
+  onClose,
+  onOpenNote,
+  initialMode,
+  onEditExpense,
+  onEditIncome,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onOpenNote: (n: Note) => void;
+  /** Opened from a money screen: start in that mode without changing the saved choice. */
+  initialMode?: VoiceMode;
+  onEditExpense?: (e: Expense) => void;
+  onEditIncome?: (i: Income) => void;
+}) {
+  const { client, notify } = useHub();
   const rec = useRecorder();
-  const [mode, setMode] = useState<VoiceMode>(() => readPref<VoiceMode>('voice.mode', 'auto'));
+  const [mode, setMode] = useState<VoiceMode>(() => initialMode ?? storedMode());
+  const [moneyKind, setMoneyKind] = useState<VoiceMoneyKind>('auto');
   const [notebook, setNotebook] = useState<string>(() => readPref('voice.notebook', 'Inbox'));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VoiceNoteResult | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const abort = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const touched = useRef(false);
   const books = useHubData((c, s) => c.notes({ limit: 1 }, s), []);
 
   useEffect(() => {
-    writePref('voice.mode', mode);
+    if (!initialMode || touched.current) writePref('voice.mode', mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
   useEffect(() => {
     writePref('voice.notebook', notebook);
@@ -58,10 +94,17 @@ export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolea
     const ctrl = new AbortController();
     abort.current = ctrl;
     try {
-      const res = await client.voiceNote(blob, { mode, notebook, filename }, ctrl.signal);
+      let res: VoiceNoteResult;
+      if (mode === 'money') {
+        const m = await client.voiceMoney(blob, { kind: moneyKind, filename }, ctrl.signal);
+        res = { transcript: m.transcript, audio_key: m.audio_key, note: null, tasks: [], expenses: m.expenses, incomes: m.incomes };
+      } else {
+        res = await client.voiceNote(blob, { mode, notebook, filename }, ctrl.signal);
+      }
       setResult(res);
       setTasks(res.tasks);
       announce('notes', 'tasks');
+      if (res.expenses?.length || res.incomes?.length) announce('expenses', 'money');
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const msg = errorText(err);
@@ -96,14 +139,38 @@ export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolea
     rec.reset();
   };
 
+  const expenses = result?.expenses ?? [];
+  const incomes = result?.incomes ?? [];
+  const undoMoney = async () => {
+    setUndoing(true);
+    try {
+      await Promise.all([...expenses.map((e) => client.deleteExpense(e.id)), ...incomes.map((i) => client.deleteIncome(i.id))]);
+      announce('expenses', 'money');
+      notify(`Removed ${voiceMoneySummary(expenses, incomes)}`, 'ok');
+      if (!result?.note && !tasks.length) again();
+      else setResult((r) => r && { ...r, expenses: [], incomes: [] });
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setUndoing(false);
+    }
+  };
+
   const notebooks = Array.from(new Set(['Inbox', ...(books.data?.notebooks.map((b) => b.name) ?? [])]));
 
   return (
-    <Sheet open={open} onClose={onClose} title={result ? 'Captured' : 'Voice note'}>
+    <Sheet open={open} onClose={onClose} title={result ? 'Captured' : mode === 'money' ? 'Voice money' : 'Voice note'}>
       {!result ? (
         <div className="flex flex-col items-center gap-5 pb-2">
           <div className="w-full space-y-2">
-            <Segmented value={mode} onChange={setMode} options={MODES} />
+            <Segmented
+              value={mode}
+              onChange={(m) => {
+                touched.current = true;
+                setMode(m);
+              }}
+              options={MODES}
+            />
             <p className="px-1 text-center text-[13px] text-ink-400">{MODE_HINT[mode]}</p>
           </div>
 
@@ -116,7 +183,7 @@ export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolea
                     <span>.</span>
                     <span>.</span>
                   </div>
-                  <p className="text-[15px] text-ink-200">Transcribing and sorting</p>
+                  <p className="text-[15px] text-ink-200">{mode === 'money' ? 'Transcribing and counting' : 'Transcribing and sorting'}</p>
                   <p className="text-[13px] text-ink-500">Usually a few seconds</p>
                 </div>
               </div>
@@ -132,7 +199,17 @@ export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolea
             )}
           </div>
 
-          {!rec.recording && !busy && (
+          {!rec.recording && !busy && mode === 'money' && (
+            <div className="no-scrollbar -mx-5 flex w-[calc(100%+40px)] gap-2 overflow-x-auto px-5">
+              {MONEY_KINDS.map((k) => (
+                <Chip key={k.value} active={k.value === moneyKind} onClick={() => setMoneyKind(k.value)}>
+                  {k.label}
+                </Chip>
+              ))}
+            </div>
+          )}
+
+          {!rec.recording && !busy && mode !== 'money' && (
             <div className="no-scrollbar -mx-5 flex w-[calc(100%+40px)] gap-2 overflow-x-auto px-5">
               {notebooks.map((n) => (
                 <Chip key={n} active={n === notebook} onClick={() => setNotebook(n)}>
@@ -179,6 +256,78 @@ export default function VoiceSheet({ open, onClose, onOpenNote }: { open: boolea
               <span className="mt-1 line-clamp-3 block text-[14px] text-ink-300">{plainText(result.note.body, 220)}</span>
               {result.note.tags.length > 0 && <span className="mt-2 block text-[13px] text-signal">{result.note.tags.map((t) => `#${t}`).join(' ')}</span>}
             </button>
+          )}
+
+          {(expenses.length > 0 || incomes.length > 0) && (
+            <div className="space-y-1">
+              <div className="flex min-h-[44px] items-center justify-between gap-2 px-1">
+                <h3 className="font-display text-[16px] font-semibold text-ink-100">Recorded {voiceMoneySummary(expenses, incomes)}</h3>
+                <button
+                  type="button"
+                  onClick={() => void undoMoney()}
+                  disabled={undoing}
+                  className="press flex min-h-[44px] shrink-0 items-center gap-1 text-[14px] font-semibold text-signal disabled:opacity-40"
+                >
+                  <Icon name="undo" size={15} />
+                  {undoing ? 'Undoing…' : 'Undo'}
+                </button>
+              </div>
+              <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-850">
+                {expenses.map((e, i) => (
+                  <button
+                    key={e.id}
+                    type="button"
+                    onClick={() => onEditExpense?.(e)}
+                    className="press rise flex min-h-[60px] w-full items-center gap-3 px-3 py-2 text-left"
+                    style={riseStyle(i + 1)}
+                  >
+                    <span
+                      className="grid h-9 w-9 shrink-0 place-items-center rounded-full"
+                      style={{ background: `${CATEGORY_COLOR[e.category] ?? '#8A8FBF'}22`, color: CATEGORY_COLOR[e.category] ?? '#8A8FBF' }}
+                    >
+                      <Icon name="wallet" size={16} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[15px] text-ink-100">{e.merchant || 'Expense'}</span>
+                      <span className="block truncate text-[12px] capitalize text-ink-500">
+                        {e.category}, {e.date}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-display text-[16px] font-semibold text-ink-100">-{formatMoney(e.total, e.currency)}</span>
+                    <Icon name="edit" size={15} className="shrink-0 text-ink-500" />
+                  </button>
+                ))}
+                {incomes.map((inc, i) => (
+                  <button
+                    key={inc.id}
+                    type="button"
+                    onClick={() => onEditIncome?.(inc)}
+                    className="press rise flex min-h-[60px] w-full items-center gap-3 px-3 py-2 text-left"
+                    style={riseStyle(expenses.length + i + 1)}
+                  >
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-mint-400/15 text-mint-400">
+                      <Icon name="cash" size={16} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[15px] text-ink-100">{inc.source || INCOME_LABEL[inc.category]}</span>
+                      <span className="block truncate text-[12px] text-ink-500">
+                        {INCOME_LABEL[inc.category]}, {inc.date}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-display text-[16px] font-semibold text-mint-400">+{formatMoney(inc.amount, inc.currency)}</span>
+                    <Icon name="edit" size={15} className="shrink-0 text-ink-500" />
+                  </button>
+                ))}
+              </div>
+              <p className="px-1 pt-1 text-[12px] text-ink-500">Tap a line to fix it.</p>
+            </div>
+          )}
+
+          {mode === 'money' && !expenses.length && !incomes.length && (
+            <div className="rise rounded-card bg-ink-850 p-4 ring-1 ring-inset ring-ink-700">
+              <Badge tone="warn">No amount heard</Badge>
+              <p className="pt-2 text-[14px] text-ink-300">Say the amount and what it was for, for example "45 dirhams taxi".</p>
+            </div>
           )}
 
           {tasks.length > 0 && (

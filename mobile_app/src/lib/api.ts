@@ -4,6 +4,7 @@
 
 import type { HubSettings } from './settings';
 import { readSSE } from './sse';
+import { normalizeMoneyOverview } from './money';
 import type {
   AgentTask,
   AgentTaskCreate,
@@ -32,6 +33,20 @@ import type {
   TaskPatch,
   VoiceMode,
   VoiceNoteResult,
+  AccountCreate,
+  AccountPatch,
+  CategoryBudget,
+  ExpenseCategory,
+  Income,
+  IncomeCreate,
+  IncomePatch,
+  MoneyAccount,
+  MoneyOverview,
+  RecurringCreate,
+  RecurringExpense,
+  RecurringPatch,
+  VoiceMoneyKind,
+  VoiceMoneyResult,
   ChatChunk,
   Digest,
   DigestPeriod,
@@ -673,6 +688,67 @@ export class HubClient {
 
   deleteExpense(id: string): Promise<void> {
     return this.request<void>('DELETE', `/expenses/${encodeURIComponent(id)}`);
+  }
+
+  // ------------------------------------------------------------------ money (incomes, recurring, accounts, budgets)
+
+  /** `GET /money/overview?month=`: income, spent, left, budgets, 6-month cash flow, accounts (in MAD). */
+  async moneyOverview(month: string, signal?: AbortSignal): Promise<MoneyOverview> {
+    return normalizeMoneyOverview(await this.request<unknown>('GET', '/money/overview', { query: { month }, signal }), month);
+  }
+
+  /** `POST /money/voice` (multipart): "j'ai paye 45 dh de taxi" -> expenses and incomes. */
+  voiceMoney(audio: Blob, opts: { kind?: VoiceMoneyKind; language?: string; filename?: string } = {}, signal?: AbortSignal): Promise<VoiceMoneyResult> {
+    const form = new FormData();
+    const name = opts.filename ?? (typeof File !== 'undefined' && audio instanceof File ? audio.name : 'voice.webm');
+    form.append('file', audio, name);
+    form.append('kind', opts.kind ?? 'auto');
+    if (opts.language) form.append('language', opts.language);
+    return this.request<VoiceMoneyResult>('POST', '/money/voice', { form, signal });
+  }
+
+  createIncome(income: IncomeCreate): Promise<Income> {
+    return this.request<Income>('POST', '/money/incomes', { json: income });
+  }
+
+  updateIncome(id: string, patch: IncomePatch): Promise<Income> {
+    return this.request<Income>('PATCH', `/money/incomes/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteIncome(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/incomes/${encodeURIComponent(id)}`);
+  }
+
+  createRecurring(item: RecurringCreate): Promise<RecurringExpense> {
+    return this.request<RecurringExpense>('POST', '/money/recurring', { json: item });
+  }
+
+  updateRecurring(id: string, patch: RecurringPatch): Promise<RecurringExpense> {
+    return this.request<RecurringExpense>('PATCH', `/money/recurring/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteRecurring(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/recurring/${encodeURIComponent(id)}`);
+  }
+
+  createAccount(account: AccountCreate): Promise<MoneyAccount> {
+    return this.request<MoneyAccount>('POST', '/money/accounts', { json: account });
+  }
+
+  updateAccount(id: string, patch: AccountPatch): Promise<MoneyAccount> {
+    return this.request<MoneyAccount>('PATCH', `/money/accounts/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteAccount(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/accounts/${encodeURIComponent(id)}`);
+  }
+
+  setBudget(category: ExpenseCategory, amount: number, currency = 'MAD'): Promise<CategoryBudget> {
+    return this.request<CategoryBudget>('PUT', `/money/budgets/${encodeURIComponent(category)}`, { json: { amount, currency } });
+  }
+
+  deleteBudget(category: ExpenseCategory): Promise<void> {
+    return this.request<void>('DELETE', `/money/budgets/${encodeURIComponent(category)}`);
   }
 
   // ------------------------------------------------------------------ Gmail receipts import

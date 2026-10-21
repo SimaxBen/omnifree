@@ -4,9 +4,10 @@ import { Icon, type IconName } from './components/icons';
 import { Sheet } from './components/Sheet';
 import { cx, haptic, riseStyle } from './components/ui';
 import { ActionsContext, type AppActions } from './lib/actions';
-import type { Expense, Note, StoredObject } from './lib/types';
+import type { Expense, Income, Note, StoredObject, VoiceMode } from './lib/types';
 import { DropSheet, FileActionsSheet, UploadSheet } from './views/drive/DriveSheets';
 import ExpenseEditor, { type ExpenseMode } from './views/money/ExpenseEditor';
+import { IncomeSheet } from './views/money/MoneySheets';
 import NoteEditor from './views/notes/NoteEditor';
 import VoiceSheet from './views/notes/VoiceSheet';
 
@@ -29,7 +30,7 @@ function useSession<T>() {
 }
 
 const CAPTURE: { id: 'voice' | 'note' | 'receipt' | 'upload'; icon: IconName; label: string; hint: string; tone: string }[] = [
-  { id: 'voice', icon: 'mic', label: 'Voice note', hint: 'Speak; get a note and tasks', tone: 'bg-danger-400/15 text-danger-400' },
+  { id: 'voice', icon: 'mic', label: 'Voice', hint: 'Speak; get a note, tasks or money', tone: 'bg-danger-400/15 text-danger-400' },
   { id: 'note', icon: 'edit', label: 'Text note', hint: 'Markdown, saves as you type', tone: 'bg-signal/15 text-signal' },
   { id: 'receipt', icon: 'camera', label: 'Receipt', hint: 'Snap it; the total is read for you', tone: 'bg-mint-400/15 text-mint-400' },
   { id: 'upload', icon: 'upload', label: 'Upload', hint: 'Files to your Drive', tone: 'bg-[#7FA8FF]/15 text-[#A9CBFF]' },
@@ -37,7 +38,8 @@ const CAPTURE: { id: 'voice' | 'note' | 'receipt' | 'upload'; icon: IconName; la
 
 export default function AppSheets({ children, captureOpen, setCaptureOpen }: { children: ReactNode; captureOpen: boolean; setCaptureOpen: (v: boolean) => void }) {
   const note = useSession<{ note: Note | null; seed?: { notebook?: string; body?: string } }>();
-  const voice = useSession<null>();
+  const voice = useSession<{ mode?: VoiceMode }>();
+  const income = useSession<Income | null>();
   const expense = useSession<ExpenseMode>();
   const upload = useSession<{ files: File[]; folder: string }>();
   const actions = useSession<StoredObject>();
@@ -52,10 +54,12 @@ export default function AppSheets({ children, captureOpen, setCaptureOpen }: { c
       openCapture: () => setCaptureOpen(true),
       newNote: (seed) => note.open({ note: null, seed }),
       openNote: (n) => note.open({ note: n }),
-      recordVoice: () => voice.open(null),
+      recordVoice: () => voice.open({}),
       scanReceipt: () => cameraRef.current?.click(),
       addExpense: () => expense.open({ kind: 'new' }),
       editExpense: (e: Expense) => expense.open({ kind: 'edit', expense: e }),
+      recordMoney: () => voice.open({ mode: 'money' }),
+      editIncome: (i: Income | null) => income.open(i),
       pickUpload: (folder = '') => {
         uploadFolder.current = folder;
         pickRef.current?.click();
@@ -127,12 +131,22 @@ export default function AppSheets({ children, captureOpen, setCaptureOpen }: { c
           key={voice.s.id}
           open={voice.s.open}
           onClose={voice.close}
+          initialMode={voice.s.data.mode}
           onOpenNote={(n) => {
             voice.close();
             note.open({ note: n });
           }}
+          onEditExpense={(e) => {
+            voice.close();
+            expense.open({ kind: 'edit', expense: e });
+          }}
+          onEditIncome={(i) => {
+            voice.close();
+            income.open(i);
+          }}
         />
       )}
+      {income.s && <IncomeSheet key={income.s.id} open={income.s.open} income={income.s.data} onClose={income.close} />}
       {expense.s && <ExpenseEditor key={expense.s.id} open={expense.s.open} mode={expense.s.data} onClose={expense.close} />}
       {upload.s && <UploadSheet key={upload.s.id} open={upload.s.open} files={upload.s.data.files} folder={upload.s.data.folder} onClose={upload.close} />}
       {viewer && (
