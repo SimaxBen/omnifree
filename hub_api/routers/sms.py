@@ -326,10 +326,14 @@ async def handle_sms(
             parsed.reason = "could not read it (no LLM available)"
     elif parsed.kind == "unknown" and not looks_like_bank(sender, text):
         parsed.reason = "not a bank message"
+    if re.fullmatch(r"\s*%\w+%\s*", text or "") or re.fullmatch(r"\s*%\w+%\s*", sender or ""):
+        parsed.kind, parsed.reason = "ignored", "test from the forwarding app (its %placeholders% were not filled in)"
     out["parsed"] = parsed.public()
     ref = sms_ref(sender, text, stamp)
     otp = parsed.kind == "ignored" and parsed.reason == "one-time code"
-    stored_text = None if otp else mask_text(text)
+    # Only bank messages keep their (masked) text: personal SMS forwarded by an "all senders" rule are never stored.
+    private = otp or parsed.reason == "not a bank message"
+    stored_text = None if private else mask_text(text)
 
     if parsed.kind in ("ignored", "unknown"):
         reason = parsed.reason or "not a transaction"

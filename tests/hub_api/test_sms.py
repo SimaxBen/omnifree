@@ -271,6 +271,12 @@ def test_llm_fallback_only_for_unreadable_bank_sms(app_hub) -> None:
     # Not a bank: no LLM call at all.
     out = _sms(app_hub, "Salut, rdv a 18h30 devant le cafe?", sender="+212600000000", stamp=7)
     assert out["ignored"] == "not a bank message" and len(fa.CHAT_LOG) == 2
+    personal = [m for m in app_hub.get("/money/sms/log").json()["messages"] if m["reason"] == "not a bank message"]
+    assert personal and all(m["text"] is None for m in personal)  # personal SMS are never stored
+
+    # The forwarding app's own "test" sends its template with the placeholders unfilled.
+    out = _sms(app_hub, "%text%", sender="%from%", stamp=8)
+    assert out["ignored"].startswith("test from the forwarding app") and len(fa.CHAT_LOG) == 2
 
 
 def test_plain_text_and_empty_bodies(app_hub) -> None:
