@@ -1,0 +1,259 @@
+import { useState, type ReactNode } from 'react';
+import { Icon } from '../components/icons';
+import { Badge, Button, Card, ErrorNote, IconButton, SectionTitle, SkeletonList, Spinner, StatusDot, Toggle, cx } from '../components/ui';
+import { ago } from '../lib/digest';
+import { copyText } from '../lib/dom';
+import { errorText, useHub, useHubData } from '../lib/hub';
+import { useNav } from '../lib/nav';
+import { NOTIFY_KINDS, maskFeedUrl, maskSecret, ntfySubscribeLink } from '../lib/notify';
+import type { NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
+
+const PLAY_URL = 'https://play.google.com/store/apps/details?id=io.heckel.ntfy';
+const APPSTORE_URL = 'https://apps.apple.com/app/ntfy/id1625396347';
+
+function SecretRow({ label, value, masked, onCopy }: { label: string; value: string; masked: string; onCopy: () => void }) {
+  const [reveal, setReveal] = useState(false);
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-ink-400">{label}</p>
+      <div className="flex items-center gap-1 rounded-row bg-ink-850 pl-3 ring-1 ring-inset ring-ink-700">
+        <span className={cx('min-w-0 flex-1 break-all py-2 font-mono text-[13px]', reveal ? 'text-ink-100' : 'text-ink-400')}>
+          {reveal ? value : masked}
+        </span>
+        <IconButton icon="eye" label={reveal ? `Hide ${label}` : `Show ${label}`} onClick={() => setReveal((v) => !v)} className={cx('h-10 w-10', reveal && 'text-signal')} />
+        <IconButton icon="copy" label={`Copy ${label}`} onClick={onCopy} className="h-10 w-10" />
+      </div>
+    </div>
+  );
+}
+
+function Steps({ items }: { items: ReactNode[] }) {
+  return (
+    <ol className="space-y-2">
+      {items.map((s, i) => (
+        <li key={i} className="flex gap-3 text-[13px] leading-snug text-ink-300">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-ink-800 font-mono text-[11px] text-ink-200">{i + 1}</span>
+          <span className="min-w-0 pt-0.5">{s}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function CalendarCard({ copy }: { copy: (text: string, what: string) => void }) {
+  const info = useHubData((c, s) => c.calendarInfo(s), []);
+  return (
+    <div>
+      <SectionTitle>Calendar feed</SectionTitle>
+      <Card className="space-y-3 p-3">
+        <p className="flex items-center gap-2 text-sm text-ink-200">
+          <Icon name="calendar" size={16} className="text-ink-400" />
+          Your tasks with a due date, in Google Calendar
+        </p>
+        {info.loading && <Spinner />}
+        {info.error && <ErrorNote message={info.error} onRetry={info.reload} />}
+        {info.data && !info.data.configured && (
+          <p className="text-xs text-amber-400">
+            Not set up yet: store a long random value in the vault key <span className="font-mono">{info.data.token_key}</span> and redeploy the hub.
+          </p>
+        )}
+        {info.data?.url && (
+          <>
+            <SecretRow label="Feed URL" value={info.data.url} masked={maskFeedUrl(info.data.url)} onCopy={() => copy(info.data?.url ?? '', 'Feed URL')} />
+            <p className="text-[11px] text-ink-500">The URL is the password: anyone who has it can read your tasks. Do not share it.</p>
+          </>
+        )}
+        <Steps
+          items={[
+            <>Copy the feed URL above.</>,
+            <>On a computer, open Google Calendar (calendar.google.com). The phone app cannot add a URL.</>,
+            <>In the left column, next to <b className="text-ink-100">Other calendars</b>, click <b className="text-ink-100">+</b> and choose <b className="text-ink-100">From URL</b>.</>,
+            <>Paste the URL and click <b className="text-ink-100">Add calendar</b>. It then shows on your phone too.</>,
+          ]}
+        />
+        <p className="text-[11px] leading-snug text-ink-500">
+          Google refreshes subscribed calendars on its own schedule, every few hours and up to about 24 h, so a new task can take a while to show. The same URL works in Apple Calendar (File &gt; New Calendar Subscription, or Settings &gt; Calendar &gt; Accounts on iPhone) and Outlook (Add calendar &gt; Subscribe from web). Done tasks of the last 14 days show with a ✓.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+export default function NotificationsView() {
+  const { client, notify } = useHub();
+  const { go } = useNav();
+  const status = useHubData((c, s) => c.notifyStatus(s), []);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState<NotifyKind | null>(null);
+  const [previewing, setPreviewing] = useState<NotifyKind | null>(null);
+  const [preview, setPreview] = useState<NotifyResult | null>(null);
+
+  const copy = async (text: string, what: string) => {
+    const ok = await copyText(text);
+    notify(ok ? `${what} copied` : 'Copy failed: select the text and copy it manually', ok ? 'ok' : 'error');
+  };
+
+  const sendTest = async () => {
+    setTesting(true);
+    try {
+      await client.notifyTest();
+      notify('Test push sent: check your phone', 'ok');
+      status.reload();
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const toggle = async (kind: NotifyKind, enabled: boolean) => {
+    setSaving(kind);
+    status.setData((prev) => prev && { ...prev, prefs: { ...prev.prefs, [kind]: enabled } });
+    try {
+      const prefs = await client.setNotifyPrefs({ [kind]: enabled });
+      status.setData((prev) => prev && { ...prev, prefs });
+    } catch (err) {
+      notify(errorText(err), 'error');
+      status.reload();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const showPreview = async (kind: NotifyRunKind) => {
+    setPreviewing(kind);
+    try {
+      setPreview(await client.notifyRun(kind, { preview: true }));
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setPreviewing(null);
+    }
+  };
+
+  const st = status.data;
+  const appLink = ntfySubscribeLink(st?.server, st?.topic);
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <SectionTitle action={status.loading ? <Spinner /> : <IconButton icon="refresh" label="Refresh" onClick={status.reload} />}>Push notifications</SectionTitle>
+        {status.error && <ErrorNote message={status.error} onRetry={status.reload} />}
+        {!st && status.loading && <SkeletonList rows={2} />}
+        {st && (
+          <Card className="space-y-3 p-3">
+            <p className="flex items-center gap-2 text-sm text-ink-200">
+              <StatusDot tone={st.configured ? 'ok' : 'warn'} />
+              {st.configured ? 'Ready: pushes go through ntfy' : 'Not set up yet'}
+              <Badge className="ml-auto font-mono">{st.server.replace(/^https?:\/\//, '')}</Badge>
+            </p>
+            {st.configured && st.topic ? (
+              <SecretRow label="Topic" value={st.topic} masked={maskSecret(st.topic)} onCopy={() => copy(st.topic ?? '', 'Topic')} />
+            ) : (
+              <p className="text-xs leading-snug text-amber-400">
+                Store a long random topic name in the vault key <span className="font-mono">NTFY_TOPIC</span> and redeploy the hub. Anyone who knows the topic can read the pushes, so treat it like a password.
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="primary" icon="send" onClick={() => void sendTest()} disabled={!st.configured || testing}>
+                {testing ? 'Sending...' : 'Send test'}
+              </Button>
+              {appLink && (
+                <a href={appLink} className="press inline-flex min-h-[44px] items-center gap-2 rounded-full bg-ink-800 px-4 text-[15px] text-ink-100">
+                  <Icon name="external" size={18} />
+                  Open in ntfy
+                </a>
+              )}
+            </div>
+          </Card>
+        )}
+      </div>
+
+      <div>
+        <SectionTitle>Subscribe on your phone</SectionTitle>
+        <Card className="p-3">
+          <Steps
+            items={[
+              <>
+                Install the free <b className="text-ink-100">ntfy</b> app:{' '}
+                <a className="text-signal underline" href={PLAY_URL} target="_blank" rel="noreferrer">Android</a> or{' '}
+                <a className="text-signal underline" href={APPSTORE_URL} target="_blank" rel="noreferrer">iPhone</a>. No account needed.
+              </>,
+              <>Tap <b className="text-ink-100">+</b> (Subscribe to topic) and paste the topic copied above.{st?.server && st.server !== 'https://ntfy.sh' && <> Turn on “Use another server” and enter <span className="font-mono">{st.server}</span>.</>}</>,
+              <>Allow notifications when asked, then tap <b className="text-ink-100">Send test</b> here.</>,
+            ]}
+          />
+        </Card>
+      </div>
+
+      <div>
+        <SectionTitle>What gets pushed</SectionTitle>
+        <Card className="divide-y divide-ink-800">
+          {NOTIFY_KINDS.map((k) => (
+            <div key={k.kind} className="flex items-center gap-3 p-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-ink-100">{k.label}</p>
+                <p className="text-xs leading-snug text-ink-400">{k.detail}</p>
+              </div>
+              {k.kind !== 'inbox' &&
+                (previewing === k.kind ? (
+                  <Spinner className="m-3" />
+                ) : (
+                  <IconButton icon="eye" label={`Preview ${k.label}`} className="h-10 w-10" onClick={() => void showPreview(k.kind as NotifyRunKind)} />
+                ))}
+              <Toggle
+                checked={st?.prefs[k.kind] ?? true}
+                onChange={(v) => void toggle(k.kind, v)}
+                label={k.label}
+                disabled={!st || saving === k.kind}
+              />
+            </div>
+          ))}
+        </Card>
+        {preview && (
+          <Card className="mt-2 space-y-1 p-3">
+            <p className="flex items-center gap-2 text-xs text-ink-400">
+              <Icon name="bell" size={14} /> Preview ({preview.kind}){preview.skipped && preview.skipped !== 'preview' && `: ${preview.skipped}`}
+              <IconButton icon="x" label="Close preview" className="ml-auto h-8 w-8" onClick={() => setPreview(null)} />
+            </p>
+            {preview.title && <p className="text-sm font-semibold text-ink-100">{preview.title}</p>}
+            {preview.message && <p className="whitespace-pre-line text-[13px] text-ink-300">{preview.message}</p>}
+          </Card>
+        )}
+        <button
+          type="button"
+          onClick={() => go('more', 'schedules')}
+          className="press mt-2 flex min-h-[44px] w-full items-center gap-2 rounded-row px-1 text-left text-[13px] text-ink-300"
+        >
+          <Icon name="clock" size={16} className="text-ink-500" />
+          <span className="min-w-0 flex-1">Pushes are sent by schedules: add them from Schedules &gt; New schedule &gt; templates.</span>
+          <Icon name="right" size={16} className="text-ink-500" />
+        </button>
+      </div>
+
+      {st && st.recent.length > 0 && (
+        <div>
+          <SectionTitle>Recent pushes</SectionTitle>
+          <Card className="divide-y divide-ink-800">
+            {st.recent.slice(0, 10).map((r, i) => (
+              <div key={`${r.sent_at}-${i}`} className="flex items-start gap-2 px-3 py-2">
+                <span className="pt-1.5">
+                  <StatusDot tone={r.status === 'sent' ? 'ok' : r.status === 'failed' ? 'bad' : 'warn'} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] text-ink-100">{r.title || r.kind}</p>
+                  <p className="text-[11px] text-ink-500">
+                    {r.kind} · {ago(r.sent_at)}
+                    {r.error && <span className="text-danger-400"> · {r.error}</span>}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </Card>
+        </div>
+      )}
+
+      <CalendarCard copy={(t, w) => void copy(t, w)} />
+    </div>
+  );
+}

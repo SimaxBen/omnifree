@@ -425,3 +425,27 @@ def test_split_source_ref() -> None:
     assert split_source_ref("me@gmail.com#abc@x.com") == ("me@gmail.com", "abc@x.com")
     assert split_source_ref("abc@x.com") == (None, "abc@x.com")
     assert split_source_ref(None) == (None, None)
+
+
+def test_sync_pushes_a_notification_best_effort(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from hub_api import notifier
+
+    pushed: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pushed.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"id": "m1"})
+
+    monkeypatch.setenv("NTFY_TOPIC", "secret-topic")
+    monkeypatch.setattr(notifier, "transport", httpx.MockTransport(handler))
+    _script_all()
+    assert len(app_hub.post("/inbox/receipts/sync").json()["created"]) == 4
+    assert len(pushed) == 1 and pushed[0]["title"] == "Reçus importés : 4 nouvelles dépenses"
+    assert pushed[0]["topic"] == "secret-topic" and pushed[0]["click"].endswith("#/more/expenses")
+
+    # ntfy down: the import still succeeds; nothing new imported: no push at all.
+    monkeypatch.setattr(notifier, "transport", httpx.MockTransport(lambda r: httpx.Response(500)))
+    r = app_hub.post("/inbox/receipts/sync")
+    assert r.status_code == 200 and r.json()["created"] == [] and len(pushed) == 1

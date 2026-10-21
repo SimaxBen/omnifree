@@ -65,6 +65,10 @@ export function describeCron(expr: string): string | null {
       return `${n === 1 ? 'Every hour' : `Every ${n} hours`}${Number(min) ? ` at :${pad(Number(min))}` : ''}`;
     }
   }
+  if (anyDate && dow === '*' && isNum(min) && /^\d+(,\d+)+$/.test(hour)) {
+    const times = hour.split(',').map((h) => `${pad(Number(h))}:${pad(Number(min))}`);
+    return `Daily at ${times.slice(0, -1).join(', ')} and ${times[times.length - 1]} UTC`;
+  }
   if (!isNum(min) || !isNum(hour)) return null;
   const at = `${pad(Number(hour))}:${pad(Number(min))} UTC`;
   if (anyDate && dow === '*') return `Daily at ${at}`;

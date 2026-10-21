@@ -44,6 +44,8 @@ class HubSettings(BaseSettings):
     # and the public origin used to build short-link / file-drop URLs.
     apps_db_provider: str = "cloudflare_d1"
     public_base_url: str = "https://api.ilyasouhnine.tech"
+    # The PWA's origin: push notifications and calendar events deep-link into it (``<pwa_base_url>/#/notes/tasks``).
+    pwa_base_url: str = "https://omnifree.ilyasouhnine.tech"
 
     # Network page: name of the compute plugin listing Tailscale nodes.
     tailscale_provider: str = "tailscale"

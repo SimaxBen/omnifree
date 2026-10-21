@@ -9,6 +9,7 @@ import type {
   AgentTaskCreate,
   BudgetItem,
   BudgetReport,
+  CalendarInfo,
   Drop,
   DropCreate,
   Expense,
@@ -61,6 +62,10 @@ import type {
   TranscriptionResult,
   UploadUrlRequest,
   VMInstance,
+  NotifyKind,
+  NotifyResult,
+  NotifyRunKind,
+  NotifyStatus,
 } from './types';
 
 /**
@@ -761,6 +766,42 @@ export class HubClient {
 
   ragAsk(req: RagAskRequest, signal?: AbortSignal): Promise<RagAnswer> {
     return this.request<RagAnswer>('POST', '/rag/ask', { json: req, signal });
+  }
+
+  // ------------------------------------------------------------------ notifications (ntfy) and calendar feed
+
+  async notifyStatus(signal?: AbortSignal): Promise<NotifyStatus> {
+    const body = await this.request<Partial<NotifyStatus>>('GET', '/notify/status', { signal });
+    return {
+      configured: !!body?.configured,
+      server: body?.server ?? 'https://ntfy.sh',
+      topic: body?.topic ?? null,
+      subscribe_url: body?.subscribe_url ?? null,
+      token_set: !!body?.token_set,
+      prefs: (body?.prefs ?? {}) as NotifyStatus['prefs'],
+      recent: Array.isArray(body?.recent) ? body.recent : [],
+    };
+  }
+
+  /** `PUT /notify/prefs`: turn push kinds on or off (stored on the hub). */
+  async setNotifyPrefs(prefs: Partial<Record<NotifyKind, boolean>>): Promise<NotifyStatus['prefs']> {
+    const body = await this.request<{ prefs: NotifyStatus['prefs'] }>('PUT', '/notify/prefs', { json: { prefs } });
+    return body.prefs;
+  }
+
+  notifyTest(): Promise<NotifyResult> {
+    return this.request<NotifyResult>('POST', '/notify/test');
+  }
+
+  /** `POST /notify/run?kind=...` (what the schedules call); `preview` composes without sending. */
+  notifyRun(kind: NotifyRunKind, opts: { force?: boolean; preview?: boolean } = {}): Promise<NotifyResult> {
+    return this.request<NotifyResult>('POST', '/notify/run', {
+      query: { kind, force: opts.force ? 1 : undefined, preview: opts.preview ? 1 : undefined },
+    });
+  }
+
+  calendarInfo(signal?: AbortSignal): Promise<CalendarInfo> {
+    return this.request<CalendarInfo>('GET', '/calendar/info', { signal });
   }
 
   // ------------------------------------------------------------------ free-tier budget
