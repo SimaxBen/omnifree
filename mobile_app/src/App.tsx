@@ -8,6 +8,7 @@ import { StatusDot, cx, haptic } from './components/ui';
 import { greeting, isoDay } from './lib/apps';
 import { useHub } from './lib/hub';
 import { NavProvider, hasRefreshers, runRefreshers, useNav, type Tab } from './lib/nav';
+import { ScreenActionSlot } from './lib/screenAction';
 import { UploadsProvider, useUploads } from './lib/uploads';
 import AiView from './views/AiView';
 import DriveScreen from './views/drive/DriveScreen';
@@ -263,7 +264,10 @@ function Shell() {
           <div className="pb-nav px-4">
             {!showBack && (
               <div className="px-1 pb-4 pt-1">
-                <h1 className="font-display text-[34px] font-bold leading-[1.05] text-ink-100">{title}</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="min-w-0 flex-1 font-display text-[34px] font-bold leading-[1.05] text-ink-100">{title}</h1>
+                  <ScreenActionSlot />
+                </div>
                 {subtitle && <p className="pt-1 text-[15px] text-ink-400">{subtitle}</p>}
               </div>
             )}

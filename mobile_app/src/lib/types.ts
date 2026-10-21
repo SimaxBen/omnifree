@@ -34,6 +34,47 @@ export interface ChatRequest {
   stream?: boolean;
 }
 
+/** A message of a saved conversation (`/chats`). */
+export interface ChatThreadMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  routed_via?: string;
+  model?: string;
+  created_at?: string;
+}
+
+/** `GET /chats` row: a saved conversation without its messages. */
+export interface ChatSummary {
+  id: string;
+  title: string;
+  /** auto = first user message, llm = generated, user = renamed (never overwritten). */
+  title_source: 'auto' | 'llm' | 'user';
+  model: string | null;
+  message_count: number;
+  preview: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatThread extends ChatSummary {
+  messages: ChatThreadMessage[];
+}
+
+export interface ChatThreadSave {
+  title?: string;
+  model?: string | null;
+  messages: ChatThreadMessage[];
+  pinned?: boolean;
+}
+
+export interface ChatThreadPatch {
+  title?: string;
+  model?: string | null;
+  pinned?: boolean;
+  append?: ChatThreadMessage[];
+}
+
 export interface Usage {
   prompt_tokens: number;
   completion_tokens: number;

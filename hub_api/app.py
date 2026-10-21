@@ -22,6 +22,7 @@ from hub_api.errors import install_error_handlers
 from hub_api.mcp_server import mount_mcp
 from hub_api.routers import agent, compute, cron, db, dns, drive, expenses, links, llm, notes, plugins, ws
 from hub_api.routers import budget as budget_router
+from hub_api.routers import chats as chats_router
 from hub_api.routers import digest as digest_router
 from hub_api.routers import inbox as inbox_router
 from hub_api.routers import rag as rag_router
@@ -141,7 +142,7 @@ def create_app(
     protected = [Depends(require_token)]
     for module in (llm, agent, drive, dns, db, plugins, compute, cron, rag_router, budget_router):
         app.include_router(module.router, dependencies=protected)
-    for module in (notes, expenses, links, inbox_router, digest_router):  # personal apps (data in D1)
+    for module in (notes, expenses, links, inbox_router, digest_router, chats_router):  # personal apps (data in D1)
         app.include_router(module.router, dependencies=protected)
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)
 
