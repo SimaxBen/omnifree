@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { FileThumb } from '../components/files';
-import { Icon, type IconName } from '../components/icons';
+import { Icon } from '../components/icons';
 import { SwipeRow } from '../components/SwipeRow';
-import { ErrorNote, Meter, SectionTitle, cx, haptic, riseStyle } from '../components/ui';
+import { ErrorNote, Meter, SectionTitle, cx, riseStyle } from '../components/ui';
 import { useActions } from '../lib/actions';
 import { budgetAlerts, currenciesByWeight, currentMonth, formatMoney, isoDay, sortTasks } from '../lib/apps';
 import { headlineStats } from '../lib/digest';
@@ -14,13 +14,6 @@ import { usePullRefresh, useNav } from '../lib/nav';
 import type { Task } from '../lib/types';
 import { MORE_PAGES } from './MoreView';
 import { TaskRow } from './notes/TaskRow';
-
-const QUICK: { id: 'voice' | 'note' | 'receipt' | 'upload'; icon: IconName; label: string; tone: string }[] = [
-  { id: 'voice', icon: 'mic', label: 'Voice', tone: 'bg-danger-400/15 text-danger-400' },
-  { id: 'note', icon: 'edit', label: 'Note', tone: 'bg-signal/15 text-signal' },
-  { id: 'receipt', icon: 'camera', label: 'Receipt', tone: 'bg-mint-400/15 text-mint-400' },
-  { id: 'upload', icon: 'upload', label: 'Upload', tone: 'bg-[#7FA8FF]/15 text-[#A9CBFF]' },
-];
 
 export default function HomeView() {
   const { client, notify } = useHub();
@@ -89,14 +82,6 @@ export default function HomeView() {
     }
   };
 
-  const quick = (id: (typeof QUICK)[number]['id']) => {
-    haptic(8);
-    if (id === 'voice') actions.recordVoice();
-    if (id === 'note') actions.newNote();
-    if (id === 'receipt') actions.scanReceipt();
-    if (id === 'upload') actions.pickUpload();
-  };
-
   return (
     <div className="space-y-7">
       {alerts.length > 0 && (
@@ -127,17 +112,6 @@ export default function HomeView() {
           </span>
         </button>
       )}
-
-      <div className="grid grid-cols-4 gap-2">
-        {QUICK.map((q, i) => (
-          <button key={q.id} type="button" onClick={() => quick(q.id)} style={riseStyle(i)} className="press rise flex flex-col items-center gap-1.5 py-1 text-[13px] text-ink-300">
-            <span className={cx('grid h-14 w-14 place-items-center rounded-[20px]', q.tone)}>
-              <Icon name={q.icon} size={24} />
-            </span>
-            {q.label}
-          </button>
-        ))}
-      </div>
 
       <button
         type="button"

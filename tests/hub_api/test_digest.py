@@ -83,7 +83,7 @@ def test_pure_helpers() -> None:
     assert "Clear or reschedule the 2 overdue tasks." in text["suggestions"]
 
 
-def test_digest_stats_llm_and_cache(app_hub) -> None:
+def test_digest_stats_llm_and_cache(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(app_hub)
     fa.CHAT_SCRIPT["groq"].append(json.dumps(WRITE_UP))
     r = app_hub.get("/digest")
@@ -110,6 +110,8 @@ def test_digest_stats_llm_and_cache(app_hub) -> None:
     again = app_hub.get("/digest", params={"period": "week"}).json()
     assert again["cached"] is True and again["generated_at"] == d["generated_at"] and len(fa.CHAT_LOG) == calls
 
+    # The router counts requests at the real UTC time: read the counters for a week ending today.
+    monkeypatch.setattr(digest_mod, "local_today", lambda: datetime.now(timezone.utc).date())
     fa.CHAT_SCRIPT["groq"].append(json.dumps(WRITE_UP))
     fresh = app_hub.get("/digest", params={"refresh": 1}).json()
     assert fresh["cached"] is False and len(fa.CHAT_LOG) == calls + 1

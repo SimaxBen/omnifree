@@ -121,6 +121,10 @@ def fallback_text(period: str, start: date, end: date, stats: dict[str, Any]) ->
         suggestions.append("The task list is long: archive what no longer matters.")
     if not exp["count"]:
         suggestions.append("Scan receipts or import them from Gmail to track spending.")
+    elif "other" in (exp.get("by_category") or {}):
+        suggestions.append("Give the expenses filed under \"other\" a real category to see where the money goes.")
+    if (drive.get("uploaded_files") or 0) >= 5:
+        suggestions.append(f"Sort the {drive['uploaded_files']} new Drive files into folders while you still remember them.")
     if not suggestions:
         suggestions.append("Keep it up: capture receipts and notes as they come.")
     markdown = (
@@ -138,7 +142,10 @@ _PROMPT = (
     "Be concrete, friendly and brief; use the numbers, never invent any. Currency amounts keep their ISO codes. "
     "Answer with ONE JSON object only, no code fences: "
     '{{"markdown": "markdown, 2-4 short paragraphs or bullets, may start with a ## heading", '
-    '"highlights": ["3-5 one-line facts"], "suggestions": ["2-3 short actionable tips"]}}'
+    '"highlights": ["3-5 one-line facts"], "suggestions": ["2-3 short actionable tips"]}}. '
+    "Suggestions are only about the owner's money (spending, categories, merchants, receipts) and their Drive "
+    "(organising, naming, cleaning up or grouping files); add one about tasks only when some are overdue. "
+    "Never suggest anything about LLM providers, AI requests or quotas: llm stats are for the summary only."
 )
 
 
