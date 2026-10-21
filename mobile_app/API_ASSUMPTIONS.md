@@ -138,6 +138,8 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `POST /money/recurring`, `PATCH/DELETE /money/recurring/{id}` | `createRecurring()`, `updateRecurring()`, `deleteRecurring()` | Money recurring-expense sheet (rent, subscriptions) |
 | `POST /money/accounts`, `PATCH/DELETE /money/accounts/{id}` | `createAccount()`, `updateAccount()`, `deleteAccount()` | Money accounts (balances set by hand) |
 | `PUT/DELETE /money/budgets/{category}` | `setBudget()`, `deleteBudget()` | Money budget sheet (monthly limit per expense category) |
+| `GET /money/sms/setup`, `GET /money/sms/log?limit=` | `smsSetup()`, `smsLog()` | Money > Bank SMS sheet: forwarder setup (webhook URL with the SMS token behind a reveal toggle, header name, JSON template, sender filter) and the last 20 SMS with their status |
+| `POST /money/sms?dry_run=true` `{from, text}` | `testSms()` | Bank SMS "Test an SMS" box (nothing saved). The same route without `dry_run` is the webhook the phone app calls (hub token, `X-OmniFree-Token` header or `?token=`) |
 
 Drive additions used by the redesign:
 

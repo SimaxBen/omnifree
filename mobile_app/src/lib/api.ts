@@ -48,6 +48,9 @@ import type {
   RecurringPatch,
   VoiceMoneyKind,
   VoiceMoneyResult,
+  SmsLogEntry,
+  SmsResult,
+  SmsSetup,
   ChatChunk,
   Digest,
   DigestPeriod,
@@ -784,6 +787,21 @@ export class HubClient {
 
   deleteBudget(category: ExpenseCategory): Promise<void> {
     return this.request<void>('DELETE', `/money/budgets/${encodeURIComponent(category)}`);
+  }
+
+  /** `GET /money/sms/setup`: what a phone SMS-forwarder app needs (webhook path, token, header name). */
+  smsSetup(signal?: AbortSignal): Promise<SmsSetup> {
+    return this.request<SmsSetup>('GET', '/money/sms/setup', { signal });
+  }
+
+  /** `GET /money/sms/log?limit=`: the last bank SMS received and what became of them. */
+  async smsLog(limit = 20, signal?: AbortSignal): Promise<SmsLogEntry[]> {
+    return listOf<SmsLogEntry>(await this.request<unknown>('GET', '/money/sms/log', { query: { limit }, signal }), 'messages');
+  }
+
+  /** `POST /money/sms?dry_run=true`: how the hub reads an SMS, without saving anything. */
+  testSms(text: string, sender = '', signal?: AbortSignal): Promise<SmsResult> {
+    return this.request<SmsResult>('POST', '/money/sms', { query: { dry_run: true }, json: { from: sender, text }, signal });
   }
 
   // ------------------------------------------------------------------ Gmail receipts import

@@ -109,3 +109,32 @@ export function monthInitial(month: string): string {
 export function fxLabel(source: FxSource): string {
   return { live: 'Live exchange rates', cache: 'Exchange rates from today', stale: 'Exchange rates older than a day', fallback: 'Approximate exchange rates (offline)' }[source];
 }
+
+// ------------------------------------------------------------------ bank SMS
+
+/** JSON body for SMS-forwarder apps: the placeholders are filled in by the app. */
+export const SMS_FORWARDER_TEMPLATE = '{"from":"%from%","text":"%text%","receivedStamp":"%receivedStamp%"}';
+
+/** Webhook URL to paste in the forwarder app; with `token` the secret travels as `?token=`. */
+export function smsWebhookUrl(base: string, path: string, token?: string | null): string {
+  const url = `${base.replace(/\/+$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+  return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+}
+
+/** "abcd••••••••" so the token can be shown without being readable. */
+export function maskSecret(secret: string): string {
+  return secret.length <= 4 ? '••••' : `${secret.slice(0, 4)}${'•'.repeat(Math.min(12, secret.length - 4))}`;
+}
+
+export type SmsTone = 'ok' | 'warn' | 'bad' | 'neutral';
+
+/** What became of one SMS, in a few words, and how to colour it. */
+export function smsOutcome(entry: { status: string; kind: string | null; reason?: string | null; ignored?: string }): { label: string; tone: SmsTone } {
+  if (entry.status === 'error') return { label: entry.reason || 'Error', tone: 'bad' };
+  if (entry.status === 'ignored') {
+    const reason = entry.ignored || entry.reason || 'Ignored';
+    return { label: reason.charAt(0).toUpperCase() + reason.slice(1), tone: /same|already/i.test(reason) ? 'neutral' : 'warn' };
+  }
+  const label = { expense: 'Expense', income: 'Income', withdrawal: 'Moved to cash' }[entry.kind ?? ''] ?? 'Recorded';
+  return { label, tone: 'ok' };
+}

@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HubClient } from '../api';
-import { cashflowBars, compactAmount, fxLabel, monthInitial, monthRangeLabel, normalizeMoneyOverview, parseAmount, savingsLabel, voiceMoneySummary } from '../money';
+import {
+  cashflowBars,
+  compactAmount,
+  fxLabel,
+  maskSecret,
+  monthInitial,
+  monthRangeLabel,
+  normalizeMoneyOverview,
+  parseAmount,
+  savingsLabel,
+  smsOutcome,
+  smsWebhookUrl,
+  voiceMoneySummary,
+} from '../money';
 import type { Expense, Income } from '../types';
 
 describe('money helpers', () => {
@@ -60,6 +73,26 @@ describe('money helpers', () => {
   });
 });
 
+describe('bank SMS helpers', () => {
+  it('builds the webhook URL with or without the query token', () => {
+    expect(smsWebhookUrl('https://hub.example/', '/money/sms')).toBe('https://hub.example/money/sms');
+    expect(smsWebhookUrl('https://edge.example/api', 'money/sms', 'a b&c')).toBe('https://edge.example/api/money/sms?token=a%20b%26c');
+  });
+
+  it('masks secrets', () => {
+    expect(maskSecret('abcdefghijklmnopqrstuvwxyz')).toBe('abcd' + '•'.repeat(12));
+    expect(maskSecret('abc')).toBe('••••');
+  });
+
+  it('labels what became of an SMS', () => {
+    expect(smsOutcome({ status: 'created', kind: 'expense' })).toEqual({ label: 'Expense', tone: 'ok' });
+    expect(smsOutcome({ status: 'created', kind: 'withdrawal' })).toEqual({ label: 'Moved to cash', tone: 'ok' });
+    expect(smsOutcome({ status: 'ignored', kind: 'ignored', reason: 'one-time code' })).toEqual({ label: 'One-time code', tone: 'warn' });
+    expect(smsOutcome({ status: 'ignored', kind: 'expense', ignored: 'same purchase as expense x' }).tone).toBe('neutral');
+    expect(smsOutcome({ status: 'error', kind: null, reason: 'boom' })).toEqual({ label: 'boom', tone: 'bad' });
+  });
+});
+
 describe('money client', () => {
   interface Call {
     method: string;
@@ -115,6 +148,9 @@ describe('money client', () => {
     await client.deleteAccount('a1');
     await client.setBudget('food', 1500);
     await client.deleteBudget('food');
+    await client.smsSetup();
+    await client.smsLog(5);
+    await client.testSms('Achat 10 DH', 'CIH');
 
     expect(calls.map((c) => `${c.method} ${c.url.pathname}${c.url.search}`)).toEqual([
       'GET /api/money/overview?month=2026-09',
@@ -130,7 +166,11 @@ describe('money client', () => {
       'DELETE /api/money/accounts/a1',
       'PUT /api/money/budgets/food',
       'DELETE /api/money/budgets/food',
+      'GET /api/money/sms/setup',
+      'GET /api/money/sms/log?limit=5',
+      'POST /api/money/sms?dry_run=true',
     ]);
+    expect(calls[15].json).toEqual({ from: 'CIH', text: 'Achat 10 DH' });
     expect(calls[1].form?.get('kind')).toBe('income');
     expect((calls[1].form?.get('file') as File).name).toBe('m.ogg');
     expect(calls[2].json).toEqual({ amount: 12000, source: 'Salaire', category: 'salary', recurring: true });

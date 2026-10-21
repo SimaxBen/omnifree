@@ -851,3 +851,64 @@ export interface CalendarInfo {
   url: string | null;
   token_key: string;
 }
+
+// ------------------------------------------------------------------ bank SMS (/money/sms)
+
+/** `GET /money/sms/setup`. */
+export interface SmsSetup {
+  configured: boolean;
+  token: string | null;
+  token_key: string;
+  header: string;
+  query_param: string;
+  path: string;
+  public_base_url: string | null;
+}
+
+export type SmsKind = 'expense' | 'income' | 'withdrawal' | 'ignored' | 'unknown';
+
+export interface SmsParsed {
+  kind: SmsKind;
+  bank: string | null;
+  amount: number | null;
+  currency: string;
+  merchant: string;
+  date: string | null;
+  card: string | null;
+  balance: number | null;
+  balance_currency: string | null;
+  category: string;
+  reason: string | null;
+  parser: 'regex' | 'llm';
+}
+
+/** `POST /money/sms` (also with `dry_run`). */
+export interface SmsResult {
+  status: 'created' | 'ignored' | 'error';
+  ignored?: string;
+  dry_run: boolean;
+  parsed: SmsParsed | null;
+  expense: Expense | null;
+  income: Income | null;
+  account: MoneyAccount | null;
+  cash_account: MoneyAccount | null;
+}
+
+/** One row of `GET /money/sms/log` (card numbers masked, OTP texts not stored). */
+export interface SmsLogEntry {
+  id: string;
+  sender: string | null;
+  bank: string | null;
+  text: string | null;
+  status: 'created' | 'ignored' | 'error';
+  reason: string | null;
+  kind: SmsKind | null;
+  amount: number | null;
+  currency: string | null;
+  parser: string | null;
+  expense_id: string | null;
+  income_id: string | null;
+  account_id: string | null;
+  received_at: string | null;
+  created_at: string;
+}

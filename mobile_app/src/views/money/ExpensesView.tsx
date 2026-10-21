@@ -133,7 +133,7 @@ export default function ExpensesView() {
                 <SwipeRow end={{ icon: 'trash', label: 'Delete', tone: 'danger', run: () => remove(e) }}>
                   <button type="button" onClick={() => actions.editExpense(e)} className="flex min-h-[64px] w-full items-center gap-3 px-3 py-2 text-left">
                     <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full" style={{ background: `${CATEGORY_COLOR[e.category] ?? '#8A8FBF'}22`, color: CATEGORY_COLOR[e.category] ?? '#8A8FBF' }}>
-                      <Icon name={e.source === 'email' && !e.receipt_key ? 'mail' : e.source === 'voice' ? 'mic' : e.receipt_key ? 'receipt' : 'wallet'} size={18} />
+                      <Icon name={e.source === 'email' && !e.receipt_key ? 'mail' : e.source === 'voice' ? 'mic' : e.source === 'sms' ? 'chat' : e.receipt_key ? 'receipt' : 'wallet'} size={18} />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="flex min-w-0 items-center gap-1.5">
