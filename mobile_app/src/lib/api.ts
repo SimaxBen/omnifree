@@ -62,6 +62,7 @@ import type {
   UploadUrlRequest,
   VMInstance,
 } from './types';
+import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from './types';
 
 /**
  * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
@@ -358,6 +359,35 @@ export class HubClient {
   async rerank(req: RerankRequest, signal?: AbortSignal): Promise<RerankResult[]> {
     const body = await this.request<unknown>('POST', '/llm/rerank', { json: req, signal });
     return listOf<RerankResult>(body, 'results');
+  }
+
+  // ------------------------------------------------------------------ saved conversations
+
+  async chatList(params: { q?: string; limit?: number } = {}, signal?: AbortSignal): Promise<ChatSummary[]> {
+    const body = await this.request<unknown>('GET', '/chats', { query: { q: params.q?.trim() || undefined, limit: params.limit }, signal });
+    return listOf<ChatSummary>(body, 'chats');
+  }
+
+  chatGet(id: string, signal?: AbortSignal): Promise<ChatThread> {
+    return this.request<ChatThread>('GET', `/chats/${encodeURIComponent(id)}`, { signal });
+  }
+
+  /** `PUT /chats/{id}`: create or replace under a client id (idempotent, so safe to retry). */
+  chatSave(id: string, chat: ChatThreadSave, signal?: AbortSignal): Promise<ChatThread> {
+    return this.request<ChatThread>('PUT', `/chats/${encodeURIComponent(id)}`, { json: chat, signal });
+  }
+
+  chatUpdate(id: string, patch: ChatThreadPatch): Promise<ChatThread> {
+    return this.request<ChatThread>('PATCH', `/chats/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  chatDelete(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/chats/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /chats/{id}/title`: a short LLM title; the hub keeps the current one when no model answers. */
+  chatAutoTitle(id: string, signal?: AbortSignal): Promise<ChatThread> {
+    return this.request<ChatThread>('POST', `/chats/${encodeURIComponent(id)}/title`, { signal });
   }
 
   // ------------------------------------------------------------------ agent

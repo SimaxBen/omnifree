@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, SectionTitle, Spinner, cx, inputClass } from '../../components/ui';
+import { agentUnavailable, type AgentUnavailable } from '../../lib/agent';
 import { formatDateTime, formatTime } from '../../lib/format';
 import { errorText, useHub, useHubData, useHubEvents } from '../../lib/hub';
 import type { AgentTask, AgentTaskStatus, HubEvent } from '../../lib/types';
@@ -47,9 +48,63 @@ function stepText(data: unknown): string {
   return parts.length ? parts.join(' ') : JSON.stringify(d);
 }
 
+/** What the agent is, shown instead of the form while the hub has no reachable Instinct server. */
+function AgentOffline({ unavailable, onRetry, retrying }: { unavailable: AgentUnavailable; onRetry: () => void; retrying: boolean }) {
+  const notConfigured = unavailable.reason === 'not_configured';
+  return (
+    <Card className="space-y-4 p-4">
+      <EmptyState
+        icon="agent"
+        title={notConfigured ? 'The browser agent is not set up yet' : 'The browser agent is offline'}
+        hint={
+          notConfigured
+            ? 'It needs its own Instinct server, which is not deployed yet: it is planned on the Oracle VM once a payment card is verified there.'
+            : 'The hub knows an Instinct server but cannot reach it right now (the VM may be stopped or asleep).'
+        }
+        action={
+          <Button variant="subtle" icon="refresh" onClick={onRetry} disabled={retrying}>
+            {retrying ? 'Checking...' : 'Check again'}
+          </Button>
+        }
+      />
+      <div className="space-y-2 border-t border-ink-800 pt-4 text-[14px] text-ink-300">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-signal">What it does</p>
+        <p>
+          You give Instinct a goal and an optional start URL. It drives a headless browser step by step, asking a model from the free LLM pool what to
+          click or type next, and streams each step and a live screenshot here until it reports a result.
+        </p>
+        <p className="text-ink-400">Example: &quot;Find the current Groq free-tier limits and summarise them&quot;, starting at groq.com.</p>
+        <p className="break-words font-mono text-[11px] text-ink-500">hub: {unavailable.detail}</p>
+      </div>
+    </Card>
+  );
+}
+
 export default function AgentPanel() {
   const { client, notify } = useHub();
-  const tasks = useHubData((c, s) => c.agentTasks(s), [], 15_000);
+  // An unconfigured or unreachable Instinct server is a state of the panel, not an error.
+  const probe = useHubData(
+    async (c, s): Promise<{ tasks: AgentTask[]; unavailable: AgentUnavailable | null }> => {
+      try {
+        return { tasks: await c.agentTasks(s), unavailable: null };
+      } catch (err) {
+        const unavailable = agentUnavailable(err);
+        if (unavailable) return { tasks: [], unavailable };
+        throw err;
+      }
+    },
+    [],
+    15_000,
+  );
+  const tasks = {
+    data: probe.data?.tasks,
+    error: probe.error,
+    loading: probe.loading,
+    reload: probe.reload,
+    setData: (fn: (prev: AgentTask[] | undefined) => AgentTask[] | undefined) =>
+      probe.setData((prev) => ({ unavailable: prev?.unavailable ?? null, tasks: fn(prev?.tasks) ?? [] })),
+  };
+  const unavailable = probe.data?.unavailable ?? null;
   const models = useHubData((c, s) => c.models(s));
   const [live, setLive] = useState<Record<string, LiveState>>({});
   const [selected, setSelected] = useState<string | null>(null);
@@ -142,6 +197,8 @@ export default function AgentPanel() {
   const status: AgentTaskStatus | undefined = currentLive?.status ?? current?.status;
   const screenshot = currentLive?.screenshot ?? current?.last_screenshot_b64 ?? undefined;
   const steps = currentLive?.steps.length ? currentLive.steps.map((s) => s) : (current?.steps ?? []).map((step) => ({ ts: '', text: stepText(step) }));
+
+  if (unavailable) return <AgentOffline unavailable={unavailable} onRetry={probe.reload} retrying={probe.loading} />;
 
   return (
     <div className="space-y-4">

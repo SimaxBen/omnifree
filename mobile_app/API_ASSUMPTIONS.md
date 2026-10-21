@@ -38,6 +38,10 @@ below are what hub_api returns.
 | `POST /llm/embed` | `EmbeddingRequest` | `EmbeddingResponse` + `X-Routed-Via` | not used by the PWA yet |
 | `POST /llm/transcribe` | `multipart/form-data`: `file` (required), `model?`, `language?` | `{text, model?, language?, duration?}` | Chat panel, mic button: "Transcribe" card (audio file or MediaRecorder voice note); "Send to chat" puts the text in the message box. |
 | `POST /llm/rerank` | `{query, documents: str[], top_n?}` | `{results: [{index, score, document?}]}` | `HubClient.rerank()`; no UI yet. |
+| `GET /chats?q=&limit=` | none | `{chats: ChatSummary[]}` (`id, title, title_source: auto\|llm\|user, model, message_count, preview, pinned, created_at, updated_at`), pinned then newest first | `chatList()`: chat history sheet (search, Today / Yesterday / This week / Older). |
+| `PUT /chats/{id}` | `{messages: [{role, content, routed_via?, model?}], model?, title?, pinned?}` | 201 (created) or 200 + `ChatThread` (summary + `messages`) | `chatSave()`: idempotent upsert under a client id after every exchange; unsynced chats are kept in localStorage and retried (offline, 5xx, 404/405 from an older hub). 413 past ~1.8 MB. |
+| `GET/PATCH/DELETE /chats/{id}`, `POST /chats` | PATCH `{title?, pinned?, model?, append?: messages}` | `ChatThread` / 204 | `chatGet()` reopens a chat; `chatUpdate()` renames (blank = automatic title) and pins; `chatDelete()`. |
+| `POST /chats/{id}/title` | none | `ChatThread` | `chatAutoTitle()` after the first saved exchange: one small LLM call for a 3-6 word title; keeps the current title on failure or when renamed. |
 
 ## Agent (Instinct)
 

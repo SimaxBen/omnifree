@@ -27,7 +27,7 @@ EXPECTED_TOOLS = {
     "llm_chat", "llm_models", "drive_list", "drive_search", "drive_read_text", "drive_upload_text",
     "drive_share_link", "ask_drive", "rag_index", "notes_search", "notes_create", "notes_get", "tasks_list",
     "tasks_add", "tasks_complete", "expenses_month", "expense_add", "links_create", "drops_create",
-    "schedules_list", "schedule_create", "budget_status",
+    "schedules_list", "schedule_create", "budget_status", "chats_list",
 }
 
 

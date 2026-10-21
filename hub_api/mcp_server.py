@@ -51,7 +51,7 @@ from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
 from hub_api.errors import error_body
-from hub_api.routers import cron, drive, expenses, links, llm, notes, rag
+from hub_api.routers import chats, cron, drive, expenses, links, llm, notes, rag
 from hub_api.state import HubState
 
 __all__ = ["build_mcp_server", "mount_mcp", "MCPEndpoint", "MCP_TOKEN_KEY", "MCP_PATH"]
@@ -472,6 +472,22 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
     @_guard
     async def tasks_complete(id: Annotated[str, Field(min_length=1, description="Task id.")]) -> dict[str, Any]:
         return await notes.patch_task(id, notes.TaskPatch(done=True), db=await notes_db())
+
+    # ----------------------------------------------------------------- saved AI chats
+
+    @tool(
+        description=(
+            "List the saved AI conversations of the PWA chat (title, message count, last update), pinned and "
+            "most recent first; `q` searches titles and message text."
+        ),
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def chats_list(
+        q: Annotated[str | None, Field(description="Text to search for.")] = None,
+        limit: Annotated[int, Field(ge=1, le=200)] = 20,
+    ) -> dict[str, Any]:
+        return await chats.list_chats(q=q, limit=limit, db=await chats._db(appdb()))
 
     # ----------------------------------------------------------------- expenses
 
