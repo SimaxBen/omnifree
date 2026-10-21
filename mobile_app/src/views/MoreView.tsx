@@ -10,6 +10,7 @@ import ExpensesView from './money/ExpensesView';
 import MoneyView from './money/MoneyView';
 import LinksView from './LinksView';
 import NetworkView from './NetworkView';
+import NotificationsView from './NotificationsView';
 import SchedulesView from './SchedulesView';
 import SettingsView from './SettingsView';
 import SummaryView from './SummaryView';
@@ -35,6 +36,7 @@ export const MORE_PAGES: MorePage[] = [
   { id: 'network', title: 'Network', short: 'Network', subtitle: 'DNS blocking and Tailscale nodes', icon: 'network', group: 'cloud' },
   { id: 'data', title: 'Databases', short: 'Data', subtitle: 'Browse tables and run queries', icon: 'database', group: 'cloud' },
   { id: 'claude', title: 'Connect Claude', short: 'Claude', subtitle: 'Use OmniFree from Claude Code, Desktop or Cursor', icon: 'agent', group: 'app' },
+  { id: 'notifications', title: 'Notifications', short: 'Notify', subtitle: 'Phone pushes (ntfy) and the Google Calendar feed', icon: 'bell', group: 'app' },
   { id: 'settings', title: 'Settings', short: 'Settings', subtitle: 'Hub address and access token', icon: 'settings', group: 'app' },
 ];
 
@@ -61,6 +63,8 @@ function Page({ id }: { id: string }): ReactNode {
       return <DatabaseView />;
     case 'claude':
       return <ConnectClaudeView />;
+    case 'notifications':
+      return <NotificationsView />;
     case 'settings':
       return <SettingsView onDone={() => go('home')} />;
     default:

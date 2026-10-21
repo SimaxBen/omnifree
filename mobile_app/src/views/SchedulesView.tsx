@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Icon } from '../components/icons';
 import { Badge, Button, Card, EmptyState, ErrorNote, IconButton, SectionTitle, Spinner, StatusDot, Toggle, cx, inputClass } from '../components/ui';
-import { SCHEDULE_PRESETS, checkJsonBody, describeCron, isValidCron } from '../lib/cron';
-import { gmailSyncTemplate, scheduleHeaders } from '../lib/digest';
+import { SCHEDULE_PRESETS, checkJsonBody, describeCron, isValidCron, presetFor } from '../lib/cron';
+import { scheduleHeaders } from '../lib/digest';
 import { formatDateTime } from '../lib/format';
 import { errorText, useHub, useHubData } from '../lib/hub';
+import { SCHEDULE_TEMPLATES, templateJob, type ScheduleTemplate } from '../lib/notify';
 import type { CronJob, CronJobCreate, CronProvider } from '../lib/types';
 
 const METHODS = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE'];
@@ -61,28 +62,47 @@ function CreateForm({ providers, onCreated, onCancel }: { providers: CronProvide
     }
   };
 
-  const useGmailTemplate = () => {
-    const t = gmailSyncTemplate(settings.hubUrl);
+  const [templateId, setTemplateId] = useState<string | null>(null);
+  const applyTemplate = (tpl: ScheduleTemplate) => {
+    const t = templateJob(tpl, settings.hubUrl);
+    setTemplateId(tpl.id);
     setName(t.name);
-    setPreset(t.preset);
+    const id = presetFor(t.schedule);
+    setPreset(id);
+    if (id === 'custom') setCustom(t.schedule);
     setTarget(t.target);
     setMethod(t.method);
     setBody(t.body);
-    setWithToken(true);
+    setWithToken(t.withToken);
   };
 
   return (
     <Card className="p-3">
       <form className="space-y-3" onSubmit={(e) => void submit(e)}>
-        <button
-          type="button"
-          onClick={useGmailTemplate}
-          className="press flex min-h-[44px] w-full items-center gap-2 rounded-row bg-ink-850 px-3 text-left text-[14px] text-ink-200 ring-1 ring-inset ring-ink-700"
-        >
-          <Icon name="mail" size={16} className="text-[#A9CBFF]" />
-          <span className="min-w-0 flex-1 truncate">Template: import email receipts daily</span>
-          <Icon name="right" size={16} className="text-ink-500" />
-        </button>
+        <div className="space-y-1.5">
+          <p className="flex items-center gap-1.5 text-xs text-ink-400">
+            <Icon name="bell" size={14} className="text-ink-500" />
+            Templates: phone pushes from this hub
+          </p>
+          <ul className="divide-y divide-ink-800 overflow-hidden rounded-row bg-ink-850 ring-1 ring-inset ring-ink-700">
+            {SCHEDULE_TEMPLATES.map((tpl) => (
+              <li key={tpl.id}>
+                <button
+                  type="button"
+                  aria-pressed={templateId === tpl.id}
+                  onClick={() => applyTemplate(tpl)}
+                  className="press flex min-h-[48px] w-full items-center gap-2 px-3 py-1.5 text-left"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className={cx('block truncate text-[14px]', templateId === tpl.id ? 'text-signal' : 'text-ink-200')}>{tpl.label}</span>
+                    <span className="block truncate text-[11px] text-ink-500">{tpl.description}</span>
+                  </span>
+                  <Icon name={templateId === tpl.id ? 'check' : 'right'} size={16} className={templateId === tpl.id ? 'text-signal' : 'text-ink-500'} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <label className="block space-y-1 text-xs text-ink-400">
             Provider

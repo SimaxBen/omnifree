@@ -683,6 +683,10 @@ async def sync_receipts(
                         for e in result["created"]]
     saved["skipped"] = result["skipped"][:50]
     await _save_state(db, _STATE_KEY, {"last_sync_at": now_iso(), "last_result": saved})
+    if result["created"] and not opts.dry_run:
+        from hub_api.routers.notify import push_inbox_import  # best effort, never fails the import
+
+        await push_inbox_import(state, db, result)
     return result
 
 

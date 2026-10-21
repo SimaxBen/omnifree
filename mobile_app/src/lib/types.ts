@@ -812,3 +812,42 @@ export interface VoiceMoneyResult {
   expenses: Expense[];
   incomes: Income[];
 }
+
+// ------------------------------------------------------------------ notifications (ntfy) and calendar feed
+
+export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'inbox';
+export type NotifyRunKind = Exclude<NotifyKind, 'inbox'>;
+
+export interface NotifyLogEntry {
+  kind: string;
+  title: string | null;
+  /** 'sent' | 'failed' | 'sending' */
+  status: string;
+  error: string | null;
+  sent_at: string;
+}
+
+export interface NotifyStatus {
+  configured: boolean;
+  server: string;
+  /** The secret ntfy topic (returned to the authenticated PWA only). */
+  topic: string | null;
+  subscribe_url: string | null;
+  token_set: boolean;
+  prefs: Record<NotifyKind, boolean>;
+  recent: NotifyLogEntry[];
+}
+
+export interface NotifyResult {
+  kind: string;
+  sent: boolean;
+  skipped: string | null;
+  title: string | null;
+  message: string | null;
+}
+
+export interface CalendarInfo {
+  configured: boolean;
+  url: string | null;
+  token_key: string;
+}
