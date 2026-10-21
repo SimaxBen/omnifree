@@ -7,6 +7,7 @@ import BudgetView from './BudgetView';
 import ConnectClaudeView from './ConnectClaudeView';
 import DatabaseView from './DatabaseView';
 import ExpensesView from './money/ExpensesView';
+import MoneyView from './money/MoneyView';
 import LinksView from './LinksView';
 import NetworkView from './NetworkView';
 import SchedulesView from './SchedulesView';
@@ -24,6 +25,7 @@ export interface MorePage {
 }
 
 export const MORE_PAGES: MorePage[] = [
+  { id: 'money', title: 'Money', short: 'Money', subtitle: 'Income, spending, budgets and accounts', icon: 'cash', group: 'life' },
   { id: 'summary', title: 'Summary', short: 'Summary', subtitle: 'Your week or month at a glance', icon: 'chart', group: 'life' },
   { id: 'expenses', title: 'Expenses', short: 'Expenses', subtitle: 'Receipts and spending by month', icon: 'wallet', group: 'life' },
   { id: 'links', title: 'Links & drops', short: 'Links', subtitle: 'Short links, QR codes and file drops', icon: 'link', group: 'life' },
@@ -39,6 +41,8 @@ export const MORE_PAGES: MorePage[] = [
 function Page({ id }: { id: string }): ReactNode {
   const { go } = useNav();
   switch (id) {
+    case 'money':
+      return <MoneyView />;
     case 'summary':
       return <SummaryView />;
     case 'expenses':

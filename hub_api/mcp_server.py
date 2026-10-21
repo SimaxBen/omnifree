@@ -51,7 +51,7 @@ from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
 from hub_api.errors import error_body
-from hub_api.routers import chats, cron, drive, expenses, links, llm, notes, rag
+from hub_api.routers import chats, cron, drive, expenses, links, llm, money, notes, rag
 from hub_api.state import HubState
 
 __all__ = ["build_mcp_server", "mount_mcp", "MCPEndpoint", "MCP_TOKEN_KEY", "MCP_PATH"]
@@ -81,7 +81,7 @@ UPDATES = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempote
 
 INSTRUCTIONS = (
     "OmniFree is the user's personal cloud: a pooled free-tier LLM gateway with failover, a unified Drive "
-    "across several storage backends, 'Ask my Drive' (RAG with citations), notes, tasks, expenses, short "
+    "across several storage backends, 'Ask my Drive' (RAG with citations), notes, tasks, expenses, money (incomes, accounts, budgets), short "
     "links, file drops, scheduled HTTP jobs and a free-tier budget. Dates use the Africa/Casablanca time "
     "zone; amounts default to MAD. Nothing here deletes data: deletions are done by the user in the app."
 )
@@ -533,6 +533,69 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
             }
         )
         return await expenses.create_expense(body, db=await expenses_db())
+
+    # ----------------------------------------------------------------- money
+
+    async def money_db() -> AppDB:
+        return await money._db(appdb())
+
+    @tool(
+        description=(
+            "Money overview of one month (YYYY-MM, default: current month), in MAD: income, spent (expenses + "
+            "recurring), net left, savings rate, spend vs budget per category, 6-month cash flow, upcoming "
+            "recurring items and the total of the accounts. Original amounts and currencies are kept per item."
+        ),
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def money_overview(
+        month: Annotated[str | None, Field(description="Month as YYYY-MM.")] = None,
+    ) -> dict[str, Any]:
+        if month and not _MONTH_RE.match(month):
+            raise ToolError("month must be YYYY-MM")
+        return await money.overview(month=month or None, db=await money_db())
+
+    @tool(
+        description=(
+            "Record an income (salary, freelance payment, refund, gift). Currency defaults to MAD, date to today. "
+            "recurring=true makes it count every month from the month of `date` (until end_month, if given)."
+        ),
+        annotations=CREATES,
+    )
+    @_guard
+    async def income_add(
+        amount: Annotated[float, Field(ge=0, description="Amount received.")],
+        source: Annotated[str, Field(max_length=200, description='Who paid or a label, e.g. "Salaire".')] = "",
+        currency: Annotated[str, Field(description="ISO 4217 code (MAD, EUR, USD ...).")] = "MAD",
+        category: money.IncomeCategory = "other",
+        date: Annotated[str | None, Field(description="YYYY-MM-DD (default today).")] = None,
+        note: Annotated[str | None, Field(max_length=5000)] = None,
+        recurring: Annotated[bool, Field(description="Monthly income.")] = False,
+        end_month: Annotated[str | None, Field(description="Last month (YYYY-MM) of a monthly income.")] = None,
+    ) -> dict[str, Any]:
+        body = money.IncomeCreate.model_validate(
+            {
+                "amount": amount, "source": source, "currency": currency, "category": category, "date": date,
+                "note": note, "recurring": recurring, "end_month": end_month,
+            }
+        )
+        return await money.create_income(body, db=await money_db())
+
+    @tool(
+        description=(
+            "Set the current balance of a money account (cash, bank, savings ...) by name; the account is created "
+            "when no account has that name (case-insensitive)."
+        ),
+        annotations=UPDATES,
+    )
+    @_guard
+    async def account_set_balance(
+        name: Annotated[str, Field(min_length=1, max_length=100, description='Account name, e.g. "CIH".')],
+        balance: Annotated[float, Field(description="Current balance.")],
+        currency: Annotated[str | None, Field(description="ISO 4217 code (default MAD for a new account).")] = None,
+        kind: Annotated[money.AccountKind | None, Field(description="Account kind (new accounts default to bank).")] = None,
+    ) -> dict[str, Any]:
+        return await money.set_account_balance(await money_db(), name, balance, currency, kind)
 
     # ----------------------------------------------------------------- links and drops
 

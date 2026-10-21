@@ -60,6 +60,8 @@ const PATHS = {
   wave: 'M3 12h2 M7 8v8 M11 5v14 M15 9v6 M19 11v2',
   undo: 'M9 14L4 9l5-5 M4 9h10a6 6 0 010 12h-3',
   mail: 'M3 6h18v12H3z M3 7l9 6 9-6',
+  cash: 'M3 6h18v12H3z M12 9a3 3 0 110 6 3 3 0 010-6z M6.5 9.5v.01 M17.5 14.5v.01',
+  repeat: 'M17 3l3 3-3 3 M4 11V9a3 3 0 013-3h13 M7 21l-3-3 3-3 M20 13v2a3 3 0 01-3 3H4',
 } as const;
 
 export type IconName = keyof typeof PATHS;

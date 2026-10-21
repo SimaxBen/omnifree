@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { Expense, Note, StoredObject } from './types';
+import type { Expense, Income, Note, StoredObject } from './types';
 
 /** Things any screen can start; the sheets live once, above the screens (src/AppSheets.tsx). */
 export interface AppActions {
@@ -10,6 +10,10 @@ export interface AppActions {
   scanReceipt: () => void;
   addExpense: () => void;
   editExpense: (e: Expense) => void;
+  /** Voice capture straight in money mode (expenses and incomes). */
+  recordMoney: () => void;
+  /** Income sheet: `null` for a new income. */
+  editIncome: (income: Income | null) => void;
   pickUpload: (folder?: string) => void;
   preview: (obj: StoredObject, siblings?: StoredObject[]) => void;
   fileActions: (obj: StoredObject) => void;

@@ -404,13 +404,17 @@ export interface TaskCreate {
 
 export type TaskPatch = Partial<Omit<Task, 'id' | 'created_at'>>;
 
-export type VoiceMode = 'note' | 'tasks' | 'both' | 'auto';
+/** 'money' records expenses and incomes through `POST /money/voice`; 'auto' routes money talk there too. */
+export type VoiceMode = 'note' | 'tasks' | 'both' | 'auto' | 'money';
 
 export interface VoiceNoteResult {
   transcript: string;
   note: Note | null;
   tasks: Task[];
   audio_key: string;
+  /** Money heard in an 'auto' memo ("paid 45 dh for a taxi"), recorded as expenses / incomes. */
+  expenses?: Expense[];
+  incomes?: Income[];
 }
 
 export const EXPENSE_CATEGORIES = [
@@ -668,4 +672,143 @@ export interface Digest {
   /** 'llm' or 'template' (no LLM answered). */
   source: string;
   cached: boolean;
+}
+
+// ------------------------------------------------------------------ money (/money)
+
+export const INCOME_CATEGORIES = ['salary', 'freelance', 'refund', 'gift', 'other'] as const;
+export type IncomeCategory = (typeof INCOME_CATEGORIES)[number];
+
+export const ACCOUNT_KINDS = ['cash', 'bank', 'savings', 'card', 'other'] as const;
+export type AccountKind = (typeof ACCOUNT_KINDS)[number];
+
+export interface Income {
+  id: string;
+  /** YYYY-MM-DD; for a monthly income, its first month and pay day. */
+  date: string;
+  amount: number;
+  currency: string;
+  source: string;
+  category: IncomeCategory;
+  note: string | null;
+  /** Counts every month from the month of `date` until `end_month` (inclusive, open when null). */
+  recurring: boolean;
+  end_month: string | null;
+  /** 'manual' or 'voice'. */
+  origin: string | null;
+  audio_key: string | null;
+  created_at: string;
+}
+
+export interface IncomeCreate {
+  date?: string | null;
+  amount: number;
+  currency?: string;
+  source?: string;
+  category?: IncomeCategory;
+  note?: string | null;
+  recurring?: boolean;
+  end_month?: string | null;
+}
+export type IncomePatch = Partial<IncomeCreate>;
+
+export interface RecurringExpense {
+  id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  category: ExpenseCategory;
+  /** Day of the month it is paid (clamped to short months). */
+  day: number;
+  start_month: string;
+  end_month: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface RecurringCreate {
+  name: string;
+  amount: number;
+  currency?: string;
+  category?: ExpenseCategory;
+  day?: number;
+  start_month?: string | null;
+  end_month?: string | null;
+  note?: string | null;
+}
+export type RecurringPatch = Partial<RecurringCreate>;
+
+export interface MoneyAccount {
+  id: string;
+  name: string;
+  kind: AccountKind;
+  balance: number;
+  currency: string;
+  note: string | null;
+  updated_at: string;
+  created_at: string;
+}
+
+export interface AccountCreate {
+  name: string;
+  kind?: AccountKind;
+  balance?: number;
+  currency?: string;
+  note?: string | null;
+}
+export type AccountPatch = Partial<AccountCreate>;
+
+export interface CategoryBudget {
+  category: ExpenseCategory;
+  amount: number;
+  currency: string;
+  updated_at: string;
+}
+
+export interface MoneyCategoryLine {
+  category: string;
+  /** MAD */
+  spent: number;
+  /** Monthly limit converted to MAD, null without a budget. */
+  budget: number | null;
+  budget_original: { amount: number; currency: string } | null;
+  fraction: number | null;
+}
+
+export interface MoneyUpcoming {
+  kind: 'expense' | 'income';
+  id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  amount_mad: number;
+  date: string;
+}
+
+export type FxSource = 'live' | 'cache' | 'stale' | 'fallback';
+
+/** `GET /money/overview?month=`: every total in MAD. */
+export interface MoneyOverview {
+  month: string;
+  currency: string;
+  income: { total: number; items: (Income & { amount_mad: number; on: string })[] };
+  spent: { total: number; expenses: number; recurring: number; count: number };
+  net: number;
+  savings_rate: number | null;
+  categories: MoneyCategoryLine[];
+  series: { month: string; income: number; spent: number }[];
+  recurring: (RecurringExpense & { amount_mad: number; on: string; upcoming: boolean })[];
+  upcoming: MoneyUpcoming[];
+  accounts: { total: number; items: (MoneyAccount & { balance_mad: number })[] };
+  fx: { base: string; source: FxSource; fetched_at: string | null; unconverted: string[] };
+}
+
+export type VoiceMoneyKind = 'auto' | 'expense' | 'income';
+
+/** `POST /money/voice`. */
+export interface VoiceMoneyResult {
+  transcript: string;
+  audio_key: string;
+  expenses: Expense[];
+  incomes: Income[];
 }

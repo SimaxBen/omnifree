@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,6 +29,7 @@ EXPECTED_TOOLS = {
     "drive_share_link", "ask_drive", "rag_index", "notes_search", "notes_create", "notes_get", "tasks_list",
     "tasks_add", "tasks_complete", "expenses_month", "expense_add", "links_create", "drops_create",
     "schedules_list", "schedule_create", "budget_status", "chats_list",
+    "money_overview", "income_add", "account_set_balance",
 }
 
 
@@ -296,6 +298,26 @@ def test_expenses(mcp: MCP) -> None:
     res = mcp.call("expenses_month", month="March")
     assert res["isError"] is True and "YYYY-MM" in res["content"][0]["text"]
     res = mcp.call("expense_add", total=1, currency="not-a-currency")
+    assert res["isError"] is True and "currency" in res["content"][0]["text"]
+
+
+def test_money(mcp: MCP, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hub_api.routers import money
+
+    monkeypatch.setattr(money, "fx_transport", httpx.MockTransport(lambda r: httpx.Response(503)))  # static fallback
+    inc = mcp.ok("income_add", amount=12000, source="Salaire", category="salary", date="2026-03-25", recurring=True)
+    assert inc["recurring"] is True and inc["currency"] == "MAD"
+    acc = mcp.ok("account_set_balance", name="CIH", balance=5400)
+    assert acc["kind"] == "bank" and acc["balance"] == 5400
+    again = mcp.ok("account_set_balance", name="cih", balance=6000)
+    assert again["id"] == acc["id"] and again["balance"] == 6000
+    mcp.ok("expense_add", total=200, category="food", date="2026-04-02")
+    ov = mcp.ok("money_overview", month="2026-04")
+    assert ov["income"]["total"] == 12000 and ov["spent"]["total"] == 200 and ov["net"] == 11800
+    assert ov["accounts"]["total"] == 6000 and ov["fx"]["source"] == "fallback"
+    res = mcp.call("money_overview", month="April")
+    assert res["isError"] is True and "YYYY-MM" in res["content"][0]["text"]
+    res = mcp.call("income_add", amount=1, currency="not-a-currency")
     assert res["isError"] is True and "currency" in res["content"][0]["text"]
 
 

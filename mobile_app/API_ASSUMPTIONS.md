@@ -132,6 +132,12 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `GET /inbox/receipts/status` | `inboxStatus()` | Expenses "Import from email" row: setup / failing badges, mailbox count, last import; per-mailbox list in the sheet |
 | `POST /inbox/receipts/sync` `{days?, max?, dry_run?, account?}` | `syncGmailReceipts()` | Expenses "Import from email": result sheet (per mailbox, added / skipped by reason / errors / left for next run); 409 = no mailbox configured. Expenses with `source: "email"` get an "email" badge whose tooltip (and the expense sheet) shows the mailbox from `source_ref` (`<mailbox>#<Message-ID>`) |
 | `GET /digest?period=week\|month&refresh=1` | `digest()` | More > Summary (period switch, refresh button forces `refresh=1`), Home "This week" card |
+| `GET /money/overview?month=` | `moneyOverview()` (normalised by `normalizeMoneyOverview` in `src/lib/money.ts`) | More > Money: income / spent / left in MAD, savings rate, budgets vs spend, 6-month cash flow, upcoming recurring items, accounts, incomes and recurring lists |
+| `POST /money/voice` (multipart `file`, `kind=auto\|expense\|income`, `language?`) | `voiceMoney()` | Voice sheet "Money" mode (from the capture menu, Expenses and Money): created expenses (`source: "voice"`) and incomes are listed with edit and undo. `POST /notes/voice` in `auto` mode may also return `expenses` / `incomes` |
+| `POST /money/incomes`, `PATCH/DELETE /money/incomes/{id}` | `createIncome()`, `updateIncome()`, `deleteIncome()` | Money income sheet (one-off or monthly with an optional end month) |
+| `POST /money/recurring`, `PATCH/DELETE /money/recurring/{id}` | `createRecurring()`, `updateRecurring()`, `deleteRecurring()` | Money recurring-expense sheet (rent, subscriptions) |
+| `POST /money/accounts`, `PATCH/DELETE /money/accounts/{id}` | `createAccount()`, `updateAccount()`, `deleteAccount()` | Money accounts (balances set by hand) |
+| `PUT/DELETE /money/budgets/{category}` | `setBudget()`, `deleteBudget()` | Money budget sheet (monthly limit per expense category) |
 
 Drive additions used by the redesign:
 
