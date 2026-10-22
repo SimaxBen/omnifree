@@ -178,7 +178,7 @@ def docx_to_text(data: bytes) -> tuple[str | None, str]:
     return title, "\n".join(paragraphs)
 
 
-def _pdf_pages(data: bytes) -> tuple[str | None, list[tuple[int | None, str]]]:
+def _pdf_pages(data: bytes, max_pages: int | None = None) -> tuple[str | None, list[tuple[int | None, str]]]:
     from pypdf import PdfReader
     from pypdf.errors import PdfReadError
 
@@ -200,6 +200,8 @@ def _pdf_pages(data: bytes) -> tuple[str | None, list[tuple[int | None, str]]]:
             title = None
         pages: list[tuple[int | None, str]] = []
         for number, page in enumerate(reader.pages, start=1):
+            if max_pages is not None and number > max_pages:
+                break
             try:
                 text = page.extract_text() or ""
             except Exception:
