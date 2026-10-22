@@ -137,7 +137,7 @@ export default function HomeView() {
             <Icon name="right" size={16} />
           </span>
         </span>
-        <span className="mt-3 grid grid-cols-3 gap-2">
+        <span className="mt-3 grid grid-cols-[minmax(0,2.2fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3">
           {week.data
             ? headlineStats(week.data).map((st) => (
                 <span key={st.label} className="block min-w-0">

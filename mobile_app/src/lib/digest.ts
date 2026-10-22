@@ -33,7 +33,7 @@ export function headlineStats(d: Digest): HeadlineStat[] {
   const totals = d.stats.expenses.total_by_currency;
   const main = currenciesByWeight(totals)[0];
   const out: HeadlineStat[] = [
-    { label: 'Spent', value: main ? formatMoney(totals[main], main) : 'Nothing' },
+    { label: 'Spent', value: main ? formatMoney(Math.round(totals[main]), main) : 'Nothing' }, // whole units: the headline is narrow
     { label: 'Tasks done', value: String(d.stats.tasks.done) },
   ];
   if (d.stats.notes.created || !d.stats.drive.uploaded_files) out.push({ label: 'Notes', value: String(d.stats.notes.created) });
