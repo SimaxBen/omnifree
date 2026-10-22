@@ -70,6 +70,8 @@ export default function AppSheets({ children, captureOpen, setCaptureOpen }: { c
       },
       fileActions: (obj) => actions.open(obj),
       shareDrop: (obj) => drop.open(obj),
+      scanReceiptFile: (file) => expense.open({ kind: 'receipt', file }),
+      uploadFiles: (files, folder = '') => upload.open({ files, folder }),
     }),
     // The session helpers are stable in behaviour; re-creating them per render is fine.
     // eslint-disable-next-line react-hooks/exhaustive-deps

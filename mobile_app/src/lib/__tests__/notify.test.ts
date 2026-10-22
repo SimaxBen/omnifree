@@ -3,7 +3,7 @@ import { describeCron, isValidCron } from '../cron';
 import { NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscribeLink, templateJob } from '../notify';
 
 describe('notification schedule templates', () => {
-  it('has the seven templates with valid UTC schedules and readable descriptions', () => {
+  it('has the eight templates with valid UTC schedules and readable descriptions', () => {
     expect(SCHEDULE_TEMPLATES.map((t) => [t.id, t.schedule])).toEqual([
       ['morning', '0 8 * * *'],
       ['evening', '0 20 * * *'],
@@ -12,6 +12,7 @@ describe('notification schedule templates', () => {
       ['month', '0 9 28 * *'],
       ['gcal', '7 * * * *'],
       ['reminders', '*/15 * * * *'],
+      ['summary', '0 7,13 * * *'],
     ]);
     for (const t of SCHEDULE_TEMPLATES) {
       expect(isValidCron(t.schedule)).toBe(true);
@@ -58,7 +59,14 @@ describe('notification schedule templates', () => {
   });
 
   it('lists every server-side kind once', () => {
-    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'reminders', 'inbox']);
+    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'reminders', 'summary', 'inbox']);
+  });
+
+  it('offers the daily summary twice a day with a single query parameter', () => {
+    const tpl = SCHEDULE_TEMPLATES.find((t) => t.id === 'summary')!;
+    expect(tpl.label).toBe('Daily summary: 07:00 and 13:00');
+    expect(describeCron(tpl.schedule)).toBe('Daily at 07:00 and 13:00 UTC');
+    expect(templateJob(tpl, 'https://hub.example').target).toBe('https://hub.example/notify/run?kind=summary');
   });
 });
 

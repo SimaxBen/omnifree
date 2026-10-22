@@ -18,6 +18,10 @@ export interface AppActions {
   preview: (obj: StoredObject, siblings?: StoredObject[]) => void;
   fileActions: (obj: StoredObject) => void;
   shareDrop: (obj: StoredObject) => void;
+  /** Receipt scan of a file already in hand (Android share sheet: image or PDF). */
+  scanReceiptFile: (file: File) => void;
+  /** Upload sheet for files already in hand (Android share sheet). */
+  uploadFiles: (files: File[], folder?: string) => void;
 }
 
 export const ActionsContext = createContext<AppActions | null>(null);

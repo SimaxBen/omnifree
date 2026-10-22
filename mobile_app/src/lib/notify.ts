@@ -10,6 +10,11 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
   { kind: 'budget', label: 'Free-tier budget', detail: 'Plugins that newly reach 80 % or 100 % of a limit' },
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
   { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task (with a “Fait ✓” button) or a Google Calendar event' },
+  {
+    kind: 'summary',
+    label: 'Daily summary',
+    detail: 'One notification kept up to date: today’s events, next tasks, money left this month. The app notification is replaced in place; ntfy cannot replace, so it gets a new quiet one each time',
+  },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
 ];
 
@@ -57,6 +62,10 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
     id: 'reminders', name: 'push-reminders', label: 'Task reminders: every 15 min', schedule: '*/15 * * * *', path: '/notify/run?kind=reminders',
     description:
       'Pushes each timed task up to 15 min before it is due. 96 calls a day: with the 10-min keep-warm job (144/day) that is 240 of the 1,000 free QStash messages a day',
+  },
+  {
+    id: 'summary', name: 'push-summary', label: 'Daily summary: 07:00 and 13:00', schedule: '0 7,13 * * *', path: '/notify/run?kind=summary',
+    description: 'Refreshes the one persistent summary notification (events, next tasks, money left) twice a day. 2 calls a day',
   },
 ];
 

@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode, type TouchEvent } from 'react';
 import { registerSW } from 'virtual:pwa-register';
 import AppSheets from './AppSheets';
+import AppLock from './components/AppLock';
+import LaunchActions from './components/LaunchActions';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Icon, type IconName } from './components/icons';
 import { ConfirmProvider } from './components/Sheet';
 import { StatusDot, cx, haptic } from './components/ui';
 import { greeting, isoDay } from './lib/apps';
 import { useHub } from './lib/hub';
-import { NavProvider, hasRefreshers, runRefreshers, useNav, type Tab } from './lib/nav';
+import { NavProvider, hasRefreshers, routeHash, runRefreshers, useNav, type Tab } from './lib/nav';
+import { useOverlayBack } from './lib/overlay';
 import { syncPush } from './lib/pushClient';
 import { ScreenActionSlot } from './lib/screenAction';
 import { UploadsProvider, useUploads } from './lib/uploads';
@@ -16,6 +19,9 @@ import DriveScreen from './views/drive/DriveScreen';
 import HomeView from './views/HomeView';
 import MoreView, { MORE_PAGES } from './views/MoreView';
 import NotesView from './views/notes/NotesView';
+import SearchScreen from './views/SearchScreen';
+import ShareScreen from './views/ShareScreen';
+import { SHARE_HASH } from './lib/share';
 
 const NAV: { tab: Tab; label: string; icon: IconName }[] = [
   { tab: 'home', label: 'Home', icon: 'home' },
@@ -138,6 +144,30 @@ function Shell() {
   const mainRef = useRef<HTMLElement>(null);
   const arcRef = useRef<HTMLDivElement>(null);
   const pull = useRef<{ y: number; d: number } | null>(null);
+  // Global search (top bar) and the Android share target (/#/share): full-screen overlays above the screens.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const closeSearch = useOverlayBack(searchOpen, () => setSearchOpen(false));
+  const [shareOpen, setShareOpen] = useState(() => window.location.hash.startsWith(SHARE_HASH));
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
+  useEffect(() => {
+    const onHash = () => {
+      if (window.location.hash.startsWith(SHARE_HASH)) setShareOpen(true);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  const closeShare = (after?: () => void) => {
+    try {
+      window.history.replaceState(null, '', routeHash(routeRef.current));
+    } catch {
+      // History unavailable (sandboxed previews).
+    }
+    setShareOpen(false);
+    after?.();
+  };
 
   useEffect(() => {
     const update = registerSW({
@@ -236,6 +266,14 @@ function Shell() {
               </p>
               <button
                 type="button"
+                onClick={() => setSearchOpen(true)}
+                aria-label="Search everything"
+                className="press grid h-11 w-11 place-items-center rounded-full text-ink-300 hover:bg-ink-800"
+              >
+                <Icon name="search" size={21} />
+              </button>
+              <button
+                type="button"
                 onClick={() => go('more', 'settings')}
                 aria-label={`Hub ${connection === 'open' ? 'live' : connection}. Open settings`}
                 className="press grid h-11 w-11 place-items-center rounded-full hover:bg-ink-800"
@@ -293,6 +331,9 @@ function Shell() {
         <BottomNav captureOpen={captureOpen} onCapture={() => setCaptureOpen(true)} />
         <Toasts />
       </div>
+      <LaunchActions />
+      {searchOpen && <SearchScreen onClose={closeSearch} />}
+      {shareOpen && <ShareScreen onClose={closeShare} />}
     </AppSheets>
   );
 }
@@ -300,11 +341,13 @@ function Shell() {
 export default function App() {
   return (
     <NavProvider>
-      <ConfirmProvider>
-        <UploadsProvider>
-          <Shell />
-        </UploadsProvider>
-      </ConfirmProvider>
+      <AppLock>
+        <ConfirmProvider>
+          <UploadsProvider>
+            <Shell />
+          </UploadsProvider>
+        </ConfirmProvider>
+      </AppLock>
     </NavProvider>
   );
 }

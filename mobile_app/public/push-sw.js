@@ -4,7 +4,7 @@
  * generated precache is untouched. Plain ES2017 script: no imports, no build step.
  *
  * Payload (hub_api/webpush.py build_payload):
- *   { title, body, tag, url, actions: [{ action: 'done' | 'open', title, url }] }
+ *   { title, body, tag, url, actions: [{ action: 'done' | 'open', title, url }], renotify? }
  * 'done' POSTs the signed "Fait ✓" link of a task reminder; 'open' (and a tap on the body) opens `url` in the app.
  *
  * The page keeps { hubUrl, token, publicKey, label, browser } in IndexedDB (omnifree-push / kv / config) so
@@ -98,7 +98,8 @@
     };
     if (p.tag) {
       options.tag = String(p.tag);
-      options.renotify = true;
+      // "renotify": false (the daily summary) replaces the previous same-tag notification without alerting again.
+      options.renotify = p.renotify !== false;
     }
     return { title: p.title || 'OmniFree', options: options };
   }

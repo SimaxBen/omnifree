@@ -248,3 +248,15 @@ button,
 
 /* Nav indicator blob. */
 .nav-blob { transition: left 340ms var(--ease-spring); }
+
+/* ------------------------------------------------------------------ app lock */
+
+@keyframes shake {
+  0%, 100% { transform: none; }
+  20%, 60% { transform: translate3d(-8px, 0, 0); }
+  40%, 80% { transform: translate3d(8px, 0, 0); }
+}
+.shake { animation: shake 320ms var(--ease-out) both; }
+@media (prefers-reduced-motion: reduce) {
+  .shake { animation: none; }
+}
