@@ -226,7 +226,22 @@ async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
         f"INSERT INTO app_expenses ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
         [row[c] for c in cols],
     )
-    return _expense_out(row)
+    out = _expense_out(row)
+    await _after_insert(db, out)
+    return out
+
+
+async def _after_insert(db: AppDB, expense: dict[str, Any]) -> None:
+    """Every expense path (manual, receipt, voice, bank SMS, email, MCP) converges here: live budget alert.
+
+    Best effort and bounded (see :func:`hub_api.money_intel.budget_alert_after_insert`): never fails the insert.
+    """
+    try:
+        from hub_api.money_intel import budget_alert_after_insert  # imports this module
+
+        await budget_alert_after_insert(db, expense)
+    except Exception as exc:  # noqa: BLE001 - the expense is saved whatever happens here
+        log.warning("after-insert hook failed: %r", exc)
 
 
 insert_expense = _insert

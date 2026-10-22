@@ -10,19 +10,21 @@ stored in ``app_notify_log.channels`` (JSON) and returned as ``channels``.
   switches and the last pushes;
 * ``PUT /notify/prefs``: turn kinds (``prefs``) or channels (``channels``) on or off (stored in D1, all on by default);
 * ``POST /notify/test``: one test push (to every enabled channel);
-* ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders``: what the QStash schedules call (no
+* ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders|bills``: what the QStash schedules call (no
   body needed). Daily/weekly/monthly kinds are deduplicated in D1 (one push per kind and day, week or month;
   ``force=1`` bypasses it, ``preview=1`` composes without sending); ``budget`` only pushes items that
   became ``warn``/``over`` since the last budget push; ``reminders`` (every 15 min) pushes one notification
   per open task whose due date + time falls in [now - 5 min, now + 15 min], deduplicated per task and due
   time, with a "Fait ✓" button, plus one per timed Google Calendar event starting in the same window (deduplicated
   per event id and start; see :mod:`hub_api.gcal`). The morning push opens with an "Agenda" section (today's
-  events) when Google Calendar is set up;
+  events) when Google Calendar is set up; ``bills`` (daily) pushes one notification per monthly charge or tracked
+  subscription due in the next 2 days, deduplicated per charge and date (see :mod:`hub_api.money_intel`);
 * ``POST /notify/done/{task_id}?sig=...`` (``public_router``, no bearer: the ntfy app calls it from the
   notification button): marks that one task done. ``sig`` is an HMAC-SHA256 of the task id under a key
   derived from the hub token (see :func:`done_sig`), compared in constant time; anything else answers 404.
 
-The email receipt import calls :func:`push_inbox_import` after a sync that created expenses (best effort).
+The email receipt import calls :func:`push_inbox_import` after a sync that created expenses (best effort);
+every expense insert may push a ``spending`` alert when its category crosses 80 % / 100 % of its budget.
 Push texts are in French (the owner's language); days are Africa/Casablanca days.
 """
 
@@ -61,9 +63,9 @@ log = logging.getLogger("omnifree.hub.notify")
 router = APIRouter(prefix="/notify", tags=["notify"])
 public_router = APIRouter(tags=["public"])
 
-RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders"]
-RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders")
-KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox")
+RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders", "bills"]
+RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders", "bills")
+KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox", "spending")  # inbox / spending: pushed by an event, not a schedule
 CHANNELS: tuple[str, ...] = ("ntfy", "webpush")
 _CHANNEL_PREFIX = "channel:"  # channel switches live in app_notify_prefs as "channel:ntfy" / "channel:webpush"
 WEBPUSH_TTL_S = 12 * 3600
@@ -788,6 +790,13 @@ async def notify_run(
         try:
             minutes = ahead_header or ahead
             return await run_reminders(state, db, preview=preview, force=force, ahead=timedelta(minutes=minutes))
+        except notifier.NotifyError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    if kind == "bills":
+        from hub_api.money_intel import run_bills  # imports this module
+
+        try:
+            return await run_bills(state, db, preview=preview, force=force)
         except notifier.NotifyError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     today = local_today()

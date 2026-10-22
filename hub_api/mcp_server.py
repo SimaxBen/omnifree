@@ -52,7 +52,7 @@ from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
 from hub_api.errors import error_body
-from hub_api.routers import chats, cron, drive, expenses, links, llm, money, notes, rag
+from hub_api.routers import chats, cron, drive, expenses, links, llm, money, money_plus, notes, rag
 from hub_api.routers import gcal as gcal_router
 from hub_api.state import HubState
 
@@ -645,6 +645,40 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
         kind: Annotated[money.AccountKind | None, Field(description="Account kind (new accounts default to bank).")] = None,
     ) -> dict[str, Any]:
         return await money.set_account_balance(await money_db(), name, balance, currency, kind)
+
+    # ----------------------------------------------------------------- savings goals
+
+    async def goals_db() -> AppDB:
+        return await money_plus._db(appdb())
+
+    @tool(
+        description=(
+            "Savings goals: target, saved so far, progress (0-1), deadline, months left and the amount to save per "
+            "month to reach the target in time, plus totals in MAD."
+        ),
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def goals_list() -> dict[str, Any]:
+        return await money_plus.list_goals(db=await goals_db())
+
+    @tool(
+        description=(
+            "Add money to a savings goal (a negative amount takes money out). `goal` is the goal id or its name "
+            "(case-insensitive). The amount is in the goal's currency."
+        ),
+        annotations=UPDATES,
+    )
+    @_guard
+    async def goal_contribute(
+        goal: Annotated[str, Field(min_length=1, max_length=100, description='Goal id or name, e.g. "Voyage Japon".')],
+        amount: Annotated[float, Field(description="Amount to add (negative to withdraw), not 0.")],
+        note: Annotated[str | None, Field(max_length=500)] = None,
+    ) -> dict[str, Any]:
+        db = await goals_db()
+        row = await money_plus.find_goal(db, goal)
+        body = money_plus.ContributionBody.model_validate({"amount": amount, "note": note})
+        return await money_plus.contribute(row["id"], body, db=db)
 
     # ----------------------------------------------------------------- links and drops
 

@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "tasks_add", "tasks_complete", "expenses_month", "expense_add", "links_create", "drops_create",
     "schedules_list", "schedule_create", "budget_status", "chats_list",
     "money_overview", "income_add", "account_set_balance", "calendar_events", "calendar_add_event",
+    "goals_list", "goal_contribute",
 }
 
 
@@ -458,3 +459,17 @@ def test_serverless_entrypoint_serves_mcp(tmp_path: Path, monkeypatch: pytest.Mo
     finally:
         sys.modules.pop("hub_api.serverless", None)
         get_settings.cache_clear()
+
+
+def test_goals(mcp: MCP, mcp_hub) -> None:
+    assert mcp_hub.post("/money/goals", json={"name": "Voyage Japon", "target": 20000, "deadline": "2099-12-31"}).status_code == 201
+    listed = mcp.ok("goals_list")
+    assert [g["name"] for g in listed["goals"]] == ["Voyage Japon"] and listed["total_target_mad"] == 20000
+    out = mcp.ok("goal_contribute", goal="voyage japon", amount=1500, note="octobre")
+    assert out["goal"]["saved"] == 1500 and out["contribution"]["note"] == "octobre"
+    out = mcp.ok("goal_contribute", goal=out["goal"]["id"], amount=-500)
+    assert out["goal"]["saved"] == 1000
+    res = mcp.call("goal_contribute", goal="Voyage Japon", amount=-5000)
+    assert res["isError"] is True and "cannot take out" in res["content"][0]["text"]
+    res = mcp.call("goal_contribute", goal="Nope", amount=10)
+    assert res["isError"] is True and "not found" in res["content"][0]["text"]

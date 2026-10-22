@@ -10,6 +10,10 @@ Everything lives in the apps database next to ``app_expenses`` (see :mod:`hub_ap
 * ``app_budgets``: a monthly limit per expense category;
 * ``app_fx_cache``: exchange rates (base MAD) from a free no-key API, kept 24 h, with a static fallback.
 
+A monthly charge that an expense of the same month already paid (same merchant key, amount within 15 %,
+see :mod:`hub_api.money_match`) counts once: the expense stays, the charge is shown as ``paid``. The
+overview also carries an end-of-month ``forecast`` (see :func:`build_forecast`).
+
 Totals are in MAD; every item keeps its original amount and currency. ``POST /money/voice`` turns a
 recording ("j'ai payé 45 dh de taxi et 30 dh un café") into expenses (``source = 'voice'``) and incomes.
 """
@@ -30,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.interfaces import ChatMessage, ChatRequest
 from hub_api.appdata import AppDB, extract_json, get_appdb, iso, local_today, new_id, now_iso
+from hub_api.money_match import amount_close, merchant_key
 from hub_api.receipts import CATEGORIES
 from hub_api.routers.expenses import (
     _MONTH_RE,
@@ -46,7 +51,7 @@ from hub_api.state import HubState, get_state
 __all__ = [
     "router", "SCHEMA", "INCOME_CATEGORIES", "FALLBACK_TO_MAD", "Rates", "ensure_schema", "rates_from_payload",
     "get_rates", "month_shift", "active_in", "occurrence", "resolve_spent_date", "parse_money_entries",
-    "create_entries", "insert_income", "build_overview",
+    "create_entries", "insert_income", "build_overview", "build_forecast", "paid_charges",
 ]
 
 log = logging.getLogger("omnifree.hub.money")
@@ -58,6 +63,8 @@ INCOME_CATEGORIES = ("salary", "freelance", "refund", "gift", "other")
 IncomeCategory = Literal["salary", "freelance", "refund", "gift", "other"]
 AccountKind = Literal["cash", "bank", "savings", "card", "other"]
 SERIES_MONTHS = 6
+FORECAST_HISTORY_MONTHS = 3  # past months whose day-to-day spend seeds the forecast early in the month
+FORECAST_PRIOR_DAYS = 10  # the history weighs like this many days, fading as the month goes on
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_incomes ("
@@ -412,8 +419,13 @@ def build_overview(
     recurring: list[dict[str, Any]],
     accounts: list[dict[str, Any]],
     budgets: list[dict[str, Any]],
+    extra_recurring: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The month's figures in MAD (pure: rows in, JSON out). Rows are the ``*_out`` shapes."""
+    """The month's figures in MAD (pure: rows in, JSON out). Rows are the ``*_out`` shapes.
+
+    ``extra_recurring``: weekly/yearly subscription charges falling in ``month`` (``id, name, amount, currency,
+    on``); they only feed ``upcoming`` and the forecast, the expense that pays them counts in the totals.
+    """
     months = [month_shift(month, -i) for i in range(SERIES_MONTHS - 1, -1, -1)]
     unconverted: set[str] = set()
 
@@ -426,13 +438,19 @@ def build_overview(
 
     income_by: dict[str, float] = {m: 0.0 for m in months}
     spent_by: dict[str, float] = {m: 0.0 for m in months}
-    for e in expenses:
+    variable_by: dict[str, float] = {m: 0.0 for m in months}  # expenses that pay no recurring charge
+    paid = paid_charges(months, recurring, expenses, mad)
+    paying = set(paid.values())
+    for idx, e in enumerate(expenses):
         m = str(e["date"])[:7]
         if m in spent_by:
-            spent_by[m] += mad(float(e["total"]), e["currency"])
+            value = mad(float(e["total"]), e["currency"])
+            spent_by[m] += value
+            if idx not in paying:
+                variable_by[m] += value
     for r in recurring:
         for m in months:
-            if active_in(r["start_month"], r.get("end_month"), m):
+            if active_in(r["start_month"], r.get("end_month"), m) and (r["id"], m) not in paid:
                 spent_by[m] += mad(r["amount"], r["currency"])
     for i in incomes:
         start, end = _income_months(i)
@@ -458,18 +476,21 @@ def build_overview(
     for r in recurring:
         if active_in(r["start_month"], r.get("end_month"), month):
             day = occurrence(month, r["day"])
-            month_recurring.append({**r, "amount_mad": mad(r["amount"], r["currency"]), "on": day, "upcoming": upcoming(day)})
+            is_paid = (r["id"], month) in paid
+            month_recurring.append({**r, "amount_mad": mad(r["amount"], r["currency"]), "on": day,
+                                    "upcoming": upcoming(day) and not is_paid, "paid": is_paid})
     month_recurring.sort(key=lambda x: (x["on"], x["name"]))
 
     month_expenses = [e for e in expenses if str(e["date"])[:7] == month]
     expense_total = round(sum(mad(float(e["total"]), e["currency"]) for e in month_expenses), 2)
-    recurring_total = round(sum(r["amount_mad"] for r in month_recurring), 2)
+    recurring_total = round(sum(r["amount_mad"] for r in month_recurring if not r["paid"]), 2)
 
     per_cat: dict[str, float] = {}
     for e in month_expenses:
         per_cat[e["category"]] = per_cat.get(e["category"], 0.0) + mad(float(e["total"]), e["currency"])
     for r in month_recurring:
-        per_cat[r["category"]] = per_cat.get(r["category"], 0.0) + r["amount_mad"]
+        if not r["paid"]:
+            per_cat[r["category"]] = per_cat.get(r["category"], 0.0) + r["amount_mad"]
     budget_of = {b["category"]: b for b in budgets}
     categories = []
     for cat in sorted(set(per_cat) | set(budget_of), key=lambda c: (-per_cat.get(c, 0.0), c)):
@@ -495,6 +516,13 @@ def build_overview(
          "currency": i["currency"], "amount_mad": i["amount_mad"], "date": i["on"]}
         for i in month_incomes if i["recurring"] and upcoming(i["on"])
     ]
+    extra = [{**x, "amount_mad": mad(x["amount"], x["currency"])} for x in extra_recurring or []
+             if str(x["on"])[:7] == month]
+    upcoming_items += [
+        {"kind": "expense", "id": x["id"], "name": x["name"], "amount": x["amount"], "currency": x["currency"],
+         "amount_mad": x["amount_mad"], "date": x["on"]}
+        for x in extra if upcoming(x["on"])
+    ]
     upcoming_items.sort(key=lambda x: (x["date"], x["name"]))
 
     account_items = [{**a, "balance_mad": mad(a["balance"], a["currency"])} for a in accounts]
@@ -515,13 +543,116 @@ def build_overview(
         "upcoming": upcoming_items,
         "accounts": {"total": round(sum(a["balance_mad"] for a in account_items), 2), "items": account_items},
         "fx": {**rates.public(), "unconverted": sorted(unconverted)},
+        "forecast": build_forecast(
+            month, today, income_total=income_total, expense_total=expense_total, variable_by=variable_by,
+            charges=[(r["on"], r["amount_mad"]) for r in month_recurring if not r["paid"]],
+            extra=[(x["on"], x["amount_mad"]) for x in extra],
+        ),
+    }
+
+
+def paid_charges(
+    months: list[str], recurring: list[dict[str, Any]], expenses: list[dict[str, Any]], mad: Any
+) -> dict[tuple[str, str], int]:
+    """``{(recurring id, month): index in expenses of the expense that paid it}``.
+
+    An expense pays a monthly charge of its month when the merchant keys match and the amounts (in MAD) are
+    within 15 %; each expense pays at most one charge.
+    """
+    by_month: dict[str, list[tuple[int, str, float]]] = {}
+    for idx, e in enumerate(expenses):
+        key = merchant_key(e.get("merchant"))
+        if key and str(e["date"])[:7] in months:
+            by_month.setdefault(str(e["date"])[:7], []).append((idx, key, mad(float(e["total"]), e["currency"])))
+    out: dict[tuple[str, str], int] = {}
+    if not by_month:
+        return out
+    used: set[int] = set()
+    for r in recurring:
+        key = merchant_key(r.get("name"))
+        if not key:
+            continue
+        target = mad(r["amount"], r["currency"])
+        for m in months:
+            if not active_in(r["start_month"], r.get("end_month"), m):
+                continue
+            for idx, k, value in by_month.get(m, []):
+                if idx not in used and k == key and amount_close(value, target):
+                    out[(r["id"], m)] = idx
+                    used.add(idx)
+                    break
+    return out
+
+
+def build_forecast(
+    month: str,
+    today: date,
+    *,
+    income_total: float,
+    expense_total: float,
+    variable_by: dict[str, float],
+    charges: list[tuple[str, float]],
+    extra: list[tuple[str, float]],
+) -> dict[str, Any]:
+    """End of ``month`` in MAD: spent so far + recurring still to come + daily variable spend x days left.
+
+    ``charges``: the month's unpaid monthly charges ``(date, MAD)`` (already in the totals); ``extra``: weekly or
+    yearly subscription charges of the month (not in the totals: only the ones still to come count). The daily
+    average is this month's variable spend (expenses that pay no recurring charge) per elapsed day, blended
+    with the average of the last months, which weighs like :data:`FORECAST_PRIOR_DAYS` days and fades as days
+    pass. Past months answer their actual figures; a future month is projected from the history only.
+    """
+    y, m = int(month[:4]), int(month[5:7])
+    days = calendar.monthrange(y, m)[1]
+    this = today.strftime("%Y-%m")
+    elapsed = days if month < this else 0 if month > this else today.day
+    remaining_days = days - elapsed
+    cut = today.isoformat() if month == this else ("9999" if month < this else "0000")
+    past_charges = sum(v for d, v in charges if d < cut)
+    remaining_recurring = sum(v for d, v in charges if d >= cut) + sum(v for d, v in extra if d >= cut)
+
+    history = [p for p in sorted(variable_by) if p < month and p < this][-FORECAST_HISTORY_MONTHS:]
+    history = [p for p in history if variable_by[p] > 0]
+    hist_days = sum(calendar.monthrange(int(p[:4]), int(p[5:7]))[1] for p in history)
+    hist_daily = sum(variable_by[p] for p in history) / hist_days if hist_days else None
+    variable = variable_by.get(month, 0.0)
+    prior = max(0, FORECAST_PRIOR_DAYS - elapsed) if hist_daily is not None else 0
+    weight = elapsed + prior
+    daily_avg = (variable + (hist_daily or 0.0) * prior) / weight if weight else 0.0
+    if month > this and hist_daily is not None:
+        daily_avg = hist_daily
+
+    spent_so_far = expense_total + past_charges
+    projected_spent = spent_so_far + remaining_recurring + daily_avg * remaining_days
+    if month < this:
+        confidence = "high"
+    elif month > this:
+        confidence = "medium" if len(history) >= 2 else "low"
+    elif elapsed >= 20 or (elapsed >= 10 and len(history) >= 2):
+        confidence = "high"
+    elif elapsed >= 7 or history:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    return {
+        "projected_spent": round(projected_spent, 2),
+        "projected_left": round(income_total - projected_spent, 2),
+        "daily_avg": round(daily_avg, 2),
+        "remaining_recurring": round(remaining_recurring, 2),
+        "spent_so_far": round(spent_so_far, 2),
+        "variable_spent": round(variable, 2),
+        "remaining_days": remaining_days,
+        "month_end": date(y, m, days).isoformat(),
+        "history_months": len(history),
+        "history_daily_avg": None if hist_daily is None else round(hist_daily, 2),
+        "confidence": confidence,
     }
 
 
 async def overview_for(db: AppDB, month: str, today: date) -> dict[str, Any]:
     first = month_shift(month, -(SERIES_MONTHS - 1))
     expense_rows = await db.fetch(
-        "SELECT date, total, currency, category FROM app_expenses WHERE date >= ? AND date <= ?",
+        "SELECT id, date, merchant, total, currency, category FROM app_expenses WHERE date >= ? AND date <= ?",
         [f"{first}-01", f"{month}-31"],
     )
     income_rows = await db.fetch(
@@ -533,12 +664,15 @@ async def overview_for(db: AppDB, month: str, today: date) -> dict[str, Any]:
     account_rows = await db.fetch("SELECT * FROM app_accounts ORDER BY name")
     budget_rows = await db.fetch("SELECT * FROM app_budgets ORDER BY category")
     rates = await get_rates(db)
+    from hub_api.money_intel import subscription_charges  # weekly/yearly subscriptions (that module imports this one)
+
     return build_overview(
         month,
         today,
         rates,
         expenses=[
-            {"date": r["date"], "total": float(r.get("total") or 0), "currency": r.get("currency") or BASE,
+            {"id": r.get("id"), "date": r["date"], "merchant": r.get("merchant") or "",
+             "total": float(r.get("total") or 0), "currency": r.get("currency") or BASE,
              "category": r.get("category") or "other"}
             for r in expense_rows
         ],
@@ -546,6 +680,7 @@ async def overview_for(db: AppDB, month: str, today: date) -> dict[str, Any]:
         recurring=[_recurring_out(r) for r in recurring_rows],
         accounts=[_account_out(r) for r in account_rows],
         budgets=[_budget_out(r) for r in budget_rows],
+        extra_recurring=await subscription_charges(db, month),
     )
 
 

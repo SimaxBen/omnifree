@@ -93,6 +93,8 @@ import type {
   PushTestResponse,
 } from './types';
 import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from './types';
+import { normalizeGoal, normalizeGoals, normalizeSuggestions } from './moneyIntel';
+import type { GoalContribution, GoalCreate, GoalPatch, GoalsListing, SavingsGoal, SubscriptionAccept, SubscriptionSuggestion, TrackedSubscription } from './types';
 
 /**
  * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
@@ -809,6 +811,61 @@ export class HubClient {
   /** `POST /money/sms?dry_run=true`: how the hub reads an SMS, without saving anything. */
   testSms(text: string, sender = '', signal?: AbortSignal): Promise<SmsResult> {
     return this.request<SmsResult>('POST', '/money/sms', { query: { dry_run: true }, json: { from: sender, text }, signal });
+  }
+
+  // ------------------------------------------------------------------ money intelligence (subscriptions, goals)
+
+  /** `GET /money/subscriptions/suggestions`: merchants charged again and again, not tracked yet. */
+  async subscriptionSuggestions(signal?: AbortSignal): Promise<SubscriptionSuggestion[]> {
+    return normalizeSuggestions(await this.request<unknown>('GET', '/money/subscriptions/suggestions', { signal }));
+  }
+
+  /** `GET /money/subscriptions`: accepted and dismissed ones. */
+  async trackedSubscriptions(signal?: AbortSignal): Promise<TrackedSubscription[]> {
+    return listOf<TrackedSubscription>(await this.request<unknown>('GET', '/money/subscriptions', { signal }), 'subscriptions');
+  }
+
+  /** `POST /money/subscriptions/accept`: monthly -> a recurring expense; weekly / yearly -> tracked subscription. */
+  acceptSubscription(body: SubscriptionAccept): Promise<{ subscription: TrackedSubscription; recurring: RecurringExpense | null }> {
+    return this.request('POST', '/money/subscriptions/accept', { json: body });
+  }
+
+  dismissSubscription(key: string): Promise<{ subscription: TrackedSubscription }> {
+    return this.request('POST', '/money/subscriptions/dismiss', { json: { key } });
+  }
+
+  /** `DELETE /money/subscriptions/{id}`: forget a dismissal, or stop tracking a weekly / yearly subscription. */
+  forgetSubscription(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/subscriptions/${encodeURIComponent(id)}`);
+  }
+
+  async goals(signal?: AbortSignal): Promise<GoalsListing> {
+    return normalizeGoals(await this.request<unknown>('GET', '/money/goals', { signal }));
+  }
+
+  async goal(id: string, signal?: AbortSignal): Promise<SavingsGoal & { contributions: GoalContribution[] }> {
+    const body = await this.request<Record<string, unknown>>('GET', `/money/goals/${encodeURIComponent(id)}`, { signal });
+    return { ...normalizeGoal(body), contributions: listOf<GoalContribution>(body, 'contributions') };
+  }
+
+  async createGoal(goal: GoalCreate): Promise<SavingsGoal> {
+    return normalizeGoal(await this.request<Record<string, unknown>>('POST', '/money/goals', { json: goal }));
+  }
+
+  async updateGoal(id: string, patch: GoalPatch): Promise<SavingsGoal> {
+    return normalizeGoal(await this.request<Record<string, unknown>>('PATCH', `/money/goals/${encodeURIComponent(id)}`, { json: patch }));
+  }
+
+  deleteGoal(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/goals/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /money/goals/{id}/contribute`: a negative amount takes money out. */
+  async contributeGoal(id: string, amount: number, note?: string | null): Promise<SavingsGoal> {
+    const body = await this.request<{ goal: Record<string, unknown> }>('POST', `/money/goals/${encodeURIComponent(id)}/contribute`, {
+      json: { amount, note: note || null },
+    });
+    return normalizeGoal(body.goal);
   }
 
   // ------------------------------------------------------------------ Gmail receipts import

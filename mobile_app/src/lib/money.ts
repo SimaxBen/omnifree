@@ -1,5 +1,6 @@
 // Pure helpers for the Money page (incomes, recurring, accounts, budgets). No React, no I/O.
 
+import { normalizeForecast } from './moneyIntel';
 import type { Expense, FxSource, Income, MoneyOverview } from './types';
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -42,6 +43,7 @@ export function normalizeMoneyOverview(body: unknown, month: string): MoneyOverv
       fetched_at: typeof fx.fetched_at === 'string' ? fx.fetched_at : null,
       unconverted: arr<unknown>(fx.unconverted).filter((x): x is string => typeof x === 'string'),
     },
+    forecast: normalizeForecast(b.forecast),
   };
 }
 

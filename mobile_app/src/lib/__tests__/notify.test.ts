@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { describeCron, isValidCron } from '../cron';
-import { NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscribeLink, templateJob } from '../notify';
+import { EVENT_KINDS, NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscribeLink, templateJob } from '../notify';
 
 describe('notification schedule templates', () => {
-  it('has the seven templates with valid UTC schedules and readable descriptions', () => {
+  it('has the eight templates with valid UTC schedules and readable descriptions', () => {
     expect(SCHEDULE_TEMPLATES.map((t) => [t.id, t.schedule])).toEqual([
       ['morning', '0 8 * * *'],
       ['evening', '0 20 * * *'],
@@ -12,6 +12,7 @@ describe('notification schedule templates', () => {
       ['month', '0 9 28 * *'],
       ['gcal', '7 * * * *'],
       ['reminders', '*/15 * * * *'],
+      ['bills', '0 9 * * *'],
     ]);
     for (const t of SCHEDULE_TEMPLATES) {
       expect(isValidCron(t.schedule)).toBe(true);
@@ -58,7 +59,8 @@ describe('notification schedule templates', () => {
   });
 
   it('lists every server-side kind once', () => {
-    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'reminders', 'inbox']);
+    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'reminders', 'bills', 'inbox', 'spending']);
+    expect(EVENT_KINDS).toEqual(['inbox', 'spending']);
   });
 });
 

@@ -11,12 +11,14 @@ import type { ExpenseCategory, MoneyAccount, MoneyOverview, RecurringExpense } f
 import { CATEGORY_COLOR } from './ExpenseEditor';
 import { BankSmsSheet } from './BankSmsSheet';
 import { AccountSheet, BudgetSheet, INCOME_LABEL, RecurringSheet } from './MoneySheets';
+import { ForecastLine, ForecastSheet, GoalsSection, SubscriptionsSection } from './MoneyIntel';
 
 type LocalSheet =
   | { kind: 'recurring'; item: RecurringExpense | null }
   | { kind: 'budget'; category: ExpenseCategory | null; current: { amount: number; currency: string } | null }
   | { kind: 'account'; account: MoneyAccount | null }
-  | { kind: 'sms' };
+  | { kind: 'sms' }
+  | { kind: 'forecast' };
 
 const MAD = 'MAD';
 
@@ -29,7 +31,7 @@ function Original({ amount, currency }: { amount: number; currency: string }) {
   return <span className="block text-[12px] text-ink-500">{formatMoney(amount, currency)}</span>;
 }
 
-function Hero({ ov }: { ov: MoneyOverview }) {
+function Hero({ ov, onForecast }: { ov: MoneyOverview; onForecast: () => void }) {
   const rate = ov.savings_rate;
   const negative = ov.net < 0;
   return (
@@ -72,6 +74,7 @@ function Hero({ ov }: { ov: MoneyOverview }) {
         {ov.spent.count} expense{ov.spent.count === 1 ? '' : 's'}
         {ov.spent.recurring > 0 && ` + ${formatMoney(ov.spent.recurring, MAD)} recurring`}. Totals in MAD.
       </p>
+      {ov.forecast && ov.forecast.remaining_days > 0 && <ForecastLine forecast={ov.forecast} onOpen={onForecast} />}
     </section>
   );
 }
@@ -190,7 +193,7 @@ export default function MoneyView() {
         )
       ) : (
         <>
-          <Hero ov={ov} />
+          <Hero ov={ov} onForecast={() => open({ kind: 'forecast' })} />
 
           <div className="rise grid grid-cols-[1fr_auto] gap-2" style={riseStyle(1)}>
             <Button variant="primary" icon="mic" onClick={actions.recordMoney}>
@@ -305,7 +308,7 @@ export default function MoneyView() {
                     icon="repeat"
                     tint={CATEGORY_COLOR[r.category] ?? '#8A8FBF'}
                     title={r.name}
-                    detail={`${r.upcoming ? 'Due' : 'Paid'} ${dayShort(r.on)}${r.end_month ? ` · ${monthRangeLabel(r.start_month, r.end_month)}` : ''}`}
+                    detail={`${r.upcoming ? 'Due' : 'Paid'} ${dayShort(r.on)}${r.paid ? ' · counted in expenses' : ''}${r.end_month ? ` · ${monthRangeLabel(r.start_month, r.end_month)}` : ''}`}
                     amount={formatMoney(r.amount_mad, MAD)}
                     original={{ amount: r.amount, currency: r.currency }}
                     onClick={() => open({ kind: 'recurring', item: r })}
@@ -322,6 +325,10 @@ export default function MoneyView() {
               </button>
             )}
           </section>
+
+          {isNow && <SubscriptionsSection i={5} />}
+
+          <GoalsSection accounts={ov.accounts.items} i={6} />
 
           {/* Incomes */}
           <section className="rise" style={riseStyle(6)}>
@@ -400,6 +407,7 @@ export default function MoneyView() {
       {sheet?.kind === 'budget' && <BudgetSheet key={sheet.id} open={sheet.open} category={sheet.category} current={sheet.current} onClose={close} />}
       {sheet?.kind === 'account' && <AccountSheet key={sheet.id} open={sheet.open} account={sheet.account} onClose={close} />}
       {sheet?.kind === 'sms' && <BankSmsSheet key={sheet.id} open={sheet.open} onClose={close} />}
+      {sheet?.kind === 'forecast' && ov?.forecast && <ForecastSheet key={sheet.id} open={sheet.open} forecast={ov.forecast} income={ov.income.total} onClose={close} />}
     </div>
   );
 }

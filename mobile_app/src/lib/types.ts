@@ -803,10 +803,136 @@ export interface MoneyOverview {
   savings_rate: number | null;
   categories: MoneyCategoryLine[];
   series: { month: string; income: number; spent: number }[];
-  recurring: (RecurringExpense & { amount_mad: number; on: string; upcoming: boolean })[];
+  /** `paid`: an expense of the month already paid this charge (it counts once, through the expense). */
+  recurring: (RecurringExpense & { amount_mad: number; on: string; upcoming: boolean; paid?: boolean })[];
   upcoming: MoneyUpcoming[];
   accounts: { total: number; items: (MoneyAccount & { balance_mad: number })[] };
   fx: { base: string; source: FxSource; fetched_at: string | null; unconverted: string[] };
+  forecast: MoneyForecast | null;
+}
+
+// ------------------------------------------------------------------ money intelligence (forecast, subscriptions, goals)
+
+export type ForecastConfidence = 'low' | 'medium' | 'high';
+
+/** `overview.forecast`: the end of the month in MAD. */
+export interface MoneyForecast {
+  projected_spent: number;
+  projected_left: number;
+  /** MAD per day of variable spend (expenses that pay no recurring charge). */
+  daily_avg: number;
+  remaining_recurring: number;
+  spent_so_far: number;
+  variable_spent: number;
+  remaining_days: number;
+  month_end: string;
+  history_months: number;
+  history_daily_avg: number | null;
+  confidence: ForecastConfidence;
+}
+
+export type SubscriptionCadence = 'weekly' | 'monthly' | 'yearly';
+
+/** `GET /money/subscriptions/suggestions`: a merchant charged again and again. */
+export interface SubscriptionSuggestion {
+  key: string;
+  name: string;
+  cadence: SubscriptionCadence;
+  avg_amount: number;
+  currency: string;
+  avg_amount_mad: number;
+  monthly_mad: number;
+  occurrences: number;
+  first_date: string;
+  last_date: string;
+  next_date: string;
+  day: number | null;
+  category: ExpenseCategory;
+  /** 0..1 */
+  confidence: number;
+  level: ForecastConfidence;
+  sources: string[];
+  expense_ids: string[];
+}
+
+/** `GET /money/subscriptions`: accepted (weekly/yearly ones stay here, monthly ones become recurring) or dismissed. */
+export interface TrackedSubscription {
+  id: string;
+  key: string;
+  name: string;
+  status: 'accepted' | 'dismissed';
+  cadence: SubscriptionCadence;
+  amount: number;
+  currency: string;
+  category: string;
+  anchor_date: string | null;
+  next_date: string | null;
+  active: boolean;
+  recurring_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionAccept {
+  key: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
+  category?: ExpenseCategory;
+  day?: number;
+}
+
+export interface SavingsGoal {
+  id: string;
+  name: string;
+  target: number;
+  currency: string;
+  saved: number;
+  remaining: number;
+  /** 0..1 */
+  progress: number;
+  done: boolean;
+  deadline: string | null;
+  months_left: number | null;
+  overdue: boolean;
+  /** Null without a deadline. */
+  per_month_needed: number | null;
+  saved_mad: number | null;
+  target_mad: number | null;
+  account_id: string | null;
+  account: { id: string; name: string } | null;
+  emoji: string | null;
+  color: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GoalContribution {
+  id: string;
+  amount: number;
+  note: string | null;
+  date: string;
+  created_at: string;
+}
+
+export interface GoalCreate {
+  name: string;
+  target: number;
+  currency?: string;
+  deadline?: string | null;
+  saved?: number;
+  account_id?: string | null;
+  emoji?: string | null;
+  color?: string | null;
+  note?: string | null;
+}
+export type GoalPatch = Partial<Omit<GoalCreate, 'saved'>>;
+
+export interface GoalsListing {
+  goals: SavingsGoal[];
+  total_saved_mad: number;
+  total_target_mad: number;
 }
 
 export type VoiceMoneyKind = 'auto' | 'expense' | 'income';
@@ -821,8 +947,8 @@ export interface VoiceMoneyResult {
 
 // ------------------------------------------------------------------ notifications (ntfy) and calendar feed
 
-export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'inbox';
-export type NotifyRunKind = Exclude<NotifyKind, 'inbox'>;
+export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'bills' | 'inbox' | 'spending';
+export type NotifyRunKind = Exclude<NotifyKind, 'inbox' | 'spending'>;
 export type NotifyChannel = 'ntfy' | 'webpush';
 
 /** Per-channel outcome of one push (`app_notify_log.channels`). */

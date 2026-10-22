@@ -140,6 +140,10 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `PUT/DELETE /money/budgets/{category}` | `setBudget()`, `deleteBudget()` | Money budget sheet (monthly limit per expense category) |
 | `GET /money/sms/setup`, `GET /money/sms/log?limit=` | `smsSetup()`, `smsLog()` | Money > Bank SMS sheet: forwarder setup (webhook URL with the SMS token behind a reveal toggle, header name, JSON template, sender filter) and the last 20 SMS with their status |
 | `POST /money/sms?dry_run=true` `{from, text}` | `testSms()` | Bank SMS "Test an SMS" box (nothing saved). The same route without `dry_run` is the webhook the phone app calls (hub token, `X-OmniFree-Token` header or `?token=`) |
+| `GET /money/subscriptions/suggestions` | `subscriptionSuggestions()` (normalised by `normalizeSuggestions` in `src/lib/moneyIntel.ts`) | Money > Subscriptions: merchants charged weekly / monthly / yearly, with confidence, average amount and next date (current month only) |
+| `POST /money/subscriptions/accept` `{key, name?, amount?, currency?, category?, day?}`, `POST /money/subscriptions/dismiss` `{key}` | `acceptSubscription()`, `dismissSubscription()` | "Track it" (monthly -> recurring expense, weekly / yearly -> tracked subscription) and "Not a subscription" |
+| `GET /money/subscriptions`, `DELETE /money/subscriptions/{id}` | `trackedSubscriptions()`, `forgetSubscription()` | Tracked weekly / yearly subscriptions with "stop tracking" |
+| `GET/POST /money/goals`, `GET/PATCH/DELETE /money/goals/{id}`, `POST /money/goals/{id}/contribute` `{amount, note?}` | `goals()`, `goal()`, `createGoal()`, `updateGoal()`, `deleteGoal()`, `contributeGoal()` | Money > Savings goals: progress bars, per-month pace, goal and add / take-out sheets with history. `GET /money/overview` also carries `forecast` (hero line + explanation sheet) |
 
 Drive additions used by the redesign:
 

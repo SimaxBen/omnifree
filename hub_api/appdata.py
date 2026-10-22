@@ -64,9 +64,10 @@ _MAX_ROWS = 10_000
 class AppDB:
     """Parameterised SQL (``?`` placeholders) with lazily created schemas."""
 
-    def __init__(self, source: AdapterSource, *, timeout_s: float = 30.0) -> None:
+    def __init__(self, source: AdapterSource, *, timeout_s: float = 30.0, hub_state: HubState | None = None) -> None:
         self._source = source
         self._timeout_s = timeout_s
+        self.hub_state = hub_state  # the app's HubState, for hooks that push from an insert path (budget alerts)
         self._ready: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -135,7 +136,7 @@ def appdb_for(app: Any) -> AppDB:
         async def source() -> SQLAdapter:
             return await state.router.adapter(state.hub.apps_db_provider)  # type: ignore[return-value]
 
-        db = AppDB(source, timeout_s=state.hub.db_timeout_s)
+        db = AppDB(source, timeout_s=state.hub.db_timeout_s, hub_state=state)
         app.state.appdb = db
     return db
 

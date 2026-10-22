@@ -10,8 +10,13 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
   { kind: 'budget', label: 'Free-tier budget', detail: 'Plugins that newly reach 80 % or 100 % of a limit' },
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
   { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task (with a “Fait ✓” button) or a Google Calendar event' },
+  { kind: 'bills', label: 'Upcoming bills', detail: 'Two days before each recurring charge or tracked subscription, one push per charge' },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
+  { kind: 'spending', label: 'Budget alerts', detail: 'Right after an expense takes a category past 80 % or 100 % of its monthly budget' },
 ];
+
+/** Kinds pushed by an event (no schedule, nothing to preview). */
+export const EVENT_KINDS: NotifyKind[] = ['inbox', 'spending'];
 
 export interface ScheduleTemplate {
   id: string;
@@ -57,6 +62,10 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
     id: 'reminders', name: 'push-reminders', label: 'Task reminders: every 15 min', schedule: '*/15 * * * *', path: '/notify/run?kind=reminders',
     description:
       'Pushes each timed task up to 15 min before it is due. 96 calls a day: with the 10-min keep-warm job (144/day) that is 240 of the 1,000 free QStash messages a day',
+  },
+  {
+    id: 'bills', name: 'push-bills', label: 'Upcoming bills: daily 09:00', schedule: '0 9 * * *', path: '/notify/run?kind=bills',
+    description: 'Daily 09:00 Morocco: one push per recurring charge or subscription due in the next 2 days',
   },
 ];
 

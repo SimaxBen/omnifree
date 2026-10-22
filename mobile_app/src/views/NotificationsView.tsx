@@ -5,7 +5,7 @@ import { ago } from '../lib/digest';
 import { copyText } from '../lib/dom';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import { useNav } from '../lib/nav';
-import { NOTIFY_KINDS, maskFeedUrl, maskSecret, ntfySubscribeLink } from '../lib/notify';
+import { EVENT_KINDS, NOTIFY_KINDS, maskFeedUrl, maskSecret, ntfySubscribeLink } from '../lib/notify';
 import { currentBrowser } from '../lib/pushClient';
 import type { GCalCalendar, NotifyChannel, NotifyChannelResults, NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
 import { notReceivedChecks } from '../lib/webpush';
@@ -391,7 +391,7 @@ export default function NotificationsView() {
                 <p className="text-sm text-ink-100">{k.label}</p>
                 <p className="text-xs leading-snug text-ink-400">{k.detail}</p>
               </div>
-              {k.kind !== 'inbox' &&
+              {!EVENT_KINDS.includes(k.kind) &&
                 (previewing === k.kind ? (
                   <Spinner className="m-3" />
                 ) : (
