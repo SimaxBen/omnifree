@@ -1032,3 +1032,22 @@ export interface SmsLogEntry {
   received_at: string | null;
   created_at: string;
 }
+
+// ------------------------------------------------------------------ folder drops (offline & sharing)
+
+/** A drop as `GET /drops` lists it since folder drops: `kind` 'file' or 'folder' (key = the folder prefix). */
+export interface FolderDrop extends Drop {
+  kind?: 'file' | 'folder';
+  /** Files under the folder when the drop was made (folder drops only). */
+  file_count?: number | null;
+}
+
+export interface FolderDropCreate {
+  /** Drive folder, e.g. "photos/trip". */
+  prefix: string;
+  /** Storage backend; omitted: the folder across every backend. */
+  provider?: string;
+  expires_in_hours?: number;
+  max_downloads?: number;
+  password?: string;
+}

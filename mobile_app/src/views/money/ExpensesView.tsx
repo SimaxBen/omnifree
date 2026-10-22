@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Icon } from '../../components/icons';
+import { PendingBadge } from '../../components/OfflineBanner';
 import { SwipeRow } from '../../components/SwipeRow';
 import { Badge, Button, Chip, EmptyState, ErrorNote, IconButton, SkeletonList, cx, riseStyle } from '../../components/ui';
 import { useActions } from '../../lib/actions';
@@ -138,6 +139,7 @@ export default function ExpensesView() {
                     <span className="min-w-0 flex-1">
                       <span className="flex min-w-0 items-center gap-1.5">
                         <span className="truncate text-[15px] text-ink-100">{e.merchant || 'Untitled'}</span>
+                        <PendingBadge item={e} />
                         {e.source === 'email' && (
                           <span title={emailMailbox(e.source_ref) ?? 'Imported from email'} className="shrink-0">
                             <Badge tone="signal" className="!px-1.5 !py-0 text-[11px]">

@@ -11,6 +11,7 @@ import { usePullRefresh } from '../../lib/nav';
 import { readPref, writePref } from '../../lib/settings';
 import { useUploads } from '../../lib/uploads';
 import type { StoredObject } from '../../lib/types';
+import { FolderDropSheet } from './FolderDropSheet';
 
 type Filter = 'all' | 'image' | 'doc' | 'media';
 const FILTERS: { id: Filter; label: string; kinds: FileKind[] }[] = [
@@ -55,6 +56,7 @@ export default function FilesView() {
   const [filter, setFilter] = useState<Filter>('all');
   const [grid, setGrid] = useState<boolean>(() => readPref('drive.grid', false));
   const [showPool, setShowPool] = useState(false);
+  const [sharing, setSharing] = useState<{ id: number; open: boolean } | null>(null);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(query.trim()), 300);
@@ -98,6 +100,11 @@ export default function FilesView() {
   const limit = backends.reduce((s, b) => s + (capacity.data?.[b].limit ?? 0), 0);
   const errors = Object.entries(listing.data?.errors ?? {});
   const crumbs = breadcrumbs(folder);
+  const inFolder = useMemo(() => {
+    const prefix = `${folder}/`;
+    const objs = folder ? (listing.data?.objects ?? []).filter((o) => o.key.startsWith(prefix)) : [];
+    return { count: objs.length, size: objs.reduce((s, o) => s + (o.size ?? 0), 0) };
+  }, [listing.data, folder]);
 
   return (
     <div className="space-y-4">
@@ -152,7 +159,27 @@ export default function FilesView() {
               </button>
             </span>
           ))}
+          {folder && inFolder.count > 0 && (
+            <button
+              type="button"
+              onClick={() => setSharing((s) => ({ id: (s?.id ?? 0) + 1, open: true }))}
+              className="press ml-auto flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-full bg-ink-850 px-3 text-[13px] text-ink-200 ring-1 ring-inset ring-ink-700"
+            >
+              <Icon name="share" size={14} />
+              Share folder
+            </button>
+          )}
         </nav>
+      )}
+      {sharing && (
+        <FolderDropSheet
+          key={sharing.id}
+          open={sharing.open}
+          folder={folder}
+          files={inFolder.count}
+          size={inFolder.size}
+          onClose={() => setSharing((s) => (s ? { ...s, open: false } : s))}
+        />
       )}
 
       {listing.error && <ErrorNote message={listing.error} onRetry={listing.reload} />}

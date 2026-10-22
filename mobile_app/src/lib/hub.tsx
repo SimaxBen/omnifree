@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { HubClient } from './api';
+import type { HubClient } from './api';
 import { EventStream, SUBSCRIBED_TYPES, type ConnectionState } from './events';
+import { OfflineHubClient } from './offline/client';
+import { offline } from './offline/manager';
 import { loadSettings, normalizeHubUrl, saveSettings, type HubSettings } from './settings';
 import type { HubEvent } from './types';
 
@@ -25,7 +27,8 @@ const HubContext = createContext<HubContextValue | null>(null);
 
 export function HubProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<HubSettings>(() => loadSettings());
-  const client = useMemo(() => new HubClient(settings), [settings]);
+  // Offline-aware: cached lists when the hub is out of reach, queued writes replayed later (lib/offline).
+  const client = useMemo<HubClient>(() => new OfflineHubClient(settings), [settings]);
   const events = useMemo(
     () =>
       new EventStream(client.wsUrl(SUBSCRIBED_TYPES), client.wsProtocols(), {
@@ -36,6 +39,11 @@ export function HubProvider({ children }: { children: ReactNode }) {
   const [connection, setConnection] = useState<ConnectionState>('idle');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+
+  useEffect(() => {
+    const stop = offline.start();
+    return stop;
+  }, []);
 
   useEffect(() => {
     const off = events.onState(setConnection);
@@ -140,6 +148,12 @@ export function useHubData<T>(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, tick, pollMs, ...deps]);
+
+  // Reload when queued writes synced or live data is back after showing saved data.
+  useEffect(() => {
+    const off = offline.onRefresh(() => setTick((t) => t + 1));
+    return off;
+  }, []);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
   const setData = useCallback((fn: (prev: T | undefined) => T | undefined) => setDataState(fn), []);

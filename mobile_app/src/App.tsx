@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type TouchEvent } from 're
 import { registerSW } from 'virtual:pwa-register';
 import AppSheets from './AppSheets';
 import ErrorBoundary from './components/ErrorBoundary';
+import { OfflineBanner } from './components/OfflineBanner';
 import { Icon, type IconName } from './components/icons';
 import { ConfirmProvider } from './components/Sheet';
 import { StatusDot, cx, haptic } from './components/ui';
@@ -266,6 +267,8 @@ function Shell() {
               </button>
             </div>
           )}
+
+          <OfflineBanner />
 
           <div className="pb-nav px-4">
             {!showBack && (

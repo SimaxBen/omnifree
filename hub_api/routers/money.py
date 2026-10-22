@@ -25,10 +25,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
 from core.interfaces import ChatMessage, ChatRequest
+from hub_api import idempotency
 from hub_api.appdata import AppDB, extract_json, get_appdb, iso, local_today, new_id, now_iso
 from hub_api.receipts import CATEGORIES
 from hub_api.routers.expenses import (
@@ -273,7 +274,7 @@ async def _insert(db: AppDB, table: str, row: dict[str, Any]) -> None:
 
 async def insert_income(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
     row = {
-        "id": new_id(),
+        "id": fields.get("id") or new_id(),
         "date": fields["date"],
         "amount": float(fields["amount"]),
         "currency": fields.get("currency") or BASE,
@@ -326,6 +327,7 @@ class _MonthFields(_Fields):
 
 
 class IncomeCreate(_MonthFields):
+    id: str | None = Field(None, description="client-generated id (offline queue); a replay answers the existing income")
     date: str | None = None  # default: today; for a monthly income, its first month and pay day
     amount: float = Field(ge=0)
     currency: str = BASE
@@ -700,14 +702,23 @@ async def voice_money(
     file: UploadFile = File(...),
     kind: Literal["auto", "expense", "income"] = Form("auto"),
     language: str | None = Form(None),
+    idempotency_key: str | None = Form(None),
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
+    request: Request = None,  # type: ignore[assignment]
+    response: Response = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    today = local_today()
-    key, transcript = await store_and_transcribe(state, file, today, language)
-    entries = await _extract_money(state, transcript, today, kind, language)
-    created = await create_entries(db, entries, audio_key=key)
-    return {"transcript": transcript, "audio_key": key, **created}
+    """``Idempotency-Key`` (header or form field): a replayed upload answers the first result again."""
+
+    async def run() -> dict[str, Any]:
+        today = local_today()
+        key, transcript = await store_and_transcribe(state, file, today, language)
+        entries = await _extract_money(state, transcript, today, kind, language)
+        created = await create_entries(db, entries, audio_key=key)
+        return {"transcript": transcript, "audio_key": key, **created}
+
+    idem = idempotency_key or (request.headers.get("idempotency-key") if request is not None else None)
+    return await idempotency.run_once(db, scope="money.voice", key=idem, run=run, response=response)
 
 
 # --------------------------------------------------------------------------- routes: incomes
@@ -729,12 +740,28 @@ async def list_incomes(month: str | None = Query(None, pattern=_MONTH_RE), db: A
 
 
 @router.post("/incomes", status_code=status.HTTP_201_CREATED)
-async def create_income(body: IncomeCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
+async def create_income(
+    body: IncomeCreate,
+    db: AppDB = Depends(_db),
+    request: Request = None,  # type: ignore[assignment]  # injected by FastAPI; None when called directly (MCP)
+    response: Response = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
     fields = body.model_dump()
     fields["date"] = fields["date"] or local_today().isoformat()
     _check_range(fields["date"][:7], fields["end_month"])
     fields["origin"] = "manual"
-    return await insert_income(db, fields)
+
+    async def fetch(income_id: str) -> dict[str, Any] | None:
+        row = await db.fetch_one("SELECT * FROM app_incomes WHERE id = ?", [income_id])
+        return None if row is None else _income_out(row)
+
+    async def insert(income_id: str) -> dict[str, Any]:
+        return await insert_income(db, {**fields, "id": income_id})
+
+    key = idempotency.header_key(request) if request is not None else None
+    return await idempotency.create_once(
+        db, scope="incomes", client_id=body.id, key=key, fetch=fetch, insert=insert, response=response
+    )
 
 
 @router.patch("/incomes/{income_id}")

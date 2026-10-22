@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Icon } from '../../components/icons';
+import { PendingBadge } from '../../components/OfflineBanner';
 import { cx, haptic } from '../../components/ui';
 import { taskDue } from '../../lib/apps';
 import { announce } from '../../lib/bus';
@@ -67,8 +68,11 @@ export function TaskRow({ task, onChange, onOpen, compact }: { task: Task; onCha
     <div className={cx('flex items-center gap-1 pr-3', compact ? 'min-h-[52px]' : 'min-h-[60px]')}>
       <CheckButton done={task.done} onToggle={() => void toggle()} label={`${task.done ? 'Reopen' : 'Complete'} ${task.title}`} />
       <button type="button" onClick={() => onOpen?.(task)} disabled={!onOpen} className="min-w-0 flex-1 py-2 text-left">
-        <span data-done={task.done} className={cx('strike block w-fit max-w-full truncate text-[15px]', task.done ? 'text-ink-500' : 'text-ink-100')}>
-          {task.title}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span data-done={task.done} className={cx('strike block w-fit min-w-0 max-w-full truncate text-[15px]', task.done ? 'text-ink-500' : 'text-ink-100')}>
+            {task.title}
+          </span>
+          <PendingBadge item={task} />
         </span>
         {(task.due || task.priority !== 'normal' || task.details) && !task.done && (
           <span className="flex items-center gap-2 text-[13px]">

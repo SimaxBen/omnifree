@@ -127,6 +127,7 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `GET /expenses?month=`, `GET /expenses/{id}`, `POST /expenses`, `PATCH/DELETE /expenses/{id}` | `expenses()`, `expense()`, `createExpense()`, `updateExpense()`, `deleteExpense()` | Expenses month view, editor, Home monthly total |
 | `GET/POST /links`, `DELETE /links/{code}` | `links()`, `createLink()`, `deleteLink()` | Links (QR generated client-side in `src/lib/qr.ts`); 409 shows "code taken" |
 | `GET/POST /drops`, `DELETE /drops/{code}` | `drops()`, `createDrop()`, `deleteDrop()` | Drive > Drops, file actions "Share as a drop" |
+| `POST /drops/folder` `{prefix, provider?, expires_in_hours?, password?, max_downloads?}` | `createFolderDrop()` | Drive folder view "Share folder" (link, QR, expiry); `GET /drops` rows carry `kind: file\|folder` and `file_count`. The public `/d/{code}` page lists the files with 10-minute presigned links and, below 25 MB, a signed "Download all as ZIP" link (`/d/{code}/zip?t=`) |
 | `GET /rag/docs`, `POST /rag/index`, `DELETE /rag/docs/{provider}/{key}`, `POST /rag/ask` | `ragDocs()`, `ragIndex()`, `ragDelete()`, `ragAsk()` | Drive > Ask: one `/rag/index` call per file, in sequence, with per-file progress; a 404 on delete counts as already removed |
 | `GET /budget` | `budget()` | More > Free-tier budget, Home warnings (warn/over items) |
 | `GET /inbox/receipts/status` | `inboxStatus()` | Expenses "Import from email" row: setup / failing badges, mailbox count, last import; per-mailbox list in the sheet |
@@ -138,6 +139,19 @@ Client: `HubClient` methods in `src/lib/api.ts`, types in `src/lib/types.ts`, te
 | `POST /money/recurring`, `PATCH/DELETE /money/recurring/{id}` | `createRecurring()`, `updateRecurring()`, `deleteRecurring()` | Money recurring-expense sheet (rent, subscriptions) |
 | `POST /money/accounts`, `PATCH/DELETE /money/accounts/{id}` | `createAccount()`, `updateAccount()`, `deleteAccount()` | Money accounts (balances set by hand) |
 | `PUT/DELETE /money/budgets/{category}` | `setBudget()`, `deleteBudget()` | Money budget sheet (monthly limit per expense category) |
+
+### Offline mode (`src/lib/offline/`)
+
+`OfflineHubClient` (the client `HubProvider` builds) keeps the last good body of `GET /tasks`, `/notes`, `/notes/{id}`,
+`/expenses`, `/money/overview`, `/money/incomes`, `/gcal/events`, `/chats` and `/chats/{id}` in IndexedDB and serves it when
+the hub cannot be reached (or does not answer within 12 s), with the "Offline — showing saved data from HH:MM" banner.
+`POST/PATCH/DELETE` on `/tasks`, `/notes`, `/expenses`, `/money/incomes` and `POST /notes/voice`, `/money/voice` are queued
+when offline (or on a network failure) and replayed in order. Creates send a client id in the body (`id`, 8-64 of
+`A-Z a-z 0-9 _ -`); voice uploads send an `idempotency_key` form field. The hub answers a replay of the same id / key with
+200 and `Idempotent-Replayed: true` instead of creating twice (an `Idempotency-Key` header works too, for non-browser
+clients: CORS does not allow it from the PWA). Replay outcomes: 2xx (and 404 on DELETE) = synced; 404/409/422 and other
+4xx = conflict shown in the sync sheet (retry / discard); network errors, 408/429/5xx = retry later (a 5xx five times
+becomes a conflict); 401/403 = stop.
 | `GET /money/sms/setup`, `GET /money/sms/log?limit=` | `smsSetup()`, `smsLog()` | Money > Bank SMS sheet: forwarder setup (webhook URL with the SMS token behind a reveal toggle, header name, JSON template, sender filter) and the last 20 SMS with their status |
 | `POST /money/sms?dry_run=true` `{from, text}` | `testSms()` | Bank SMS "Test an SMS" box (nothing saved). The same route without `dry_run` is the webhook the phone app calls (hub token, `X-OmniFree-Token` header or `?token=`) |
 
