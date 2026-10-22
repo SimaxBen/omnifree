@@ -7,7 +7,7 @@ import { errorText, useHub, useHubData } from '../lib/hub';
 import { useNav } from '../lib/nav';
 import { NOTIFY_KINDS, maskFeedUrl, maskSecret, ntfySubscribeLink } from '../lib/notify';
 import { currentBrowser } from '../lib/pushClient';
-import type { NotifyChannel, NotifyChannelResults, NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
+import type { GCalCalendar, NotifyChannel, NotifyChannelResults, NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
 import { notReceivedChecks } from '../lib/webpush';
 import AppPushCard, { Checklist, Help } from './AppPushCard';
 
@@ -52,15 +52,168 @@ function channelSummary(c: NotifyChannelResults | null | undefined): string {
   return parts.join(' · ');
 }
 
+const ROLE_LABEL: Record<string, string> = {
+  owner: 'owner',
+  writer: 'can make changes',
+  reader: 'sees all event details',
+  freeBusyReader: 'free/busy only',
+};
+
+function calendarName(c: GCalCalendar, ownId: string | null): string {
+  if (c.summary) return c.summary;
+  return c.id === ownId ? 'OmniFree' : c.id;
+}
+
+function GoogleCalendarCard({ copy }: { copy: (text: string, what: string) => void }) {
+  const { client, notify } = useHub();
+  const status = useHubData((c, s) => c.gcalStatus(s), []);
+  const [syncing, setSyncing] = useState(false);
+  const st = status.data;
+
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      const r = await client.gcalSync();
+      if (!r.configured) notify(r.skipped ?? 'Google Calendar is not set up', 'error');
+      else
+        notify(
+          `Synced: ${r.upserted} updated, ${r.unchanged} unchanged, ${r.deleted} removed${r.failed ? `, ${r.failed} failed` : ''}${r.remaining ? ` (${r.remaining} left for the next run)` : ''}`,
+          r.failed ? 'error' : 'ok',
+        );
+      status.reload();
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const reads = st?.calendars.filter((c) => c.read && !c.write) ?? [];
+  const sharedOk = reads.length > 0 && reads.every((c) => c.ok);
+  const tone = !st ? 'off' : !st.configured ? 'warn' : st.calendars.every((c) => c.ok) ? 'ok' : 'warn';
+
+  return (
+    <div>
+      <SectionTitle action={status.loading ? <Spinner /> : <IconButton icon="refresh" label="Refresh Google Calendar status" onClick={status.reload} />}>
+        Google Calendar
+      </SectionTitle>
+      <Card className="space-y-3 p-3">
+        <p className="flex items-center gap-2 text-sm text-ink-200">
+          <StatusDot tone={tone} />
+          {!st
+            ? 'Checking…'
+            : !st.configured
+              ? 'Not configured'
+              : !st.writable
+                ? 'Reading only: the OmniFree calendar id is missing'
+                : tone === 'ok'
+                  ? 'Connected: tasks go to your OmniFree calendar instantly'
+                  : 'Connected, but a calendar needs attention'}
+        </p>
+        {status.error && <ErrorNote message={status.error} onRetry={status.reload} />}
+        {st && !st.configured && (
+          <p className="text-xs leading-snug text-amber-400">
+            Store the service-account key JSON in the vault key <span className="font-mono">{st.keys.sa_json}</span>, the OmniFree calendar id in{' '}
+            <span className="font-mono">{st.keys.calendar_id}</span> and the calendars to read in <span className="font-mono">{st.keys.read_ids}</span>, then
+            redeploy the hub. Until then everything here stays off and the feed below still works.
+          </p>
+        )}
+        {st?.sa_email && (
+          <div className="space-y-1">
+            <p className="text-xs text-ink-400">Service account (share your calendar with this address)</p>
+            <div className="flex items-center gap-1 rounded-row bg-ink-850 pl-3 ring-1 ring-inset ring-ink-700">
+              <span className="min-w-0 flex-1 break-all py-2 font-mono text-[13px] text-ink-100">{st.sa_email}</span>
+              <IconButton icon="copy" label="Copy the service account address" onClick={() => copy(st.sa_email ?? '', 'Address')} className="h-10 w-10" />
+            </div>
+          </div>
+        )}
+        {st && st.calendars.length > 0 && (
+          <div className="divide-y divide-ink-800 rounded-row bg-ink-850 ring-1 ring-inset ring-ink-700">
+            {st.calendars.map((c) => (
+              <div key={c.id} className="flex items-start gap-2 px-3 py-2">
+                <span className="pt-1.5">
+                  <StatusDot tone={c.ok ? 'ok' : 'bad'} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] text-ink-100">
+                    {calendarName(c, st.calendar_id)} <span className="text-ink-500">· {c.write ? 'tasks are written here' : 'agenda read from here'}</span>
+                  </p>
+                  <p className="break-all text-[11px] text-ink-500">
+                    {c.access_role ? (ROLE_LABEL[c.access_role] ?? c.access_role) : (c.error ?? 'no access')}
+                    {c.access_role && !c.ok && <span className="text-amber-400"> · needs “{c.write ? 'Make changes to events' : 'See all event details'}”</span>}
+                    {' · '}
+                    <span className="font-mono">{c.id}</span>
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {st?.configured && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="primary" icon="refresh" onClick={() => void syncNow()} disabled={syncing || !st.writable}>
+              {syncing ? 'Syncing…' : 'Sync now'}
+            </Button>
+            <span className="text-[12px] text-ink-500">
+              {st.last_sync?.synced_at ? `Last full sync ${ago(st.last_sync.synced_at)}` : 'No full sync yet'}
+              {st.last_push_at && <> · last push {ago(st.last_push_at)}</>}
+            </span>
+          </div>
+        )}
+        {st && st.errors.length > 0 && (
+          <Help summary={`${st.errors.length} recent push error${st.errors.length === 1 ? '' : 's'}`}>
+            <ul className="space-y-1 text-[12px] text-ink-400">
+              {st.errors.map((e) => (
+                <li key={e.task_id}>
+                  <span className="text-danger-400">{e.error}</span> · {ago(e.synced_at)}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1 text-[11px] text-ink-500">Failed pushes are retried by Sync now and by the hourly schedule.</p>
+          </Help>
+        )}
+        {(!sharedOk || !st?.configured) && (
+          <Steps
+            items={[
+              <>Copy the service account address above.</>,
+              <>On a computer, open Google Calendar (calendar.google.com). The phone app cannot share calendars.</>,
+              <>
+                Click the gear <b className="text-ink-100">⚙</b> at the top right, then <b className="text-ink-100">Settings</b>.
+              </>,
+              <>
+                In the left column, under <b className="text-ink-100">Settings for my calendars</b>, click your main calendar (your name).
+              </>,
+              <>
+                Scroll to <b className="text-ink-100">Share with specific people or groups</b> and click <b className="text-ink-100">+ Add people and groups</b>.
+              </>,
+              <>
+                Paste the address, set <b className="text-ink-100">Permissions</b> to <b className="text-ink-100">See all event details</b> and click{' '}
+                <b className="text-ink-100">Send</b>.
+              </>,
+              <>Come back here and tap the refresh icon: your calendar shows “sees all event details”.</>,
+            ]}
+          />
+        )}
+        <p className="text-[11px] leading-snug text-ink-500">
+          Nothing to share for the <b className="text-ink-300">OmniFree</b> calendar: OmniFree owns it and has already shared it with you. It shows in Google
+          Calendar under your calendars (if not, open the invitation e-mail and click <b className="text-ink-300">Add this calendar</b>). Tasks with a date
+          appear in it within seconds, timed ones with a 10-minute reminder; done ones get a ✓. Your own events feed the morning push, the reminders, Home and
+          Tasks.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
 function CalendarCard({ copy }: { copy: (text: string, what: string) => void }) {
   const info = useHubData((c, s) => c.calendarInfo(s), []);
   return (
     <div>
-      <SectionTitle>Calendar feed</SectionTitle>
+      <SectionTitle>Other apps (Apple/Outlook) / fallback</SectionTitle>
       <Card className="space-y-3 p-3">
         <p className="flex items-center gap-2 text-sm text-ink-200">
           <Icon name="calendar" size={16} className="text-ink-400" />
-          Your tasks with a due date, in Google Calendar
+          Your tasks as a subscribable calendar feed (ICS)
         </p>
         {info.loading && <Spinner />}
         {info.error && <ErrorNote message={info.error} onRetry={info.reload} />}
@@ -84,7 +237,7 @@ function CalendarCard({ copy }: { copy: (text: string, what: string) => void }) 
           ]}
         />
         <p className="text-[11px] leading-snug text-ink-500">
-          Google refreshes subscribed calendars on its own schedule, every few hours and up to about 24 h, so a new task can take a while to show. The same URL works in Apple Calendar (File &gt; New Calendar Subscription, or Settings &gt; Calendar &gt; Accounts on iPhone) and Outlook (Add calendar &gt; Subscribe from web). Done tasks of the last 14 days show with a ✓.
+          With Google Calendar connected above you do not need this feed in Google. Google refreshes subscribed calendars on its own schedule, every few hours and up to about 24 h, so a new task can take a while to show. The same URL works in Apple Calendar (File &gt; New Calendar Subscription, or Settings &gt; Calendar &gt; Accounts on iPhone) and Outlook (Add calendar &gt; Subscribe from web). Done tasks of the last 14 days show with a ✓.
         </p>
       </Card>
     </div>
@@ -296,6 +449,8 @@ export default function NotificationsView() {
           </Card>
         </div>
       )}
+
+      <GoogleCalendarCard copy={(t, w) => void copy(t, w)} />
 
       <CalendarCard copy={(t, w) => void copy(t, w)} />
     </div>

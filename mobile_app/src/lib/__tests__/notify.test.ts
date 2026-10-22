@@ -3,19 +3,20 @@ import { describeCron, isValidCron } from '../cron';
 import { NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscribeLink, templateJob } from '../notify';
 
 describe('notification schedule templates', () => {
-  it('has the six templates with valid UTC schedules and readable descriptions', () => {
+  it('has the seven templates with valid UTC schedules and readable descriptions', () => {
     expect(SCHEDULE_TEMPLATES.map((t) => [t.id, t.schedule])).toEqual([
       ['morning', '0 8 * * *'],
       ['evening', '0 20 * * *'],
       ['weekly', '30 8 * * 1'],
       ['budget', '0 7,19 * * *'],
       ['month', '0 9 28 * *'],
+      ['gcal', '7 * * * *'],
       ['reminders', '*/15 * * * *'],
     ]);
     for (const t of SCHEDULE_TEMPLATES) {
       expect(isValidCron(t.schedule)).toBe(true);
       expect(describeCron(t.schedule)).not.toBeNull();
-      expect(t.path).toBe(`/notify/run?kind=${t.id}`);
+      expect(t.path).toBe(t.id === 'gcal' ? '/gcal/sync' : `/notify/run?kind=${t.id}`);
     }
     expect(describeCron('0 6,18 * * *')).toBe('Daily at 06:00 and 18:00 UTC');
     expect(describeCron('0 6,12,18 * * *')).toBe('Daily at 06:00, 12:00 and 18:00 UTC');
@@ -36,6 +37,13 @@ describe('notification schedule templates', () => {
       body: '',
       withToken: true,
     });
+  });
+
+  it('offers the hourly Google Calendar reconcile without a query parameter', () => {
+    const tpl = SCHEDULE_TEMPLATES.find((t) => t.id === 'gcal')!;
+    expect(describeCron(tpl.schedule)).not.toBeNull();
+    expect(templateJob(tpl, 'https://hub.example').target).toBe('https://hub.example/gcal/sync');
+    expect(tpl.description).toContain('24 calls a day');
   });
 
   it('fills a POST to this hub with the token on', () => {

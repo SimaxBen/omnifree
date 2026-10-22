@@ -4,12 +4,12 @@ import type { NotifyKind } from './types';
 
 /** What each push kind does, in the order the Notifications page lists them. */
 export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[] = [
-  { kind: 'morning', label: 'Morning', detail: 'Tasks due today, overdue count, yesterday’s spend' },
+  { kind: 'morning', label: 'Morning', detail: 'Today’s Google Calendar agenda, tasks due today, overdue count, yesterday’s spend' },
   { kind: 'evening', label: 'Evening', detail: 'Tasks still open today, a nudge if no expense was logged' },
   { kind: 'weekly', label: 'Weekly summary', detail: 'Last week’s spending, tasks and notes (Mondays)' },
   { kind: 'budget', label: 'Free-tier budget', detail: 'Plugins that newly reach 80 % or 100 % of a limit' },
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
-  { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task, with a “Fait ✓” button' },
+  { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task (with a “Fait ✓” button) or a Google Calendar event' },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
 ];
 
@@ -47,6 +47,11 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
   {
     id: 'month', name: 'push-month', label: 'Month-end money recap', schedule: '0 9 28 * *', path: '/notify/run?kind=month',
     description: 'Day 28, 09:00 Morocco: the month’s spending so far',
+  },
+  {
+    id: 'gcal', name: 'gcal-sync', label: 'Google Calendar sync: hourly', schedule: '7 * * * *', path: '/gcal/sync',
+    description:
+      'Re-sends tasks whose instant push failed and removes events of deleted tasks; instant pushes cover the rest. 24 calls a day',
   },
   {
     id: 'reminders', name: 'push-reminders', label: 'Task reminders: every 15 min', schedule: '*/15 * * * *', path: '/notify/run?kind=reminders',

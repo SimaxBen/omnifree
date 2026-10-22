@@ -11,6 +11,9 @@ import type {
   BudgetItem,
   BudgetReport,
   CalendarInfo,
+  GCalEvents,
+  GCalStatus,
+  GCalSyncResult,
   Drop,
   DropCreate,
   Expense,
@@ -967,6 +970,28 @@ export class HubClient {
 
   calendarInfo(signal?: AbortSignal): Promise<CalendarInfo> {
     return this.request<CalendarInfo>('GET', '/calendar/info', { signal });
+  }
+
+  // ------------------------------------------------------------------ Google Calendar
+
+  /** Upcoming Google Calendar events (today included); `configured: false` when not set up. */
+  async gcalEvents(days = 7, signal?: AbortSignal): Promise<GCalEvents> {
+    const body = await this.request<Partial<GCalEvents>>('GET', '/gcal/events', { query: { days }, signal });
+    return {
+      configured: !!body?.configured,
+      from: body?.from ?? '',
+      to: body?.to ?? '',
+      events: Array.isArray(body?.events) ? body.events : [],
+      errors: Array.isArray(body?.errors) ? body.errors : [],
+    };
+  }
+
+  gcalStatus(signal?: AbortSignal): Promise<GCalStatus> {
+    return this.request<GCalStatus>('GET', '/gcal/status', { signal });
+  }
+
+  gcalSync(full = false): Promise<GCalSyncResult> {
+    return this.request<GCalSyncResult>('POST', '/gcal/sync', full ? { query: { full: true } } : {});
   }
 
   // ------------------------------------------------------------------ free-tier budget

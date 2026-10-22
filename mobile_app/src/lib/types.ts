@@ -662,6 +662,8 @@ export interface DigestStats {
   notes: { created: number; voice: number };
   drive: { uploaded_files: number | null; uploaded_bytes: number | null };
   llm: { requests_by_provider: Record<string, number> };
+  /** Google Calendar events in the period; null/absent when Google Calendar is not set up. */
+  calendar?: { events: number | null; all_day?: number } | null;
 }
 
 export interface Digest {
@@ -904,6 +906,70 @@ export interface CalendarInfo {
   configured: boolean;
   url: string | null;
   token_key: string;
+}
+
+// ------------------------------------------------------------------ Google Calendar (/gcal)
+
+/** One agenda event read from Google Calendar (OmniFree's own task events are left out). */
+export interface GCalEvent {
+  id: string;
+  /** Calendar name (or id). */
+  calendar: string;
+  calendar_id: string;
+  title: string;
+  /** All day: YYYY-MM-DD. Timed: ISO date-time with the Africa/Casablanca offset. */
+  start: string;
+  /** All day: the exclusive end date. */
+  end: string;
+  all_day: boolean;
+  location: string | null;
+  link: string | null;
+}
+
+export interface GCalEvents {
+  configured: boolean;
+  from: string;
+  to: string;
+  events: GCalEvent[];
+  errors: { calendar: string; error: string }[];
+}
+
+export interface GCalCalendar {
+  id: string;
+  access_role: string | null;
+  summary: string | null;
+  error: string | null;
+  write: boolean;
+  read: boolean;
+  ok: boolean;
+}
+
+export interface GCalSyncResult {
+  configured: boolean;
+  upserted: number;
+  unchanged: number;
+  deleted: number;
+  failed: number;
+  remaining: number;
+  orphans_checked: boolean;
+  errors: string[];
+  synced_at?: string;
+  skipped?: string;
+}
+
+export interface GCalStatus {
+  configured: boolean;
+  writable: boolean;
+  sa_email: string | null;
+  calendar_id: string | null;
+  read_ids: string[];
+  error: string | null;
+  keys: { sa_json: string; calendar_id: string; read_ids: string };
+  calendars: GCalCalendar[];
+  last_sync: Omit<GCalSyncResult, 'configured'> | null;
+  last_push_at: string | null;
+  errors: { task_id: string; error: string | null; synced_at: string }[];
+  counts: Record<string, number>;
 }
 
 // ------------------------------------------------------------------ bank SMS (/money/sms)

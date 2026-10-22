@@ -4,6 +4,7 @@ import { Icon } from '../components/icons';
 import { SwipeRow } from '../components/SwipeRow';
 import { ErrorNote, Meter, SectionTitle, cx, riseStyle } from '../components/ui';
 import { useActions } from '../lib/actions';
+import { mergeAgenda } from '../lib/agenda';
 import { budgetAlerts, currenciesByWeight, currentMonth, formatMoney, isoDay, sortTasks } from '../lib/apps';
 import { headlineStats } from '../lib/digest';
 import { announce, useTopic } from '../lib/bus';
@@ -26,6 +27,7 @@ export default function HomeView() {
   const spend = useHubData((c, s) => c.expenses(currentMonth(today), s), []);
   const files = useHubData((c, s) => c.driveList('', '', s), []);
   const week = useHubData((c, s) => c.digest('week', false, s), []);
+  const calendar = useHubData((c, s) => c.gcalEvents(1, s), [], 5 * 60_000);
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
   const timers = useRef<Record<string, number>>({});
 
@@ -40,8 +42,10 @@ export default function HomeView() {
     spend.reload();
     files.reload();
     week.reload();
+    calendar.reload();
   });
 
+  const agenda = useMemo(() => mergeAgenda(calendar.data?.events ?? [], tasks.data ?? [], today), [calendar.data, tasks.data, today]);
   const upNext = useMemo(() => sortTasks(tasks.data ?? []).slice(0, 6), [tasks.data]);
   const alerts = budgetAlerts(budget.data?.items ?? []);
   const recentFiles = useMemo(
@@ -151,6 +155,46 @@ export default function HomeView() {
         </span>
         {week.data?.highlights[0] && <span className="mt-3 line-clamp-2 block text-[14px] leading-snug text-ink-300">{week.data.highlights[0]}</span>}
       </button>
+
+      {agenda.length > 0 && (
+        <section aria-label="Today's agenda">
+          <SectionTitle
+            action={
+              <button type="button" onClick={() => go('notes', 'tasks')} className="press min-h-[44px] px-2 text-[14px] text-signal">
+                Agenda
+              </button>
+            }
+          >
+            Today
+          </SectionTitle>
+          <div className="no-scrollbar -mx-4 flex snap-x gap-2 overflow-x-auto px-4 pb-1">
+            {agenda.map((item, i) => {
+              const isEvent = item.kind === 'event';
+              const body = (
+                <>
+                  <span className={cx('flex items-center gap-1.5 text-[12px] font-semibold', isEvent ? 'text-signal' : 'text-mint-400')}>
+                    <Icon name={isEvent ? 'calendar' : 'check'} size={13} />
+                    {item.label}
+                    {item.end && <span className="font-normal text-ink-500">–{item.end}</span>}
+                  </span>
+                  <span className="mt-1 line-clamp-2 text-[14px] leading-snug text-ink-100">{item.title}</span>
+                  <span className="mt-auto block truncate pt-1 text-[11px] text-ink-500">{isEvent ? (item.event?.calendar ?? 'Calendar') : 'Task'}</span>
+                </>
+              );
+              const cls = 'press rise flex h-[104px] w-[42%] min-w-[140px] max-w-[200px] shrink-0 snap-start flex-col rounded-card bg-ink-900 p-3 text-left ring-1 ring-inset ring-ink-800';
+              return isEvent && item.event?.link ? (
+                <a key={item.key} href={item.event.link} target="_blank" rel="noreferrer" className={cls} style={riseStyle(i)} aria-label={`${item.label} ${item.title} (event)`}>
+                  {body}
+                </a>
+              ) : (
+                <button key={item.key} type="button" onClick={() => go('notes', 'tasks')} className={cls} style={riseStyle(i)} aria-label={`${item.label} ${item.title} (${isEvent ? 'event' : 'task'})`}>
+                  {body}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section>
         <SectionTitle

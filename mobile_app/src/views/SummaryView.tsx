@@ -235,6 +235,16 @@ export default function SummaryView() {
               detail={d.stats.drive.uploaded_bytes ? formatBytes(d.stats.drive.uploaded_bytes) : undefined}
               tone="bg-[#7FA8FF]/15 text-[#A9CBFF]"
             />
+            {d.stats.calendar && (
+              <Tile
+                i={5}
+                icon="calendar"
+                label="Calendar events"
+                value={d.stats.calendar.events === null ? '–' : String(d.stats.calendar.events)}
+                detail={d.stats.calendar.all_day ? `${d.stats.calendar.all_day} all day` : undefined}
+                tone="bg-mint-400/15 text-mint-400"
+              />
+            )}
           </div>
           <Bullets title="Highlights" icon="spark" items={d.highlights} tone="bg-mint-400/15 text-mint-400" start={5} />
           <Bullets title="Suggestions" icon="flag" items={d.suggestions} tone="bg-amber-400/15 text-amber-400" start={6} />

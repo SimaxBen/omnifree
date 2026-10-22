@@ -3,6 +3,7 @@ import { Icon } from '../../components/icons';
 import { Sheet, useConfirm } from '../../components/Sheet';
 import { SwipeRow } from '../../components/SwipeRow';
 import { Button, Chip, EmptyState, ErrorNote, Field, IconButton, Segmented, SkeletonList, cx, haptic, inputClass, riseStyle } from '../../components/ui';
+import { eventWhen, groupEventsByDay } from '../../lib/agenda';
 import { addDays, dueInfo, isoDay, sortTasks, taskDue, validTime } from '../../lib/apps';
 import { announce, useTopic } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
@@ -123,6 +124,80 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
         </div>
       </div>
     </Sheet>
+  );
+}
+
+const EVENTS_OPEN_KEY = 'omnifree.tasks.eventsOpen';
+
+function readOpen(): boolean {
+  try {
+    return window.localStorage.getItem(EVENTS_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+/** "Upcoming events": the next 7 days of Google Calendar (OmniFree's own task events are left out by the hub). */
+function UpcomingEvents() {
+  const events = useHubData((c, s) => c.gcalEvents(7, s), [], 5 * 60_000);
+  const [open, setOpen] = useState(readOpen);
+  const today = isoDay();
+  const groups = useMemo(() => groupEventsByDay(events.data?.events ?? [], today, 7), [events.data, today]);
+  usePullRefresh(events.reload);
+  if (!events.data?.configured) return null;
+  const count = groups.reduce((n, g) => n + g.events.length, 0);
+  const toggle = () => {
+    setOpen((v) => {
+      try {
+        window.localStorage.setItem(EVENTS_OPEN_KEY, v ? '0' : '1');
+      } catch {
+        /* private mode: not remembered */
+      }
+      return !v;
+    });
+  };
+  return (
+    <section className="space-y-2">
+      <button type="button" onClick={toggle} aria-expanded={open} className="press flex min-h-[44px] w-full items-center gap-1.5 px-1 text-left">
+        <Icon name="calendar" size={16} className="text-signal" />
+        <span className="font-display text-[15px] font-semibold text-ink-200">Upcoming events</span>
+        <span className="text-[15px] text-ink-500">{count}</span>
+        <Icon name={open ? 'up' : 'down'} size={16} className="ml-auto text-ink-500" />
+      </button>
+      {open && (
+        <div className="screen-in-up space-y-3">
+          {events.data.errors.length > 0 && (
+            <p className="px-1 text-[12px] text-amber-400">Could not read {events.data.errors.map((e) => e.calendar).join(', ')}: check the sharing in Notifications &gt; Google Calendar.</p>
+          )}
+          {count === 0 && <p className="px-1 text-[14px] text-ink-500">Nothing on the calendar this week.</p>}
+          {groups.map((g) => (
+            <div key={g.day} className="space-y-1.5">
+              <h3 className={cx('px-1 text-[13px] font-semibold', g.label === 'Today' ? 'text-signal' : 'text-ink-400')}>{g.label}</h3>
+              <div className="divide-y divide-ink-800 rounded-card bg-ink-900 ring-1 ring-inset ring-ink-800">
+                {g.events.map((ev) => (
+                  <a
+                    key={`${ev.calendar_id}:${ev.id}:${g.day}`}
+                    href={ev.link ?? undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="press flex min-h-[52px] items-center gap-3 px-3 py-2"
+                  >
+                    <span className="w-[86px] shrink-0 text-[12px] leading-tight text-ink-400">{eventWhen(ev)}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[15px] text-ink-100">{ev.title}</span>
+                      <span className="block truncate text-[12px] text-ink-500">
+                        {ev.calendar}
+                        {ev.location && <> · {ev.location}</>}
+                      </span>
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -298,6 +373,8 @@ export default function TasksPanel() {
             </section>
           ),
       )}
+
+      <UpcomingEvents />
 
       <div>
         <button type="button" onClick={() => setShowDone((v) => !v)} className="press flex min-h-[44px] items-center gap-1.5 px-1 text-[14px] text-ink-400">
