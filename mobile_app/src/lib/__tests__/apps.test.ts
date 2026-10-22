@@ -115,7 +115,15 @@ describe('markdown', () => {
   it('parses blocks', () => {
     const blocks = parseBlocks('# Title\n\nSome *text*\nmore\n\n- [ ] milk\n- [x] eggs\n\n1. one\n2. two\n\n> quoted\n\n```\ncode\n```\n---');
     expect(blocks.map((b) => b.t)).toEqual(['heading', 'para', 'list', 'list', 'quote', 'code', 'hr']);
-    expect(blocks[2]).toEqual({ t: 'list', ordered: false, items: [{ text: 'milk', checked: false }, { text: 'eggs', checked: true }] });
+    expect(blocks[2]).toEqual({
+      t: 'list',
+      ordered: false,
+      start: 1,
+      items: [
+        { text: 'milk', checked: false, children: [] },
+        { text: 'eggs', checked: true, children: [] },
+      ],
+    });
     expect(blocks[3]).toMatchObject({ ordered: true, items: [{ text: 'one', checked: null }, { text: 'two', checked: null }] });
     expect(blocks[1]).toEqual({ t: 'para', text: 'Some *text*\nmore' });
   });

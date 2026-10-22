@@ -4,10 +4,15 @@
   switches and the last pushes;
 * ``PUT /notify/prefs``: turn kinds on or off (stored in D1, all on by default);
 * ``POST /notify/test``: one test push;
-* ``POST /notify/run?kind=morning|evening|weekly|budget|month``: what the QStash schedules call (no body
-  needed). Daily/weekly/monthly kinds are deduplicated in D1 (one push per kind and day, week or month;
+* ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders``: what the QStash schedules call (no
+  body needed). Daily/weekly/monthly kinds are deduplicated in D1 (one push per kind and day, week or month;
   ``force=1`` bypasses it, ``preview=1`` composes without sending); ``budget`` only pushes items that
-  became ``warn``/``over`` since the last budget push.
+  became ``warn``/``over`` since the last budget push; ``reminders`` (every 15 min) pushes one notification
+  per open task whose due date + time falls in [now - 5 min, now + 15 min], deduplicated per task and due
+  time, with a "Fait ✓" button;
+* ``POST /notify/done/{task_id}?sig=...`` (``public_router``, no bearer: the ntfy app calls it from the
+  notification button): marks that one task done. ``sig`` is an HMAC-SHA256 of the task id under a key
+  derived from the hub token (see :func:`done_sig`), compared in constant time; anything else answers 404.
 
 The email receipt import calls :func:`push_inbox_import` after a sync that created expenses (best effort).
 Push texts are in French (the owner's language); days are Africa/Casablanca days.
@@ -16,37 +21,47 @@ Push texts are in French (the owner's language); days are Africa/Casablanca days
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from hub_api import notifier
-from hub_api.appdata import AppDB, get_appdb, iso, local_today, new_id, now_iso
+from hub_api.appdata import AppDB, get_appdb, iso, local_now, local_today, local_tz, new_id, now_iso
 from hub_api.budget_report import build_budget
 from hub_api.recurring import monthly_equivalent, recurring_items
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
 from hub_api.routers.expenses import expense_out, summarise
-from hub_api.routers.notes import SCHEMA as NOTES_SCHEMA
+from hub_api.routers.notes import ensure_schema as ensure_notes
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "SCHEMA", "KINDS", "RUN_KINDS", "Push", "push_inbox_import", "fmt_money", "ensure_schema"]
+__all__ = [
+    "router", "public_router", "SCHEMA", "KINDS", "RUN_KINDS", "Push", "push_inbox_import", "fmt_money",
+    "ensure_schema", "done_sig", "reminder_window",
+]
 
 log = logging.getLogger("omnifree.hub.notify")
 
 router = APIRouter(prefix="/notify", tags=["notify"])
+public_router = APIRouter(tags=["public"])
 
-RunKind = Literal["morning", "evening", "weekly", "budget", "month"]
-RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month")
+RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders"]
+RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders")
 KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox")
 BUDGET_TIMEOUT_S = 40.0  # the whole call must stay under the 60 s serverless limit
 INBOX_PUSH_TIMEOUT_S = 5.0
 LOG_KEEP_DAYS = 60
 MAX_TASK_LINES = 5
+REMIND_BEFORE = timedelta(minutes=15)  # a reminder goes out up to 15 min before the due time...
+REMIND_AFTER = timedelta(minutes=5)  # ...or up to 5 min after it (a late or retried run)
+MAX_REMINDERS = 10  # per run: stays well inside the 60 s serverless limit
+_DONE_KEY_LABEL = b"omnifree/notify-done/v1"
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_notify_prefs (kind TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at TEXT NOT NULL)",
@@ -68,7 +83,7 @@ _MONTHS_FR = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", 
 
 async def ensure_schema(db: AppDB) -> AppDB:
     await ensure_expenses(db)
-    await db.ensure("notes", NOTES_SCHEMA)
+    await ensure_notes(db)
     await db.ensure("notify", SCHEMA)
     return db
 
@@ -85,6 +100,7 @@ class Push:
     priority: int = 3
     path: str = ""  # PWA hash route opened by a tap, e.g. "#/notes/tasks"
     actions: list[tuple[str, str]] = field(default_factory=list)  # (label, PWA hash route)
+    http_actions: list[dict[str, Any]] = field(default_factory=list)  # ntfy "http" actions, sent first
     dedupe: str | None = None  # one push per key (kind + day/week/month)
 
 
@@ -110,7 +126,10 @@ def _day_label(d: date) -> str:
 
 
 def _task_lines(tasks: list[dict[str, Any]]) -> list[str]:
-    lines = [f"• {'❗ ' if t.get('priority') == 'high' else ''}{t['title']}" for t in tasks[:MAX_TASK_LINES]]
+    lines = [
+        f"• {t['due_time'] + ' ' if t.get('due_time') else ''}{'❗ ' if t.get('priority') == 'high' else ''}{t['title']}"
+        for t in tasks[:MAX_TASK_LINES]
+    ]
     if len(tasks) > MAX_TASK_LINES:
         lines.append(f"… et {len(tasks) - MAX_TASK_LINES} autre{'s' if len(tasks) - MAX_TASK_LINES > 1 else ''}")
     return lines
@@ -120,11 +139,22 @@ def _task_lines(tasks: list[dict[str, Any]]) -> list[str]:
 
 
 async def _tasks_due(db: AppDB, day: date) -> list[dict[str, Any]]:
+    """Open tasks due on ``day``: timed ones in time order, then the others by priority."""
     return await db.fetch(
-        "SELECT id, title, priority FROM app_tasks WHERE done = 0 AND due = ?"
-        " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at",
+        "SELECT id, title, priority, due, due_time FROM app_tasks WHERE done = 0 AND due = ?"
+        " ORDER BY (due_time IS NULL), due_time,"
+        " CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at",
         [day.isoformat()],
     )
+
+
+def _due_at(task: dict[str, Any]) -> datetime | None:
+    """The task's local due datetime (aware, Africa/Casablanca), None without a valid date and time."""
+    try:
+        h, m = (int(x) for x in str(task.get("due_time") or "").split(":"))
+        return datetime.combine(date.fromisoformat(str(task.get("due"))[:10]), time(h, m), tzinfo=local_tz())
+    except (TypeError, ValueError):
+        return None
 
 
 async def _count(db: AppDB, sql: str, params: list[Any]) -> int:
@@ -200,20 +230,32 @@ async def compose_morning(db: AppDB, today: date) -> Push:
                 actions=[("Tâches", "#/notes/tasks"), ("Dépenses", "#/more/expenses")], dedupe=f"morning:{today}")
 
 
-async def compose_evening(db: AppDB, today: date) -> Push | None:
-    still_open = await _tasks_due(db, today)
+async def compose_evening(db: AppDB, today: date, now: datetime | None = None) -> Push | None:
+    """Today's tasks still open. A timed task whose time is still ahead tonight is "à venir", not late."""
+    due_today = await _tasks_due(db, today)
+    now = now or local_now()
+    upcoming = [t for t in due_today if (at := _due_at(t)) is not None and at > now]
+    still_open = [t for t in due_today if t not in upcoming]
     logged = await _count(db, "SELECT COUNT(*) AS n FROM app_expenses WHERE date = ?", [today.isoformat()])
-    if not still_open and logged:
+    if not due_today and logged:
         return None
     lines = _task_lines(still_open)
+    if upcoming:
+        lines.append("À venir : " + ", ".join(f"{t['due_time']} {t['title']}" for t in upcoming[:MAX_TASK_LINES]))
     if not logged:
         lines.append("Aucune dépense notée aujourd'hui : tu veux ajouter celles du jour ?")
-    title = (f"Ce soir : {_plural(len(still_open), 'tâche encore ouverte', 'tâches encore ouvertes')}" if still_open
-             else "Ce soir : les dépenses du jour ?")
-    actions = [("Tâches", "#/notes/tasks")] if still_open else []
+    if still_open:
+        title = f"Ce soir : {_plural(len(still_open), 'tâche encore ouverte', 'tâches encore ouvertes')}"
+        if upcoming:
+            title += f", {len(upcoming)} à venir"
+    elif upcoming:
+        title = f"Ce soir : {_plural(len(upcoming), 'tâche', 'tâches')} à venir"
+    else:
+        title = "Ce soir : les dépenses du jour ?"
+    actions = [("Tâches", "#/notes/tasks")] if due_today else []
     actions.append(("Dépenses", "#/more/expenses"))
     return Push(title=title, message="\n".join(lines), tags=["crescent_moon"],
-                path="#/notes/tasks" if still_open else "#/more/expenses", actions=actions, dedupe=f"evening:{today}")
+                path="#/notes/tasks" if due_today else "#/more/expenses", actions=actions, dedupe=f"evening:{today}")
 
 
 async def compose_weekly(db: AppDB, today: date) -> Push:
@@ -309,6 +351,92 @@ async def compose_month(db: AppDB, today: date) -> Push:
                 actions=[("Dépenses", "#/more/expenses")], dedupe=f"month:{today:%Y-%m}")
 
 
+def reminder_window(now: datetime) -> tuple[datetime, datetime]:
+    """[now - 5 min, now + 15 min]: with a 15-minute schedule every due time falls in at least one window."""
+    return now - REMIND_AFTER, now + REMIND_BEFORE
+
+
+async def due_reminders(db: AppDB, now: datetime) -> list[dict[str, Any]]:
+    """Open timed tasks whose local due datetime is inside :func:`reminder_window`, soonest first."""
+    start, end = reminder_window(now)
+    days = sorted({start.date().isoformat(), end.date().isoformat()})
+    rows = await db.fetch(
+        "SELECT id, title, priority, details, due, due_time FROM app_tasks WHERE done = 0 AND due_time IS NOT NULL"
+        f" AND due IN ({', '.join('?' for _ in days)}) ORDER BY due, due_time, created_at",
+        days,
+    )
+    out = []
+    for r in rows:
+        at = _due_at(r)
+        if at is not None and start <= at <= end:
+            out.append({**r, "at": at})
+    return out
+
+
+def done_sig(hub_token: str, task_id: str) -> str:
+    """Signature of the "Fait ✓" link: HMAC-SHA256(task id) under a key derived from the hub token.
+
+    Deriving (instead of using the token or the ntfy topic) means the URL never exposes the token, and
+    knowing the topic is not enough to forge a link for another task.
+    """
+    key = hmac.new(hub_token.encode("utf-8"), _DONE_KEY_LABEL, hashlib.sha256).digest()
+    return hmac.new(key, f"done:{task_id}".encode(), hashlib.sha256).hexdigest()
+
+
+def compose_reminder(state: HubState, task: dict[str, Any], now: datetime) -> Push:
+    at: datetime = task["at"]
+    minutes = round((at - now).total_seconds() / 60)
+    when = (f"dans {minutes} min" if minutes > 0 else "maintenant" if minutes == 0 else f"il y a {-minutes} min")
+    lines = [f"{task['due_time']} ({when})"]
+    if task.get("details"):
+        lines.append(str(task["details"])[:300])
+    http_actions: list[dict[str, Any]] = []
+    token = state.hub_token()
+    if token:
+        base = state.hub.public_base_url.rstrip("/")
+        http_actions.append({
+            "action": "http", "label": "Fait ✓", "method": "POST", "clear": True,
+            "url": f"{base}/notify/done/{task['id']}?sig={done_sig(token, task['id'])}",
+        })
+    return Push(
+        title=f"{'❗ ' if task.get('priority') == 'high' else ''}⏰ {task['title']}"[:250],
+        message="\n".join(lines), tags=["alarm_clock"], priority=4, path="#/notes/tasks",
+        actions=[("Tâches", "#/notes/tasks")], http_actions=http_actions,
+        dedupe=f"reminder:{task['id']}:{task['due']}T{task['due_time']}",
+    )
+
+
+async def run_reminders(state: HubState, db: AppDB, *, preview: bool, force: bool) -> dict[str, Any]:
+    now = local_now()
+    tasks = await due_reminders(db, now)
+    pushes = [compose_reminder(state, t, now) for t in tasks[:MAX_REMINDERS]]
+    out: dict[str, Any] = {"kind": "reminders", "sent": False, "skipped": None, "count": 0, "title": None,
+                           "message": None, "results": []}
+    if not pushes:
+        out["skipped"] = "nothing to report"
+        return out
+    out["title"] = pushes[0].title if len(pushes) == 1 else f"{len(pushes)} rappels"
+    out["message"] = "\n".join(f"{p.title} · {p.message.splitlines()[0]}" for p in pushes)
+    if preview:
+        out["skipped"] = "preview"
+        return out
+    errors: list[notifier.NotifyError] = []
+    for push in pushes:
+        try:
+            res = await deliver(state, db, "reminders", push, force=force)
+        except notifier.NotifyError as exc:  # keep going; the 502 below makes QStash retry (sent ones are deduped)
+            errors.append(exc)
+            res = {"sent": False, "skipped": f"failed: {exc}", "title": push.title}
+        out["results"].append({k: res.get(k) for k in ("sent", "skipped", "title")})
+    if errors:
+        raise errors[0]
+    out["count"] = sum(1 for r in out["results"] if r["sent"])
+    out["sent"] = out["count"] > 0
+    if not out["sent"]:
+        out["skipped"] = out["results"][0]["skipped"]
+    return out
+
+
 # --------------------------------------------------------------------------- sending
 
 
@@ -341,7 +469,7 @@ async def deliver(state: HubState, db: AppDB, kind: str, push: Push, *, force: b
     if not claimed:
         out["skipped"] = "already sent"
         return out
-    actions = [
+    actions = [*push.http_actions] + [
         {"action": "view", "label": label, "url": url, "clear": True}
         for label, path in push.actions if (url := _pwa(state, path))
     ]
@@ -450,6 +578,11 @@ async def notify_run(
     """Compose and push one kind (the target of the QStash schedules; the body is ignored)."""
     if not (await get_prefs(db))[kind] and not preview:
         return {"kind": kind, "sent": False, "skipped": "turned off in the app", "title": None, "message": None}
+    if kind == "reminders":
+        try:
+            return await run_reminders(state, db, preview=preview, force=force)
+        except notifier.NotifyError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     today = local_today()
     budget_alerts: dict[str, str] | None = None
     if kind == "morning":
@@ -478,3 +611,22 @@ async def notify_run(
     if budget_alerts is not None and out["sent"]:
         await _state_set(db, "budget_alerts", {"alerts": budget_alerts})
     return out
+
+
+@public_router.post("/notify/done/{task_id}", include_in_schema=False)
+async def notify_done(
+    task_id: str,
+    sig: str = Query("", max_length=128),
+    state: HubState = Depends(get_state),
+    db: AppDB = Depends(_db),
+) -> dict[str, Any]:
+    """The "Fait ✓" button of a reminder: marks this one task done. PUBLIC, authenticated by ``sig`` only."""
+    token = state.hub_token()
+    if not token or len(task_id) > 64 or not hmac.compare_digest(done_sig(token, task_id).encode(), sig.encode()):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not Found")
+    row = await db.fetch_one("SELECT id, title, done FROM app_tasks WHERE id = ?", [task_id])
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not Found")
+    if not row.get("done"):
+        await db.execute("UPDATE app_tasks SET done = 1, done_at = ? WHERE id = ? AND done = 0", [now_iso(), task_id])
+    return {"ok": True, "id": task_id, "title": row["title"], "done": True}

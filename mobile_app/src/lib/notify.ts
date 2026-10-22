@@ -9,6 +9,7 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
   { kind: 'weekly', label: 'Weekly summary', detail: 'Last week’s spending, tasks and notes (Mondays)' },
   { kind: 'budget', label: 'Free-tier budget', detail: 'Plugins that newly reach 80 % or 100 % of a limit' },
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
+  { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task, with a “Fait ✓” button' },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
 ];
 
@@ -45,6 +46,11 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
   {
     id: 'month', name: 'push-month', label: 'Month-end money recap', schedule: '0 8 28 * *', path: '/notify/run?kind=month',
     description: 'Day 28, 09:00 Morocco: the month’s spending so far',
+  },
+  {
+    id: 'reminders', name: 'push-reminders', label: 'Task reminders: every 15 min', schedule: '*/15 * * * *', path: '/notify/run?kind=reminders',
+    description:
+      'Pushes each timed task up to 15 min before it is due. 96 calls a day: with the 10-min keep-warm job (144/day) that is 240 of the 1,000 free QStash messages a day',
   },
 ];
 

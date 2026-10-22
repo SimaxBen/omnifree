@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Icon } from '../../components/icons';
 import { cx, haptic } from '../../components/ui';
-import { dueInfo, isoDay } from '../../lib/apps';
+import { taskDue } from '../../lib/apps';
 import { announce } from '../../lib/bus';
 import { errorText, useHub } from '../../lib/hub';
 import type { Task } from '../../lib/types';
@@ -49,7 +49,7 @@ export function CheckButton({ done, onToggle, label }: { done: boolean; onToggle
 
 export function TaskRow({ task, onChange, onOpen, compact }: { task: Task; onChange: (t: Task) => void; onOpen?: (t: Task) => void; compact?: boolean }) {
   const { client, notify } = useHub();
-  const due = dueInfo(task.due, isoDay());
+  const due = taskDue(task);
 
   const toggle = async () => {
     const next = { ...task, done: !task.done, done_at: task.done ? null : new Date().toISOString() };

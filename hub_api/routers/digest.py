@@ -23,7 +23,7 @@ from core.interfaces import ChatMessage, ChatRequest, ProviderKind
 from hub_api.appdata import AppDB, extract_json, get_appdb, iso, local_today, local_tz, now_iso
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
 from hub_api.routers.expenses import expense_out, summarise
-from hub_api.routers.notes import SCHEMA as NOTES_SCHEMA
+from hub_api.routers.notes import ensure_schema as ensure_notes
 from hub_api.state import HubState, get_state
 
 __all__ = ["router", "SCHEMA", "period_range", "fallback_text", "top_merchants"]
@@ -45,7 +45,7 @@ SCHEMA = (
 
 async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
     await ensure_expenses(db)
-    await db.ensure("notes", NOTES_SCHEMA)
+    await ensure_notes(db)
     await db.ensure("digest", SCHEMA)
     return db
 

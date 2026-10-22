@@ -8,6 +8,8 @@ gives the PWA the feed URL.
 Feed content (RFC 5545: CRLF line ends, lines folded at 75 octets, TEXT escaping):
 
 * open tasks with a due date, as all-day events (``DTSTART;VALUE=DATE``), UID ``task-<id>@omnifree``;
+  a task with a ``due_time`` becomes a 30-minute timed event in UTC (``DTSTART:...Z``, converted from
+  Africa/Casablanca with zoneinfo, so the Ramadan UTC+0 weeks are right) with a display alarm 10 minutes before;
 * tasks done in the last 14 days, titled ``✓ <title>`` (``?done=0`` leaves them out);
 * recurring incomes/expenses **only if** a table named like ``app_money_recurring%`` exists (see
   :mod:`hub_api.recurring`), as all-day events with an RRULE.
@@ -16,7 +18,7 @@ Feed content (RFC 5545: CRLF line ends, lines folded at 75 octets, TEXT escaping
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -24,10 +26,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from hub_api.appdata import AppDB, get_appdb, iso, local_today, local_tz
 from hub_api.auth import token_matches
 from hub_api.recurring import recurring_items
-from hub_api.routers.notes import SCHEMA as NOTES_SCHEMA
+from hub_api.routers.notes import TIME_RE
+from hub_api.routers.notes import ensure_schema as ensure_notes
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "public_router", "TOKEN_KEY", "ics_escape", "fold_line", "build_ics", "task_events"]
+__all__ = [
+    "router", "public_router", "TOKEN_KEY", "ics_escape", "fold_line", "build_ics", "task_events", "local_to_utc",
+]
 
 log = logging.getLogger("omnifree.hub.calendar")
 
@@ -37,11 +42,13 @@ public_router = APIRouter(tags=["public"])
 TOKEN_KEY = "CALENDAR_FEED_TOKEN"
 DONE_DAYS = 14
 MAX_TASKS = 2000
+EVENT_MINUTES = 30  # length of a timed task event
+ALARM_MINUTES = 10  # display alarm before a timed open task
 _FOLD_AT = 75  # octets per line, CRLF excluded
 
 
 async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
-    await db.ensure("notes", NOTES_SCHEMA)
+    await ensure_notes(db)
     return db
 
 
@@ -73,8 +80,20 @@ def _d(day: date) -> str:
     return day.strftime("%Y%m%d")
 
 
+def _utc(t: datetime) -> str:
+    return t.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def local_to_utc(day: date, hhmm: str) -> datetime:
+    """A wall-clock time in Africa/Casablanca as an aware UTC datetime (UTC+1, UTC+0 during Ramadan)."""
+    h, m = (int(x) for x in hhmm.split(":"))
+    return datetime.combine(day, time(h, m), tzinfo=local_tz()).astimezone(timezone.utc)
+
+
 def build_ics(events: list[dict[str, Any]], *, name: str = "OmniFree", now: datetime | None = None) -> str:
-    """A VCALENDAR with all-day VEVENTs. Each event: uid, date, summary, optional description/url/rrule/priority."""
+    """A VCALENDAR of VEVENTs. Each event: uid, summary and either ``date`` (all-day) or ``start`` (aware
+    datetime, written in UTC) with ``minutes``; optional description/url/rrule/priority/status/alarm (minutes
+    before the start, timed events only)."""
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = [
         "BEGIN:VCALENDAR",
@@ -88,15 +107,15 @@ def build_ics(events: list[dict[str, Any]], *, name: str = "OmniFree", now: date
         "X-PUBLISHED-TTL:PT1H",
     ]
     for ev in events:
-        day: date = ev["date"]
-        lines += [
-            "BEGIN:VEVENT",
-            f"UID:{ev['uid']}",
-            f"DTSTAMP:{stamp}",
-            f"DTSTART;VALUE=DATE:{_d(day)}",
-            f"DTEND;VALUE=DATE:{_d(day + timedelta(days=1))}",
-            f"SUMMARY:{ics_escape(ev['summary'])}",
-        ]
+        lines += ["BEGIN:VEVENT", f"UID:{ev['uid']}", f"DTSTAMP:{stamp}"]
+        start: datetime | None = ev.get("start")
+        if start is not None:
+            end = start + timedelta(minutes=int(ev.get("minutes") or EVENT_MINUTES))
+            lines += [f"DTSTART:{_utc(start)}", f"DTEND:{_utc(end)}"]
+        else:
+            day: date = ev["date"]
+            lines += [f"DTSTART;VALUE=DATE:{_d(day)}", f"DTEND;VALUE=DATE:{_d(day + timedelta(days=1))}"]
+        lines.append(f"SUMMARY:{ics_escape(ev['summary'])}")
         if ev.get("description"):
             lines.append(f"DESCRIPTION:{ics_escape(ev['description'])}")
         if ev.get("url"):
@@ -107,7 +126,16 @@ def build_ics(events: list[dict[str, Any]], *, name: str = "OmniFree", now: date
             lines.append(f"PRIORITY:{int(ev['priority'])}")
         if ev.get("status"):
             lines.append(f"STATUS:{ev['status']}")
-        lines += ["TRANSP:TRANSPARENT", "END:VEVENT"]
+        lines.append("TRANSP:TRANSPARENT")
+        if start is not None and ev.get("alarm"):
+            lines += [
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                f"DESCRIPTION:{ics_escape(ev['summary'])}",
+                f"TRIGGER:-PT{int(ev['alarm'])}M",
+                "END:VALARM",
+            ]
+        lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
     return "".join(fold_line(line) + "\r\n" for line in lines)
 
@@ -137,17 +165,27 @@ def _local_day(stamp: Any) -> date | None:
 
 
 def task_events(rows: list[dict[str, Any]], link: str) -> list[dict[str, Any]]:
-    """All-day events for task rows (open ones need a due date; done ones fall back to their done day)."""
+    """Events for task rows (open ones need a due date; done ones fall back to their done day).
+
+    A due date with a ``due_time`` gives a timed event (UTC) with an alarm when the task is open; otherwise
+    the event is all-day.
+    """
     out: list[dict[str, Any]] = []
     for r in rows:
         done = bool(r.get("done"))
-        day = _parse_date(r.get("due")) or (_local_day(r.get("done_at")) if done else None)
+        due = _parse_date(r.get("due"))
+        day = due or (_local_day(r.get("done_at")) if done else None)
         if day is None:
             continue
         details = (r.get("details") or "").strip()
+        hhmm = r.get("due_time")
+        start = local_to_utc(due, hhmm) if due and isinstance(hhmm, str) and TIME_RE.match(hhmm) else None
         out.append({
             "uid": f"task-{r['id']}@omnifree",
             "date": day,
+            "start": start,
+            "minutes": EVENT_MINUTES,
+            "alarm": ALARM_MINUTES if start is not None and not done else None,
             "summary": f"✓ {r['title']}" if done else str(r["title"]),
             "description": f"{details}\n\n{link}" if details else link,
             "url": link,
@@ -208,7 +246,7 @@ async def calendar_feed(
     base = state.hub.pwa_base_url.rstrip("/")
     tasks_link = f"{base}/#/notes/tasks"
     rows = await db.fetch(
-        "SELECT * FROM app_tasks WHERE done = 0 AND due IS NOT NULL ORDER BY due, created_at LIMIT ?",
+        "SELECT * FROM app_tasks WHERE done = 0 AND due IS NOT NULL ORDER BY due, due_time, created_at LIMIT ?",
         [MAX_TASKS], limit=MAX_TASKS,
     )
     if done:

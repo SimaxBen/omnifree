@@ -11,17 +11,20 @@ import json
 import logging
 import mimetypes
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, TranscriptionRequest
-from hub_api.appdata import AppDB, extract_json, get_appdb, local_today, new_id, now_iso, read_upload
+from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "resolve_due", "derive_title", "SCHEMA", "store_and_transcribe"]
+__all__ = [
+    "router", "resolve_due", "resolve_when", "split_time", "normalize_time", "derive_title", "SCHEMA",
+    "TASK_COLUMNS", "ensure_schema", "store_and_transcribe",
+]
 
 log = logging.getLogger("omnifree.hub.notes")
 
@@ -40,15 +43,23 @@ SCHEMA = (
     " created_at TEXT NOT NULL, done_at TEXT)",
     "CREATE INDEX IF NOT EXISTS app_tasks_open ON app_tasks (done, due)",
 )
+# Added after the first release: ALTER TABLE ... ADD COLUMN when missing (see AppDB.add_columns).
+TASK_COLUMNS = (("due_time", "TEXT"),)  # HH:MM, Africa/Casablanca; only set together with ``due``
 
 Priority = Literal["low", "normal", "high"]
 _PRIORITIES = ("low", "normal", "high")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
+async def ensure_schema(db: AppDB) -> AppDB:
+    """The notes/tasks tables, plus the columns added later (``due_time``)."""
     await db.ensure("notes", SCHEMA)
+    await db.add_columns("notes_v2_due_time", "app_tasks", TASK_COLUMNS)
     return db
+
+
+async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
+    return await ensure_schema(db)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -137,11 +148,208 @@ def resolve_due(value: Any, today: date) -> str | None:
             return None
     else:
         d = _relative(text, today)
+        if d is None:  # "demain à 15h", "vendredi soir": the day part only
+            rest, hhmm, says_today, _ = split_time(text)
+            if rest:
+                d = _relative(rest, today)
+            elif hhmm and says_today:
+                d = today
         if d is None:
             return None
     if not (today - timedelta(days=366) <= d <= today + timedelta(days=3650)):
         return None
     return d.isoformat()
+
+
+# --------------------------------------------------------------------------- times of day
+#
+# "demain à 15h", "à 18h30", "ce soir", "vendredi 10h", "tomorrow at 3pm", "ghda m3a 3", "f 5 dyal l3chiya".
+# A bare hour from 1 to 7 with no morning word means the afternoon/evening (nobody plans "à 3h" at night);
+# a zero-padded "07:00" is taken literally.
+
+_PERIODS: list[tuple[str, str, bool]] = []  # (phrase, kind, says_today), longest phrase first
+for _kind, _today_words, _words in (
+    ("morning", ("ce matin", "this morning", "had sbah", "lyoum sbah"),
+     ("du matin", "le matin", "au matin", "matin", "in the morning", "morning", "f sbah", "fs sbah", "f ssbah",
+      "fe sbah", "dyal sbah", "dyal sba7", "sbah", "ssbah", "sba7", "ssba7", "sbe7", "fsba7")),
+    ("noon", (), ("midi", "noon", "midday", "f nss nhar", "nss nhar", "nos nhar", "f nos nhar", "f ness nhar", "ness nhar")),
+    ("afternoon", ("cet apres-midi", "cet après-midi", "cet aprem", "this afternoon", "had l3chiya", "had l3chia"),
+     ("de l'apres-midi", "de l'après-midi", "l'apres-midi", "l'après-midi", "apres-midi", "après-midi",
+      "apres midi", "après midi", "aprem", "in the afternoon", "afternoon", "f l3chiya", "fl3chiya", "dyal l3chiya",
+      "l3chiya", "l3chia", "la3chiya", "f l3achiya", "l3achiya", "dyal l3chia", "f l3chia", "3chiya")),
+    ("evening", ("ce soir", "tonight", "this evening", "had lila", "had lil", "lyoum f lil"),
+     ("du soir", "le soir", "au soir", "soir", "in the evening", "evening", "at night", "f lil", "fl lil", "f llil",
+      "dyal lil", "dyal llil", "fellil", "flil", "lil", "llil", "f lmghrib", "lmghrib", "mghrib")),
+    ("night", ("cette nuit",), ("de la nuit", "la nuit", "nuit", "night")),
+    ("midnight", (), ("minuit", "midnight", "nss lil", "f nss lil", "nos lil")),
+):
+    for _w in _today_words:
+        _PERIODS.append((_w, _kind, True))
+    for _w in _words:
+        _PERIODS.append((_w, _kind, False))
+_PERIODS.sort(key=lambda p: -len(p[0]))
+_PERIOD_DEFAULT = {"morning": (9, 0), "noon": (12, 0), "afternoon": (15, 0), "evening": (20, 0), "night": (22, 0),
+                   "midnight": (0, 0)}
+_PM_PERIODS = ("afternoon", "evening", "night")
+
+_CONNECT = r"(?:à|a|at|@|vers|around|about|pour|for|by|avant|before|m3a|mea|ma3a|m3|f|fi|fel|l)"
+_GLUE = r"(?:à|a|at|@|vers|around|about|pour|for|by|avant|before|m3a|mea|ma3a|m3|f|fi|fel|l|on|le|la|dyal|de|du|et|w|and)"
+_HALF = r"(?:et\s+demie?|w\s*(?:nss|nos|nass|ness|nesf)|and\s+a\s+half)"
+_QUARTER = r"(?:et\s+quart|w\s*(?:rb3|rbe3|rob3|rbo3)|quarter\s+past)"
+_TO_QUARTER = r"(?:moins\s+(?:le\s+)?quart|(?:qell|9ell|qal|ghir)\s+(?:rb3|rbe3|rob3|rbo3)|quarter\s+to)"
+_FRACTION = rf"(?:\s+(?P<frac>{_HALF}|{_QUARTER}|{_TO_QUARTER}))?"
+_NOT_UNIT = r"(?!\s*(?:jours?|days?|nhar|ayam|iyam|semaines?|weeks?|mois|months?|ans?|years?|dh|mad|dirhams?|%|€|\$|\d|[/.-]\d))"
+_TIME_RES = (
+    # 15:00, 18h30, 18 h 30, 9.15 is not a time (too ambiguous)
+    re.compile(rf"(?:\b{_CONNECT}\s+)?\b(?P<h>\d{{1,2}})\s*(?::|h)\s*(?P<m>\d{{2}})\b(?:\s*(?P<ampm>am|pm|a\.m\.|p\.m\.))?"),
+    # 3pm, 3 p.m.
+    re.compile(rf"(?:\b{_CONNECT}\s+)?\b(?P<h>\d{{1,2}})\s*(?P<ampm>am|pm|a\.m\.|p\.m\.)(?![a-z])"),
+    # 15h, 3 heures, 3 o'clock, 3 sa3a, optionally "et demie"
+    re.compile(rf"(?:\b{_CONNECT}\s+)?\b(?P<h>\d{{1,2}})\s*(?:h|heures?|hours?|o'?clock|sa3a|s3a|sa3at)(?![a-z0-9]){_FRACTION}"),
+    # "à 3", "m3a 3", "f 5", "at 7" (a connector is required for a bare number)
+    re.compile(rf"\b{_CONNECT}\s+(?P<h>\d{{1,2}}){_NOT_UNIT}\b{_FRACTION}"),
+)
+_IN_HOURS_RE = re.compile(
+    r"\b(?:in|dans|men\s+daba|mn\s+daba|ba3d|be3d|after)\s+(?:(?P<n>\d{1,3})\s*|(?P<one>une?|one|an|a)\s+)"
+    r"(?P<unit>heures?|hours?|h|minutes?|mins?|min|sa3a|sa3at|d9i9a|d9aye9|dqiqa)\b"
+)
+_LEFTOVER_RE = re.compile(rf"^(?:{_GLUE}(?:\s+|$))+|(?:\s+{_GLUE})+$")
+TIME_RE = re.compile(r"^([01]?\d|2[0-3])[:hH]([0-5]\d)(?::[0-5]\d)?$")
+
+
+def _norm(text: str) -> str:
+    t = text.lower().replace("\u2019", "'").replace("\u2011", "-").replace("\u00a0", " ")
+    t = re.sub(r"\b([ap])\.\s?m\b\.?", r"\1m", t)
+    t = re.sub(r"[!?;]+", " ", t)
+    t = re.sub(r"(?<!\d)[.,](?!\d)", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _cut(text: str, start: int, end: int) -> str:
+    return re.sub(r"\s+", " ", f"{text[:start]} {text[end:]}").strip()
+
+
+def split_time(text: str, now: datetime | None = None) -> tuple[str, str | None, bool, date | None]:
+    """Pull a time of day out of a date/time phrase.
+
+    Returns ``(rest, "HH:MM" or None, says_today, absolute_day)``: ``rest`` is the phrase without the
+    time words ("demain à 15h" -> "demain"); ``says_today`` is True for "ce soir", "tonight", "this
+    morning"; ``absolute_day`` is set for relative durations ("dans 2 heures", needs ``now``).
+    """
+    t = _norm(text)
+    if now is not None:
+        m = _IN_HOURS_RE.search(t)
+        if m:
+            n = int(m.group("n")) if m.group("n") else 1
+            unit = m.group("unit")
+            delta = timedelta(hours=n) if unit[0] in "hs" else timedelta(minutes=n)
+            if delta <= timedelta(days=7):
+                at = now + delta
+                return _cut(t, m.start(), m.end()), f"{at:%H:%M}", False, at.date()
+    period: str | None = None
+    says_today = False
+    for phrase, kind, today_word in _PERIODS:
+        m = re.search(rf"(?<![\w']){re.escape(phrase)}(?![\w'])", t)
+        if m:
+            period, says_today = kind, today_word
+            t = _cut(t, m.start(), m.end())
+            break
+    hour: int | None = None
+    minute = 0
+    for rx in _TIME_RES:
+        m = rx.search(t)
+        if not m:
+            continue
+        h_txt = m.group("h")
+        h, minute = int(h_txt), int(m.groupdict().get("m") or 0)
+        ampm = (m.groupdict().get("ampm") or "").replace(".", "")
+        frac = m.groupdict().get("frac") or ""
+        if frac:
+            if re.fullmatch(_HALF, frac):
+                minute = 30
+            elif re.fullmatch(_QUARTER, frac):
+                minute = 15
+            else:
+                h, minute = h - 1, 45
+        if h > 24 or minute > 59:
+            continue
+        if ampm == "pm" and h < 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        elif not ampm and 1 <= h <= 11:
+            if period in _PM_PERIODS and not (period == "night" and h <= 4):
+                h += 12
+            elif period is None and h <= 7 and not h_txt.startswith("0"):
+                h += 12  # "à 3h" = 15:00
+        hour = h % 24
+        t = _cut(t, m.start(), m.end())
+        break
+    if hour is None and period is not None:
+        hour, minute = _PERIOD_DEFAULT[period]
+        m = re.match(rf"^(?:{_HALF}|{_QUARTER})(?:\s+|$)", t)
+        if m:  # "midi et demie"
+            minute = 30 if re.match(_HALF, m.group(0)) else 15
+            t = t[m.end():].strip()
+    if hour is None and re.search(r"(?<![\w'])(?:midi|noon)(?![\w'])", t):
+        hour, minute = 12, 0
+    rest = _LEFTOVER_RE.sub("", t).strip()
+    rest = _LEFTOVER_RE.sub("", rest).strip()
+    return rest, (f"{hour:02d}:{minute:02d}" if hour is not None else None), says_today, None
+
+
+def normalize_time(value: Any) -> str | None:
+    """``HH:MM`` from "15:00", "15h", "9h30", "3pm", "ce soir"... else None."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("null", "none", "n/a", "-"):
+        return None
+    m = TIME_RE.match(text)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    rest, hhmm, _, _ = split_time(text)
+    return hhmm if hhmm and not rest else None
+
+
+def resolve_when(due: Any, due_time: Any, now: datetime) -> tuple[str | None, str | None]:
+    """A task's ``(due, due_time)`` from an LLM/user date and time (either may hold a whole phrase).
+
+    ``now`` is the local (Africa/Casablanca) time. A time with no day means today, or tomorrow when that
+    time has already passed ("à 18h30" said at 19:00). "ce soir" / "tonight" always mean today.
+    """
+    today = now.date()
+    day: str | None = None
+    hhmm = normalize_time(due_time)
+    says_today = False
+    text = "" if due is None else str(due).strip()
+    if text and text.lower() not in ("null", "none", "n/a", "-"):
+        iso = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}:\d{2})(?::\d{2})?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$", text)
+        if iso:
+            day = resolve_due(iso.group(1), today)
+            if iso.group(2) and not iso.group(3):
+                hhmm = hhmm or normalize_time(iso.group(2))
+        else:
+            rest, found, says_today, absolute = split_time(text, now)
+            hhmm = hhmm or found
+            if found is None:  # a day only: "demain", "f 3 ayam"
+                day = resolve_due(text, today)
+                if day is None:
+                    return None, None
+            elif absolute is not None:
+                day = absolute.isoformat()
+            elif rest:
+                day = resolve_due(rest, today)
+                if day is None:
+                    return None, None  # words we do not understand: no guess at all
+    if day is None and hhmm is not None:
+        if says_today:
+            day = today.isoformat()
+        else:
+            h, m = (int(x) for x in hhmm.split(":"))
+            passed = (h, m) <= (now.hour, now.minute)
+            day = (today + timedelta(days=1 if passed else 0)).isoformat()
+    return day, (hhmm if day else None)
 
 
 def _note_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +377,7 @@ def _task_out(row: dict[str, Any]) -> dict[str, Any]:
         "title": row["title"],
         "details": row.get("details"),
         "due": row.get("due"),
+        "due_time": row.get("due_time") if row.get("due") else None,
         "done": bool(row.get("done")),
         "priority": row.get("priority") or "normal",
         "note_id": row.get("note_id"),
@@ -228,6 +437,7 @@ async def _insert_task(
     title: str,
     details: str | None = None,
     due: str | None = None,
+    due_time: str | None = None,
     priority: str = "normal",
     note_id: str | None = None,
 ) -> dict[str, Any]:
@@ -236,6 +446,7 @@ async def _insert_task(
         "title": title.strip(),
         "details": details or None,
         "due": due,
+        "due_time": due_time if due else None,
         "done": 0,
         "priority": priority if priority in _PRIORITIES else "normal",
         "note_id": note_id,
@@ -262,6 +473,15 @@ def _due_param(value: str | None) -> str | None:
         return date.fromisoformat(value).isoformat()
     except ValueError as exc:
         raise HTTPException(422, detail="due must be a valid date") from exc
+
+
+def _time_param(value: str | None) -> str | None:
+    if value is None or value == "":
+        return None
+    m = TIME_RE.match(value.strip())
+    if not m:
+        raise HTTPException(422, detail="due_time must be HH:MM (24 h, Africa/Casablanca)")
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
 # --------------------------------------------------------------------------- notes
@@ -336,7 +556,8 @@ async def voice_note(
     today = local_today()
     key, transcript = await store_and_transcribe(state, file, today, language)
 
-    structured = await _structure(state, transcript, today, language)
+    now = local_now()
+    structured = await _structure(state, transcript, today, language, now if now.date() == today else None)
     tasks_in = structured["tasks"] if mode != "note" else []
     # "auto" also records money the speaker spent or received; a memo that is only about money
     # ("j'ai payé 45 dh de taxi") then makes no note.
@@ -362,6 +583,7 @@ async def voice_note(
             title=t["title"],
             details=t["details"],
             due=t["due"],
+            due_time=t["due_time"],
             priority=t["priority"],
             note_id=note["id"] if note else None,
         )
@@ -415,36 +637,58 @@ def _audio_ext(filename: str | None, content_type: str | None) -> str:
     return _AUDIO_EXT.get(base, "webm")
 
 
-def _voice_prompt(today: date) -> str:
+def _voice_prompt(today: date, now: datetime | None = None) -> str:
     week = ", ".join(f"{(today + timedelta(days=i)):%A} = {(today + timedelta(days=i)).isoformat()}" for i in range(1, 8))
+    clock = f", the time is {now:%H:%M}" if now is not None and now.date() == today else ""
     return (
         "You turn a voice memo transcript into a clean note and a list of tasks.\n"
-        f"Today is {today:%A} {today.isoformat()} (time zone Africa/Casablanca). Upcoming days: {week}.\n"
+        f"Today is {today:%A} {today.isoformat()}{clock} (time zone Africa/Casablanca). Upcoming days: {week}.\n"
         "The speaker may use English, French, Moroccan Darija or a mix (e.g. 'demain' / 'ghda' = tomorrow).\n"
         "Answer with ONE JSON object only, no prose, no code fences, with exactly these keys:\n"
         '{"title": "short title (max 8 words)", "body": "the memo rewritten as clean markdown, same language, '
         'nothing invented", "tags": ["lowercase", "keywords"], "tasks": [{"title": "imperative action", '
-        '"due": "YYYY-MM-DD or null", "priority": "low|normal|high", "details": "string or null"}], '
+        '"due": "YYYY-MM-DD or null", "due_time": "HH:MM (24 h) or null", '
+        '"when": "the exact words the speaker used for the day and/or time, or null", '
+        '"priority": "low|normal|high", "details": "string or null"}], '
         '"money": [{"type": "expense|income", "amount": number, "currency": "ISO 4217 code (dh/dirham = MAD) or null", '
         '"merchant": "who was paid, or who paid", "category": "string", "date": "YYYY-MM-DD or null", '
         '"note": "string or null"}], "money_only": true|false}\n'
         "Rules: tasks only for concrete actionable items the speaker must do (otherwise an empty list); "
         "convert every relative date (tomorrow, friday, next week ...) to an absolute YYYY-MM-DD using today's date; "
         "due is null when no date is mentioned; priority 'high' only when urgency is expressed. "
+        "due_time only when a time of day is said: 'à 15h' = 15:00, '18h30' = 18:30, 'ce soir' / 'tonight' = 20:00, "
+        "'le matin' / 'sbah' = 09:00, 'midi' / 'noon' = 12:00, 'l'après-midi' / 'l3chiya' = 15:00; a bare hour from "
+        "1 to 7 without 'matin' / 'sbah' / 'am' is in the afternoon ('ghda m3a 3' = tomorrow 15:00, "
+        "'f 5 dyal l3chiya' = 17:00). A time with no day is today, or tomorrow if that time has already passed. "
         "money: only amounts the speaker already spent or received (e.g. \"j'ai payé 45 dh de taxi\", "
         "\"I got my salary\"), never plans, prices or bills still to pay (those are tasks); otherwise an empty list. "
         "money_only is true when the memo is about nothing but those amounts."
     )
 
 
-async def _structure(state: HubState, transcript: str, today: date, language: str | None) -> dict[str, Any]:
+def _task_when(t: dict[str, Any], now: datetime) -> dict[str, str | None]:
+    """due/due_time of one LLM task: the speaker's own words ("when") win over the LLM's date arithmetic."""
+    when = t.get("when")
+    if isinstance(when, str) and when.strip():
+        due, due_time = resolve_when(when, None, now)
+        if due:
+            if due_time is None and t.get("due_time"):  # "vendredi" said, the time only in due_time
+                due_time = normalize_time(t.get("due_time"))
+            return {"due": due, "due_time": due_time}
+    due, due_time = resolve_when(t.get("due"), t.get("due_time"), now)
+    return {"due": due, "due_time": due_time}
+
+
+async def _structure(
+    state: HubState, transcript: str, today: date, language: str | None, now: datetime | None = None
+) -> dict[str, Any]:
     """LLM pass over the transcript; falls back to a plain note when the answer is unusable."""
     fallback: dict[str, Any] = {
         "title": derive_title(transcript), "body": transcript, "tags": [], "tasks": [], "money": [], "money_only": False,
     }
     request = ChatRequest(
         messages=[
-            ChatMessage(role="system", content=_voice_prompt(today)),
+            ChatMessage(role="system", content=_voice_prompt(today, now)),
             ChatMessage(role="user", content=f"Transcript{f' (language: {language})' if language else ''}:\n{transcript}"),
         ],
         temperature=0.2,
@@ -475,7 +719,7 @@ async def _structure(state: HubState, transcript: str, today: date, language: st
         tasks.append(
             {
                 "title": t["title"].strip()[:300],
-                "due": resolve_due(t.get("due"), today),
+                **_task_when(t, now or datetime.combine(today, datetime.min.time())),
                 "priority": prio if prio in _PRIORITIES else "normal",
                 "details": details.strip() if isinstance(details, str) and details.strip() else None,
             }
@@ -535,6 +779,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     details: str | None = Field(None, max_length=20_000)
     due: str | None = None
+    due_time: str | None = Field(None, description="HH:MM, Africa/Casablanca; needs a due date")
     priority: Priority = "normal"
     note_id: str | None = None
 
@@ -543,6 +788,7 @@ class TaskPatch(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=300)
     details: str | None = Field(None, max_length=20_000)
     due: str | None = None
+    due_time: str | None = None
     done: bool | None = None
     priority: Priority | None = None
     note_id: str | None = None
@@ -570,7 +816,7 @@ async def list_tasks(
     if status_ == "done":
         sql += " ORDER BY done_at DESC, created_at DESC"
     else:
-        sql += " ORDER BY done ASC, (due IS NULL) ASC, due ASC, created_at ASC"
+        sql += " ORDER BY done ASC, (due IS NULL) ASC, due ASC, (due_time IS NULL) ASC, due_time ASC, created_at ASC"
     sql += " LIMIT ?"
     rows = await db.fetch(sql, [*params, limit], limit=limit)
     return {"tasks": [_task_out(r) for r in rows]}
@@ -580,11 +826,16 @@ async def list_tasks(
 async def create_task(body: TaskCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
     if not body.title.strip():
         raise HTTPException(422, detail="title cannot be blank")
+    due = _due_param(body.due)
+    due_time = _time_param(body.due_time)
+    if due_time and not due:
+        raise HTTPException(422, detail="due_time needs a due date")
     return await _insert_task(
         db,
         title=body.title,
         details=body.details,
-        due=_due_param(body.due),
+        due=due,
+        due_time=due_time,
         priority=body.priority,
         note_id=body.note_id,
     )
@@ -600,6 +851,12 @@ async def patch_task(task_id: str, body: TaskPatch, db: AppDB = Depends(_db)) ->
             raise HTTPException(422, detail=f"{field} cannot be null")
         if field == "due":
             value = _due_param(value)
+            if value is None:
+                changes["due_time"] = None  # no day, no time
+        elif field == "due_time":
+            value = _time_param(value)
+            if value and not (body.due if "due" in body.model_fields_set else current.get("due")):
+                raise HTTPException(422, detail="due_time needs a due date")
         elif field == "title":
             value = value.strip()
             if not value:

@@ -25,26 +25,56 @@ export function addDays(iso: string, n: number): string {
 
 export type DueTone = 'overdue' | 'today' | 'soon' | 'later' | 'none';
 
-export function dueInfo(due: string | null, today: string): { label: string; tone: DueTone } {
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** HH:MM (24 h) for `date` in `tz`. */
+export function clockTime(date: Date = new Date(), tz = HOME_TZ): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+    return `${get('hour')}:${get('minute')}`;
+  } catch {
+    return date.toISOString().slice(11, 16);
+  }
+}
+
+/** A valid HH:MM time or null (the hub only stores HH:MM; anything else is ignored). */
+export function validTime(time: string | null | undefined): string | null {
+  return time && HHMM.test(time) ? time : null;
+}
+
+/**
+ * Label and tone of a due date, with its time when one is set ("Today · 15:00").
+ * Pass `now` (HH:MM, home time) so a task due today whose time has passed counts as overdue.
+ */
+export function dueInfo(due: string | null, today: string, time?: string | null, now?: string): { label: string; tone: DueTone } {
   if (!due) return { label: 'No date', tone: 'none' };
+  const at = validTime(time);
+  const withTime = (label: string) => (at ? `${label} · ${at}` : label);
   const diff = dayNumber(due) - dayNumber(today);
-  if (diff < -1) return { label: `${-diff} days late`, tone: 'overdue' };
-  if (diff === -1) return { label: 'Yesterday', tone: 'overdue' };
-  if (diff === 0) return { label: 'Today', tone: 'today' };
-  if (diff === 1) return { label: 'Tomorrow', tone: 'soon' };
+  if (diff < -1) return { label: withTime(`${-diff} days late`), tone: 'overdue' };
+  if (diff === -1) return { label: withTime('Yesterday'), tone: 'overdue' };
+  if (diff === 0) return { label: withTime('Today'), tone: at && now && at < now ? 'overdue' : 'today' };
+  if (diff === 1) return { label: withTime('Tomorrow'), tone: 'soon' };
   const d = new Date(dayNumber(due) * 86_400_000);
-  if (diff < 7) return { label: d.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' }), tone: 'soon' };
-  return { label: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }), tone: 'later' };
+  if (diff < 7) return { label: withTime(d.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' })), tone: 'soon' };
+  return { label: withTime(d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })), tone: 'later' };
+}
+
+/** dueInfo for a task, at the current home date and time. */
+export function taskDue(task: Pick<Task, 'due' | 'due_time'>, now: Date = new Date()): { label: string; tone: DueTone } {
+  return dueInfo(task.due, isoDay(now), task.due_time, clockTime(now));
 }
 
 const PRIORITY_RANK = { high: 0, normal: 1, low: 2 } as const;
 
-/** Open tasks first; then due date ascending (no date last), priority, creation. */
+/** Open tasks first; then due date ascending (no date last), time on that day (untimed last), priority, creation. */
 export function sortTasks(tasks: Task[]): Task[] {
   return [...tasks].sort(
     (a, b) =>
       Number(a.done) - Number(b.done) ||
       (a.due ?? '9999').localeCompare(b.due ?? '9999') ||
+      (validTime(a.due_time) ?? '99:99').localeCompare(validTime(b.due_time) ?? '99:99') ||
       PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
       a.created_at.localeCompare(b.created_at),
   );

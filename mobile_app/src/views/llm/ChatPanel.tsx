@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Icon } from '../../components/icons';
+import { Markdown } from '../../components/Markdown';
 import { Badge, Button, Card, ErrorNote, IconButton, Toggle, cx, inputClass } from '../../components/ui';
 import { HubError } from '../../lib/api';
 import {
@@ -443,8 +444,8 @@ ${text}` : text));
                 <p className="text-[12px] text-amber-400">failover: {t.attempts.join(' -> ')}</p>
               )}
               {(t.content || t.pending) && (
-                <div className="whitespace-pre-wrap break-words rounded-[20px] rounded-bl-md bg-ink-900 px-4 py-2.5 text-[15px] leading-relaxed ring-1 ring-inset ring-ink-800 text-ink-100">
-                  {t.content}
+                <div className="min-w-0 break-words rounded-[20px] rounded-bl-md bg-ink-900 px-4 py-2.5 text-[15px] leading-relaxed ring-1 ring-inset ring-ink-800 text-ink-100">
+                  {t.content && <Markdown text={t.content} className="text-ink-100" />}
                   {t.pending && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-signal align-middle" />}
                 </div>
               )}
