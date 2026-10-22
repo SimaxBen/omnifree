@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HubClient } from '../api';
 import {
+  allocateCents,
+  autofillShares,
+  computeShares,
   customSharesError,
   debtDetail,
   debtHeadline,
@@ -10,14 +13,18 @@ import {
   myBalanceLabel,
   normaliseMerchant,
   normalizeDebts,
+  pairLabel,
+  percentShares,
   ruleActionLabel,
   ruleSuggestion,
+  shareDebtLines,
   staleLent,
   voiceDebtLine,
   voiceDebtUndo,
   voiceDebtsOf,
 } from '../moneyTools';
 import type { Debt } from '../moneyTypes';
+import type { ShareDraft } from '../moneyTools';
 
 function debt(over: Partial<Debt> = {}): Debt {
   return {
@@ -78,7 +85,7 @@ describe('debts helpers', () => {
 
 describe('split helpers', () => {
   it('splits in cents like the hub and checks custom shares', () => {
-    expect(equalShares(100, ['a', 'b', 'c'])).toEqual({ a: 33.34, b: 33.33, c: 33.33 });
+    expect(equalShares(100, ['a', 'b', 'c'])).toEqual({ a: 33.33, b: 33.33, c: 33.34 });
     expect(equalShares(10, [])).toEqual({});
     expect(customSharesError(60, { a: 10, b: 50 })).toBeNull();
     expect(customSharesError(60, { a: 10, b: 20 })).toBe('30.00 left to assign.');
@@ -89,6 +96,85 @@ describe('split helpers', () => {
     expect(myBalanceLabel(120, 'MAD')).toBe('You are owed 120.00 MAD');
     expect(myBalanceLabel(-45.5, 'MAD')).toBe('You owe 45.50 MAD');
     expect(myBalanceLabel(0.001, 'MAD')).toBe('All settled');
+  });
+});
+
+describe('share calculator', () => {
+  const order = ['me', 'ay', 'sa'];
+  const draft = (over: Partial<ShareDraft> = {}): ShareDraft => ({
+    amount: 100, mode: 'equal', order, included: order, payer: 'me', amounts: {}, percents: {}, ...over,
+  });
+
+  it('rounds to the cent and gives the leftover cents to the payer, else the last member', () => {
+    expect(allocateCents(10000, [['me', 1], ['ay', 1], ['sa', 1]], 'ay')).toEqual({ me: 3333, ay: 3334, sa: 3333 });
+    expect(allocateCents(10000, [['me', 1], ['ay', 1], ['sa', 1]], 'zz')).toEqual({ me: 3333, ay: 3333, sa: 3334 });
+    expect(allocateCents(2, [['me', 1], ['ay', 1], ['sa', 1]], null)).toEqual({ me: 0, ay: 0, sa: 2 });
+    expect(allocateCents(500, [['me', 0], ['ay', 0]], 'me')).toEqual({});
+    expect(equalShares(100, ['a', 'b', 'c'], 'b')).toEqual({ a: 33.33, b: 33.34, c: 33.33 });
+    expect(equalShares(0.05, ['a', 'b'], 'a')).toEqual({ a: 0.03, b: 0.02 });
+    expect(equalShares(10.01, ['a', 'b'])).toEqual({ a: 5, b: 5.01 });
+    const shares = equalShares(1.115 * 3, ['a', 'b', 'c'], 'c');
+    expect(Math.round(Object.values(shares).reduce((a, v) => a + v, 0) * 100)).toBe(Math.round(1.115 * 3 * 100));
+  });
+
+  it('turns percentages into amounts that add up exactly', () => {
+    expect(percentShares(10, { me: 33.33, ay: 33.33, sa: 33.34 }, order, 'ay')).toEqual({ me: 3.33, ay: 3.34, sa: 3.33 });
+    expect(percentShares(10, { me: 33.33, ay: 33.33, sa: 33.34 }, order, null)).toEqual({ me: 3.33, ay: 3.33, sa: 3.34 });
+    expect(percentShares(200, { me: 70, ay: 30 }, order)).toEqual({ me: 140, ay: 60 });
+    expect(percentShares(99.99, { me: 50, ay: 50 }, order, 'me')).toEqual({ me: 50, ay: 49.99 });
+  });
+
+  it('equal mode: only the included members, payer gets the cent', () => {
+    expect(computeShares(draft({ payer: 'sa' }))).toEqual({ shares: { me: 33.33, ay: 33.33, sa: 33.34 }, remaining: 0, unit: null, error: null });
+    expect(computeShares(draft({ included: ['me', 'sa'] })).shares).toEqual({ me: 50, sa: 50 });
+    expect(computeShares(draft({ included: [] })).error).toBe('Pick who shares it.');
+    expect(computeShares(draft({ amount: 0 })).error).toBe('Enter the amount.');
+  });
+
+  it('custom amounts: remaining counter and validation', () => {
+    const half = computeShares(draft({ mode: 'custom', amounts: { me: 50, ay: 20 } }));
+    expect(half).toMatchObject({ remaining: 30, unit: 'money', error: '30.00 left to assign.' });
+    const over = computeShares(draft({ mode: 'custom', amounts: { me: 50, ay: 40, sa: 20 } }));
+    expect(over).toMatchObject({ remaining: -10, error: '10.00 too much.' });
+    // A left-out member's typed amount does not count.
+    const ok = computeShares(draft({ mode: 'custom', included: ['me', 'ay'], amounts: { me: 50, ay: 50, sa: 99 } }));
+    expect(ok).toEqual({ shares: { me: 50, ay: 50 }, remaining: 0, unit: 'money', error: null });
+    expect(computeShares(draft({ mode: 'custom', amounts: { me: -1, ay: 101 } })).error).toBe('Shares cannot be negative.');
+    expect(computeShares(draft({ mode: 'custom', amounts: {} })).error).toBe('Give at least one person a share.');
+  });
+
+  it('custom %: remaining in percent, amounts once it adds up', () => {
+    const part = computeShares(draft({ mode: 'percent', amount: 10, percents: { me: 50, ay: 25 } }));
+    expect(part).toMatchObject({ remaining: 25, unit: 'percent', error: '25.00 % left to assign.', shares: { me: 5, ay: 2.5 } });
+    const full = computeShares(draft({ mode: 'percent', amount: 10, payer: 'ay', percents: { me: 33.33, ay: 33.33, sa: 33.34 } }));
+    expect(full).toEqual({ shares: { me: 3.33, ay: 3.34, sa: 3.33 }, remaining: 0, unit: 'percent', error: null });
+    expect(computeShares(draft({ mode: 'percent', percents: { me: 120 } })).error).toBe('Percentages go from 0 to 100.');
+    expect(computeShares(draft({ mode: 'percent', percents: { me: 60, ay: 60 } })).error).toBe('20.00 % too much.');
+  });
+
+  it('auto-fills the remainder', () => {
+    // Empty fields share what is left (cent to the payer).
+    expect(autofillShares(draft({ mode: 'custom', amounts: { me: 40, ay: null, sa: null } }))).toEqual({ me: 40, ay: 30, sa: 30 });
+    expect(autofillShares(draft({ mode: 'custom', amount: 10, payer: 'sa', amounts: { me: 0.01 } }))).toEqual({ me: 0.01, ay: 4.99, sa: 5 });
+    // Nothing empty: on top of the payer, else the last included member.
+    expect(autofillShares(draft({ mode: 'custom', amounts: { me: 40, ay: 30, sa: 20 } }))).toEqual({ me: 50, ay: 30, sa: 20 });
+    expect(autofillShares(draft({ mode: 'custom', payer: 'zz', included: ['me', 'ay'], amounts: { me: 40, ay: 30 } }))).toEqual({ me: 40, ay: 60 });
+    expect(autofillShares(draft({ mode: 'percent', percents: { me: 50 } }))).toEqual({ me: 50, ay: 25, sa: 25 });
+    expect(autofillShares(draft({ mode: 'percent', percents: { me: 0, ay: 0, sa: 0 } }))).toEqual({ me: 33.34, ay: 33.33, sa: 33.33 });
+    // Nothing to fill, or already too much, or equal mode.
+    expect(autofillShares(draft({ mode: 'custom', amounts: { me: 100 } }))).toBeNull();
+    expect(autofillShares(draft({ mode: 'custom', amounts: { me: 120 } }))).toBeNull();
+    expect(autofillShares(draft())).toBeNull();
+  });
+
+  it('says what goes on the Debts page', () => {
+    const names = { me: 'You', ay: 'Ayoub', sa: 'Sara' };
+    expect(shareDebtLines({ me: 20, ay: 20, sa: 20 }, 'me', 'me', names)).toEqual(['Ayoub will owe you 20.00', 'Sara will owe you 20.00']);
+    expect(shareDebtLines({ me: 45, sa: 45 }, 'sa', 'me', names)).toEqual(['You will owe Sara 45.00']);
+    expect(shareDebtLines({ ay: 10, sa: 10 }, 'sa', 'me', names)).toEqual([]);
+    expect(pairLabel({ name: 'Ayoub', net: 15 }, 'MAD')).toBe('Ayoub owes you 15.00 MAD');
+    expect(pairLabel({ name: 'Sara', net: -45 }, 'MAD')).toBe('You owe Sara 45.00 MAD');
+    expect(pairLabel({ name: 'Karim', net: 0.001 }, 'MAD')).toBe('All settled with Karim');
   });
 });
 
@@ -189,12 +275,21 @@ describe('voice debt undo', () => {
       { type: 'lend', action: 'duplicate', person: 'Ayoub', amount: 200, currency: 'MAD', debts: [debt({ id: 'old' })], payment_ids: [], applied: 0, unapplied: 0 },
       { type: 'repaid', action: 'unmatched', person: 'Sara', amount: 20, currency: 'MAD', debts: [], applied: 0, unapplied: 20 },
       { type: 'repay', action: 'repaid', person: 'Omar', amount: 5, currency: 'MAD', debts: [debt({ id: 'o1' })], applied: 5, unapplied: 0 },
+      {
+        type: 'split', action: 'created', person: 'Ayoub, Sara', amount: 300, currency: 'MAD', debts: [debt({ id: 'linked', origin: 'split' })],
+        payment_ids: [], applied: 0, unapplied: 0, split: { group_id: 'g1', group_name: 'Dîner', entry_id: 'e1', group_created: true, my_share: 100 },
+      },
+      { type: 'split', action: 'duplicate', person: 'Ayoub', amount: 300, currency: 'MAD', debts: [], applied: 0, unapplied: 0 },
     ]);
     expect(ops).toEqual([
       { kind: 'debt', id: 'new' },
       { kind: 'payment', debtId: 'k1', paymentId: 'p1' },
       { kind: 'payment', debtId: 'k2', paymentId: 'p2' },
+      { kind: 'split', groupId: 'g1', entryId: 'e1', groupCreated: true },
     ]);
+    expect(
+      voiceDebtLine({ type: 'split', action: 'created', person: 'Ayoub, Sara', unapplied: 0, currency: 'MAD', split: { group_id: 'g1', group_name: 'Dîner', entry_id: 'e1', group_created: true, my_share: 100 } }),
+    ).toBe('Shared with Ayoub, Sara in Dîner (new group)');
     expect(voiceDebtUndo([])).toEqual([]);
   });
 });

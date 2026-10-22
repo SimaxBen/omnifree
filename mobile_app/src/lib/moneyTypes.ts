@@ -59,7 +59,11 @@ export interface Debt {
   note: string | null;
   settled: boolean;
   settled_at: string | null;
+  /** 'split': a row derived from a split group (see `split`); its amount and person are changed in the group. */
   origin: string | null;
+  split_group_id?: string | null;
+  split_member_id?: string | null;
+  split?: DebtSplitLink | null;
   paid: number;
   remaining: number;
   overdue: boolean;
@@ -67,6 +71,23 @@ export interface Debt {
   payments: DebtPayment[];
   created_at: string;
   updated_at: string;
+}
+
+/** One line behind a split-linked debt: + they owe me more, - I owe them (or they paid me back). */
+export interface SplitPairItem {
+  entry_id: string;
+  date: string;
+  kind: 'expense' | 'settlement';
+  description: string;
+  total: number;
+  effect: number;
+}
+
+export interface DebtSplitLink {
+  group_id: string;
+  member_id: string | null;
+  group_name: string;
+  items: SplitPairItem[];
 }
 
 export interface DebtCreate {
@@ -95,9 +116,9 @@ export interface DebtListing {
   summary: DebtSummary;
 }
 
-/** One loan or repayment heard by `POST /money/voice`. */
+/** One loan or repayment heard by `POST /money/voice` (or a bill shared equally: `type: 'split'`). */
 export interface VoiceDebtOutcome {
-  type: 'lend' | 'borrow' | 'repaid' | 'repay';
+  type: 'lend' | 'borrow' | 'repaid' | 'repay' | 'split';
   /** `duplicate`: the same loan or repayment was stored from another recording a moment ago; nothing new stored. */
   action: 'created' | 'repaid' | 'unmatched' | 'duplicate';
   person: string;
@@ -108,6 +129,8 @@ export interface VoiceDebtOutcome {
   payment_ids?: string[];
   applied: number;
   unapplied: number;
+  /** `type: 'split'`: where the shared expense went (what Undo removes). */
+  split?: { group_id: string; group_name: string; entry_id: string; group_created: boolean; my_share: number };
 }
 
 // ------------------------------------------------------------------ split groups (/money/splits)
@@ -118,6 +141,8 @@ export interface SplitMember {
   me: boolean;
 }
 
+export type SplitMode = 'equal' | 'custom' | 'percent';
+
 export interface SplitEntry {
   id: string;
   group_id: string;
@@ -126,12 +151,16 @@ export interface SplitEntry {
   description: string;
   amount: number;
   paid_by: string;
-  split: 'equal' | 'custom';
+  split: SplitMode;
   shares: Record<string, number>;
+  /** A percentage split keeps its percentages (the shares are the amounts). */
+  percents?: Record<string, number> | null;
   category: ExpenseCategory;
   note: string | null;
   /** The owner's-share expense in app_expenses (whoever paid; null when the owner has no share). */
   expense_id: string | null;
+  /** 'voice' for an expense or repayment heard by voice, 'manual' for one typed in, null for older ones. */
+  origin?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -172,9 +201,26 @@ export interface SettleSuggestion {
   amount: number;
 }
 
+/** Between the owner and one member, from what links them directly: the Debts row of this group and person. */
+export interface SplitPair {
+  member: string;
+  name: string;
+  /** Positive: they owe me; negative: I owe them. */
+  net: number;
+  direction: 'owes_me' | 'i_owe' | 'settled';
+  owes_me: number;
+  i_owe: number;
+  paid_me: number;
+  i_paid: number;
+  linked: boolean;
+  debt_id: string | null;
+  items: SplitPairItem[];
+}
+
 export interface SplitGroup extends Omit<SplitGroupSummary, 'settled'> {
   entries: SplitEntry[];
   balances: SplitBalance[];
+  pairs?: SplitPair[];
   settle: SettleSuggestion[];
 }
 
@@ -197,9 +243,10 @@ export interface SplitEntryCreate {
   amount: number;
   paid_by: string;
   date?: string;
-  split: 'equal' | 'custom';
+  split: SplitMode;
   participants?: string[];
   shares?: Record<string, number>;
+  percents?: Record<string, number>;
   category?: ExpenseCategory;
   note?: string | null;
 }

@@ -219,7 +219,12 @@ export default function VoiceSheet({
       // Repayments first: deleting a loan also deletes its repayments.
       await Promise.all(debtUndo.flatMap((op) => (op.kind === 'payment' ? [client.deleteDebtPayment(op.debtId, op.paymentId)] : [])));
       await Promise.all(debtUndo.flatMap((op) => (op.kind === 'debt' ? [client.deleteDebt(op.id)] : [])));
-      announce('money');
+      // Shared expenses heard by voice: the expense, then the group when the memo created it.
+      for (const op of debtUndo) {
+        if (op.kind !== 'split') continue;
+        await (op.groupCreated ? client.deleteSplitGroup(op.groupId) : client.deleteSplitEntry(op.groupId, op.entryId));
+      }
+      announce('money', 'expenses');
       notify(`Removed ${debtUndo.length} debt record${debtUndo.length === 1 ? '' : 's'}`, 'ok');
       setDebts([]);
       if (!result?.note && !tasks.length && !expenses.length && !incomes.length) again();
