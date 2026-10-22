@@ -84,7 +84,7 @@ def test_catalog_entries_are_well_formed() -> None:
     ("NVIDIA_API_KEY", "nvapi-" + "Q" * 64),
     ("OCI_TENANCY_OCID", "ocid1.tenancy.oc1..aaaabbbbcccc"),
     ("OCI_FINGERPRINT", ":".join(["ab"] * 16)),
-    ("TAILSCALE_API_KEY", "tskey-api-kAbC123-XyZ"),
+    ("TAILSCALE_API_KEY", "tskey-api-" + "kAbC123-XyZ"),  # split: a fake key, not for secret scanners
     ("AWS_ACCESS_KEY_ID", "AKIA" + "ABCDEFGHIJKLMNOP"),
     ("TURSO_DATABASE_URL", "libsql://omnifree-me.turso.io"),
 ])
