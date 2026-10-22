@@ -22,7 +22,7 @@ import json
 import time
 from datetime import datetime, timezone
 from typing import Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from core.interfaces import (
     CronAdapter,
@@ -34,6 +34,8 @@ from core.interfaces import (
 )
 
 NAME_HEADER = "X-Omnifree-Job"
+# Header values must be ASCII: the job name is percent-encoded ("Rappels des tâches" -> "Rappels des t%C3%A2ches").
+_NAME_SAFE = " ()+,-./:;=@[]_~'!*&"
 _FORWARD = "Upstash-Forward-"
 
 
@@ -75,7 +77,7 @@ class QStashCronAdapter(CronAdapter):
     def _job(self, schedule: dict[str, Any]) -> CronJob:
         raw_headers = schedule.get("header") or {}
         headers = {str(k): (v[0] if isinstance(v, list) and v else str(v)) for k, v in raw_headers.items()}
-        name = next((v for k, v in headers.items() if k.lower() == NAME_HEADER.lower()), None)
+        name = next((unquote(v) for k, v in headers.items() if k.lower() == NAME_HEADER.lower()), None)
         headers = {k: v for k, v in headers.items() if k.lower() != NAME_HEADER.lower()}
         body = schedule.get("body")
         return CronJob(
@@ -113,7 +115,7 @@ class QStashCronAdapter(CronAdapter):
         headers = {
             "Upstash-Cron": job.schedule,
             "Upstash-Method": job.method.upper(),
-            **self._forward({**job.headers, NAME_HEADER: job.name}),
+            **self._forward({**job.headers, NAME_HEADER: quote(job.name, safe=_NAME_SAFE)}),
         }
         if job.id:
             headers["Upstash-Schedule-Id"] = job.id
@@ -137,7 +139,7 @@ class QStashCronAdapter(CronAdapter):
     async def trigger(self, job_id: str) -> None:
         job = await self.get(job_id)
         headers = {"Upstash-Method": job.method.upper(),
-                   **self._forward({**job.headers, NAME_HEADER: job.name})}
+                   **self._forward({**job.headers, NAME_HEADER: quote(job.name, safe=_NAME_SAFE)})}
         await self._call("POST", f"/v2/publish/{job.target}", headers=headers,
                          content=(job.body or "").encode("utf-8"))
 
