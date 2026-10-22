@@ -65,6 +65,7 @@ AccountKind = Literal["cash", "bank", "savings", "card", "other"]
 SERIES_MONTHS = 6
 FORECAST_HISTORY_MONTHS = 3  # past months whose day-to-day spend seeds the forecast early in the month
 FORECAST_PRIOR_DAYS = 10  # the history weighs like this many days, fading as the month goes on
+SUB_PAY_WINDOW = {"weekly": 3, "yearly": 20}  # days between a subscription charge and the expense that pays it
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_incomes ("
@@ -420,11 +421,14 @@ def build_overview(
     accounts: list[dict[str, Any]],
     budgets: list[dict[str, Any]],
     extra_recurring: list[dict[str, Any]] | None = None,
+    subscriptions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The month's figures in MAD (pure: rows in, JSON out). Rows are the ``*_out`` shapes.
 
     ``extra_recurring``: weekly/yearly subscription charges falling in ``month`` (``id, name, amount, currency,
-    on``); they only feed ``upcoming`` and the forecast, the expense that pays them counts in the totals.
+    on``, optional ``key, frequency``); they only feed ``upcoming`` and the forecast, the expense that pays them
+    counts in the totals. ``subscriptions``: the active weekly/yearly subscriptions (``key, amount, currency``;
+    default: the ones of ``extra_recurring``); their expenses are not day-to-day spend for the forecast.
     """
     months = [month_shift(month, -i) for i in range(SERIES_MONTHS - 1, -1, -1)]
     unconverted: set[str] = set()
@@ -440,7 +444,13 @@ def build_overview(
     spent_by: dict[str, float] = {m: 0.0 for m in months}
     variable_by: dict[str, float] = {m: 0.0 for m in months}  # expenses that pay no recurring charge
     paid = paid_charges(months, recurring, expenses, mad)
-    paying = set(paid.values())
+    extra = [{**x, "amount_mad": mad(x["amount"], x["currency"])} for x in extra_recurring or []
+             if str(x["on"])[:7] == month]
+    if subscriptions is None:
+        subscriptions = list({x["id"]: x for x in extra}.values())
+    sub_paying, extra_paid = paid_subscriptions(subscriptions, extra, expenses, mad, set(paid.values()))
+    extra = [x for i, x in enumerate(extra) if i not in extra_paid]  # paid charges are in the totals already
+    paying = set(paid.values()) | sub_paying
     for idx, e in enumerate(expenses):
         m = str(e["date"])[:7]
         if m in spent_by:
@@ -516,8 +526,6 @@ def build_overview(
          "currency": i["currency"], "amount_mad": i["amount_mad"], "date": i["on"]}
         for i in month_incomes if i["recurring"] and upcoming(i["on"])
     ]
-    extra = [{**x, "amount_mad": mad(x["amount"], x["currency"])} for x in extra_recurring or []
-             if str(x["on"])[:7] == month]
     upcoming_items += [
         {"kind": "expense", "id": x["id"], "name": x["name"], "amount": x["amount"], "currency": x["currency"],
          "amount_mad": x["amount_mad"], "date": x["on"]}
@@ -584,6 +592,44 @@ def paid_charges(
     return out
 
 
+def paid_subscriptions(
+    subscriptions: list[dict[str, Any]], extra: list[dict[str, Any]], expenses: list[dict[str, Any]], mad: Any,
+    used: set[int],
+) -> tuple[set[int], set[int]]:
+    """``(indexes in expenses that pay a weekly/yearly subscription, indexes in extra of charges already paid)``.
+
+    An expense pays a subscription when the merchant keys match and the amounts (in MAD) are within 15 %
+    (expenses in ``used`` already pay a monthly charge); a charge of ``extra`` is paid by one of those expenses
+    dated within :data:`SUB_PAY_WINDOW` days of it, each expense paying at most one charge.
+    """
+    targets: dict[str, list[float]] = {}
+    for sub in subscriptions:
+        if key := str(sub.get("key") or merchant_key(sub.get("name"))):
+            targets.setdefault(key, []).append(mad(float(sub["amount"]), sub["currency"]))
+    if not targets:
+        return set(), set()
+    paying: dict[int, tuple[str, date]] = {}
+    for idx, e in enumerate(expenses):
+        key = merchant_key(e.get("merchant"))
+        if idx in used or key not in targets:
+            continue
+        value = mad(float(e["total"]), e["currency"])
+        if any(amount_close(value, t) for t in targets[key]):
+            paying[idx] = (key, date.fromisoformat(str(e["date"])[:10]))
+    paid: set[int] = set()
+    consumed: set[int] = set()
+    for i, x in sorted(enumerate(extra), key=lambda p: str(p[1]["on"])):
+        key = str(x.get("key") or merchant_key(x.get("name")))
+        on = date.fromisoformat(str(x["on"])[:10])
+        window = SUB_PAY_WINDOW.get(str(x.get("frequency") or "weekly"), 3)
+        for idx, (k, day) in paying.items():
+            if idx not in consumed and k == key and abs((day - on).days) <= window:
+                paid.add(i)
+                consumed.add(idx)
+                break
+    return set(paying), paid
+
+
 def build_forecast(
     month: str,
     today: date,
@@ -596,8 +642,8 @@ def build_forecast(
 ) -> dict[str, Any]:
     """End of ``month`` in MAD: spent so far + recurring still to come + daily variable spend x days left.
 
-    ``charges``: the month's unpaid monthly charges ``(date, MAD)`` (already in the totals); ``extra``: weekly or
-    yearly subscription charges of the month (not in the totals: only the ones still to come count). The daily
+    ``charges``: the month's unpaid monthly charges ``(date, MAD)`` (already in the totals); ``extra``: the month's
+    unpaid weekly or yearly subscription charges (not in the totals: only the ones still to come count). The daily
     average is this month's variable spend (expenses that pay no recurring charge) per elapsed day, blended
     with the average of the last months, which weighs like :data:`FORECAST_PRIOR_DAYS` days and fades as days
     pass. Past months answer their actual figures; a future month is projected from the history only.
@@ -664,7 +710,9 @@ async def overview_for(db: AppDB, month: str, today: date) -> dict[str, Any]:
     account_rows = await db.fetch("SELECT * FROM app_accounts ORDER BY name")
     budget_rows = await db.fetch("SELECT * FROM app_budgets ORDER BY category")
     rates = await get_rates(db)
-    from hub_api.money_intel import subscription_charges  # weekly/yearly subscriptions (that module imports this one)
+    from hub_api.money_intel import subscription_overview  # weekly/yearly subscriptions (that module imports this one)
+
+    subs, charges = await subscription_overview(db, month)
 
     return build_overview(
         month,
@@ -680,7 +728,8 @@ async def overview_for(db: AppDB, month: str, today: date) -> dict[str, Any]:
         recurring=[_recurring_out(r) for r in recurring_rows],
         accounts=[_account_out(r) for r in account_rows],
         budgets=[_budget_out(r) for r in budget_rows],
-        extra_recurring=await subscription_charges(db, month),
+        extra_recurring=charges,
+        subscriptions=subs,
     )
 
 
@@ -932,6 +981,12 @@ async def patch_recurring(item_id: str, body: RecurringPatch, db: AppDB = Depend
 async def delete_recurring(item_id: str, db: AppDB = Depends(_db)) -> Response:
     await _get(db, "app_recurring", "id", item_id, "recurring expense")
     await db.execute("DELETE FROM app_recurring WHERE id = ?", [item_id])
+    from hub_api.money_intel import SUBS_TABLE  # that module imports this one
+
+    try:  # an accepted subscription behind this charge: forget it, so the merchant can be suggested again
+        await db.execute(f"DELETE FROM {SUBS_TABLE} WHERE recurring_id = ?", [item_id])
+    except Exception as exc:  # noqa: BLE001 - no subscriptions table yet
+        log.debug("no subscription to forget for %s: %r", item_id, exc)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

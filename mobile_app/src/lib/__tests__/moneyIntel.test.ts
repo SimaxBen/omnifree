@@ -12,8 +12,9 @@ import {
   normalizeGoals,
   normalizeSuggestions,
   ordinal,
+  splitTracked,
 } from '../moneyIntel';
-import type { MoneyForecast } from '../types';
+import type { MoneyForecast, TrackedSubscription } from '../types';
 
 const forecast: MoneyForecast = {
   projected_spent: 4345,
@@ -133,5 +134,25 @@ describe('client: subscriptions and goals', () => {
     ]);
     expect(calls[3].json).toEqual({ key: 'claude' });
     expect(calls[9].json).toEqual({ amount: -50, note: null });
+  });
+});
+
+describe('splitTracked', () => {
+  const row = (id: string, name: string, status: TrackedSubscription['status'], active: boolean): TrackedSubscription => ({
+    id, key: id, name, status, cadence: 'weekly', amount: 50, currency: 'MAD', category: 'bills', anchor_date: null,
+    next_date: null, active, recurring_id: null, created_at: 'x', updated_at: 'x',
+  });
+
+  it('keeps tracked weekly / yearly ones and the restorable dismissals apart', () => {
+    const out = splitTracked([
+      row('a', 'Tram', 'accepted', true),
+      row('b', 'Netflix', 'accepted', false), // monthly: shown in Recurring
+      row('c', 'Spotify', 'dismissed', false),
+      row('d', 'Basic Fit', 'accepted', true),
+      row('e', 'Amazon', 'dismissed', false),
+    ]);
+    expect(out.tracked.map((t) => t.name)).toEqual(['Basic Fit', 'Tram']);
+    expect(out.dismissed.map((t) => t.name)).toEqual(['Amazon', 'Spotify']);
+    expect(splitTracked([])).toEqual({ tracked: [], dismissed: [] });
   });
 });

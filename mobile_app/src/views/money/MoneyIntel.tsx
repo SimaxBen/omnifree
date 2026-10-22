@@ -16,6 +16,7 @@ import {
   forecastHeadline,
   goalPaceLabel,
   goalPercent,
+  splitTracked,
 } from '../../lib/moneyIntel';
 import type { MoneyAccount, MoneyForecast, SavingsGoal, SubscriptionSuggestion } from '../../lib/types';
 
@@ -39,14 +40,16 @@ export function ForecastLine({ forecast, onOpen }: { forecast: MoneyForecast; on
     <button
       type="button"
       onClick={onOpen}
-      className="press mt-4 flex min-h-[44px] w-full items-center gap-2 rounded-row bg-ink-850 px-3 text-left ring-1 ring-inset ring-ink-800"
+      className="press mt-4 flex min-h-[44px] w-full items-center gap-2 rounded-row bg-ink-850 px-3 py-2 text-left ring-1 ring-inset ring-ink-800"
       aria-label={`Forecast: ${forecastHeadline(forecast)}. How is this computed?`}
     >
-      <Icon name="spark" size={16} className={short ? 'text-danger-400' : 'text-signal'} />
-      <span className={cx('min-w-0 flex-1 truncate text-[14px] font-semibold tabular-nums', short ? 'text-danger-400' : 'text-ink-100')}>
-        {forecastHeadline(forecast)}
+      <Icon name="spark" size={16} className={cx('shrink-0', short ? 'text-danger-400' : 'text-signal')} />
+      <span className="min-w-0 flex-1">
+        <span className={cx('block text-[14px] font-semibold leading-snug tabular-nums', short ? 'text-danger-400' : 'text-ink-100')}>
+          {forecastHeadline(forecast)}
+        </span>
+        <span className="block text-[12px] text-ink-500">{confidenceLabel(forecast.confidence)}</span>
       </span>
-      <span className="shrink-0 text-[12px] text-ink-500">{confidenceLabel(forecast.confidence)}</span>
       <Icon name="right" size={16} className="shrink-0 text-ink-500" />
     </button>
   );
@@ -130,16 +133,20 @@ function SuggestionCard({ s, busy, onAccept, onDismiss, i }: { s: SubscriptionSu
   );
 }
 
-/** Suggestions from the expenses + the weekly / yearly subscriptions already tracked. Current month only. */
+/** Suggestions from the expenses + the weekly / yearly subscriptions already tracked. Current month only.
+ *  The two load apart: a failed suggestions scan never hides what is already tracked. */
 export function SubscriptionsSection({ i }: { i: number }) {
   const { client, notify } = useHub();
   const confirm = useConfirm();
-  const data = useHubData(async (c, signal) => {
-    const [suggestions, tracked] = await Promise.all([c.subscriptionSuggestions(signal), c.trackedSubscriptions(signal)]);
-    return { suggestions, tracked: tracked.filter((t) => t.status === 'accepted' && t.active) };
-  }, []);
-  useTopic(['money', 'expenses'], data.reload);
+  const suggestions = useHubData((c, signal) => c.subscriptionSuggestions(signal), []);
+  const trackedData = useHubData(async (c, signal) => splitTracked(await c.trackedSubscriptions(signal)), []);
+  const reload = () => {
+    suggestions.reload();
+    trackedData.reload();
+  };
+  useTopic(['money', 'expenses'], reload);
   const [busy, setBusy] = useState<string | null>(null);
+  const [showDismissed, setShowDismissed] = useState(false);
 
   const act = async (key: string, fn: () => Promise<unknown>, done: string) => {
     setBusy(key);
@@ -154,11 +161,21 @@ export function SubscriptionsSection({ i }: { i: number }) {
     }
   };
 
-  const list = data.data;
-  if (!list || (!list.suggestions.length && !list.tracked.length)) return null;
+  const list = {
+    suggestions: suggestions.data ?? [],
+    tracked: trackedData.data?.tracked ?? [],
+    dismissed: trackedData.data?.dismissed ?? [],
+  };
+  const error = suggestions.error ?? trackedData.error;
+  if (!error && !list.suggestions.length && !list.tracked.length && !list.dismissed.length) return null;
   return (
     <section className="rise" style={riseStyle(i)}>
       <SectionTitle>Subscriptions</SectionTitle>
+      {error && (
+        <div className="mb-2">
+          <ErrorNote message={suggestions.error ? `Could not scan for subscriptions: ${error}` : error} onRetry={reload} />
+        </div>
+      )}
       {list.suggestions.length > 0 && (
         <>
           <p className="px-1 pb-2 text-[13px] text-ink-400">Spotted in your expenses. Track them to get a push 2 days before each charge.</p>
@@ -170,7 +187,7 @@ export function SubscriptionsSection({ i }: { i: number }) {
                 i={idx}
                 busy={busy === s.key}
                 onAccept={() => void act(s.key, () => client.acceptSubscription({ key: s.key }), `${s.name} is tracked`)}
-                onDismiss={() => void act(s.key, () => client.dismissSubscription(s.key), `${s.name} won’t be suggested again`)}
+                onDismiss={() => void act(s.key, () => client.dismissSubscription(s.key), `${s.name} hidden: restore it under “Not subscriptions”`)}
               />
             ))}
           </div>
@@ -200,6 +217,36 @@ export function SubscriptionsSection({ i }: { i: number }) {
               />
             </div>
           ))}
+        </div>
+      )}
+      {list.dismissed.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowDismissed((v) => !v)}
+            aria-expanded={showDismissed}
+            className="press flex min-h-[44px] w-full items-center gap-2 px-1 text-left text-[13px] text-ink-400"
+          >
+            <Icon name="right" size={14} className={cx('shrink-0 transition-transform', showDismissed && 'rotate-90')} />
+            Not subscriptions ({list.dismissed.length})
+          </button>
+          {showDismissed && (
+            <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-900 ring-1 ring-inset ring-ink-800">
+              {list.dismissed.map((t) => (
+                <div key={t.id} className="flex min-h-[52px] items-center gap-3 px-4 py-2">
+                  <span className="min-w-0 flex-1 truncate text-[14px] text-ink-300">{t.name}</span>
+                  <Button
+                    variant="ghost"
+                    icon="undo"
+                    disabled={busy === t.id}
+                    onClick={() => void act(t.id, () => client.forgetSubscription(t.id), `${t.name} can be suggested again`)}
+                  >
+                    Restore
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </section>

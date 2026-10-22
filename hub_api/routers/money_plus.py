@@ -27,6 +27,7 @@ from hub_api.money_intel import (
     cached_rates,
     ensure_schema,
     goal_out,
+    orphaned,
     subscription_out,
     suggestions,
 )
@@ -87,8 +88,9 @@ async def _upsert(db: AppDB, row: dict[str, Any]) -> None:
 @router.post("/subscriptions/accept", status_code=status.HTTP_201_CREATED)
 async def accept_subscription(body: AcceptBody, db: AppDB = Depends(_db)) -> dict[str, Any]:
     today = local_today()
-    existing = await db.fetch_one(f"SELECT status FROM {SUBS_TABLE} WHERE merchant_key = ?", [body.key])
-    if existing and existing["status"] == "accepted":
+    existing = await db.fetch_one(f"SELECT status, recurring_id FROM {SUBS_TABLE} WHERE merchant_key = ?", [body.key])
+    alive = {str(r["id"]) for r in await db.fetch("SELECT id FROM app_recurring")} if existing else set()
+    if existing and existing["status"] == "accepted" and not orphaned(existing, alive):
         raise HTTPException(status.HTTP_409_CONFLICT, detail="this subscription is already tracked")
     found = next((s for s in await suggestions(db, today, include_tracked=True) if s["key"] == body.key), None)
     if found is None:

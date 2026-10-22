@@ -7,6 +7,7 @@ import type {
   SavingsGoal,
   SubscriptionCadence,
   SubscriptionSuggestion,
+  TrackedSubscription,
 } from './types';
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -70,6 +71,16 @@ export function confidenceLabel(c: ForecastConfidence): string {
 
 export function cadenceLabel(c: SubscriptionCadence): string {
   return { weekly: 'Every week', monthly: 'Every month', yearly: 'Every year' }[c];
+}
+
+/** `GET /money/subscriptions` rows: weekly / yearly ones being tracked (monthly ones live in Recurring) and the
+ *  merchants marked "not a subscription" (restorable), each sorted by name. */
+export function splitTracked(rows: TrackedSubscription[]): { tracked: TrackedSubscription[]; dismissed: TrackedSubscription[] } {
+  const byName = (a: TrackedSubscription, b: TrackedSubscription) => a.name.localeCompare(b.name);
+  return {
+    tracked: rows.filter((t) => t.status === 'accepted' && t.active).sort(byName),
+    dismissed: rows.filter((t) => t.status === 'dismissed').sort(byName),
+  };
 }
 
 /** `GET /money/subscriptions/suggestions` items, junk dropped. */

@@ -138,7 +138,7 @@ def _rec(**kw: Any) -> dict[str, Any]:
 
 
 def _ov(today: date, month: str = "2026-10", extra: list[dict[str, Any]] | None = None,
-        expenses: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        expenses: list[dict[str, Any]] | None = None, **kw: Any) -> dict[str, Any]:
     rates = Rates(dict(RATES), "live", "2026-10-20T00:00:00Z")
     expenses = expenses if expenses is not None else [
         _exp("2026-10-05", "Café", 220, category="food"),
@@ -157,7 +157,7 @@ def _ov(today: date, month: str = "2026-10", extra: list[dict[str, Any]] | None 
             _rec(id="net", name="Internet", amount=300.0, category="bills", day=28),
         ],
         accounts=[], budgets=[{"category": "bills", "amount": 1000.0, "currency": "MAD", "updated_at": "x"}],
-        extra_recurring=extra,
+        extra_recurring=extra, **kw,
     )
 
 
@@ -195,6 +195,30 @@ def test_overview_counts_a_paid_charge_once_and_forecasts() -> None:
     future = _ov(TODAY, month="2026-11")["forecast"]
     assert future["remaining_days"] == 30 and future["confidence"] == "low"
     assert future["projected_spent"] == round(3365 + future["daily_avg"] * 30, 2)
+
+
+def test_forecast_counts_weekly_and_yearly_subscriptions_once() -> None:
+    tram = [_exp(d, "Tram card", 50, category="transport") for d in
+            ("2026-09-03", "2026-09-10", "2026-09-17", "2026-09-24", "2026-10-01", "2026-10-08", "2026-10-15", "2026-10-22")]
+    expenses = [_exp("2026-10-05", "Café", 220, category="food"), _exp("2026-09-12", "Marjane", 900, category="groceries"),
+                _exp("2026-09-02", "Anthropic", 200, currency="USD"), *tram]
+    extra = [{"id": "s1", "name": "Tram card", "amount": 50.0, "currency": "MAD", "category": "transport",
+              "on": f"2026-10-{d:02d}", "frequency": "weekly"} for d in (1, 8, 15, 22, 29)]
+    subs = [{"id": "s1", "key": "tram", "name": "Tram card", "amount": 50.0, "currency": "MAD"},
+            {"id": "s2", "key": merchant_key("Anthropic"), "name": "Claude", "amount": 200.0, "currency": "USD"}]
+    ov = _ov(TODAY, extra=extra, expenses=expenses, subscriptions=subs)
+    assert ov["spent"]["expenses"] == 420.0  # the paid tram charges count once, as expenses
+    assert [(u["name"], u["date"]) for u in ov["upcoming"]] == [
+        ("Salaire", "2026-10-25"), ("Internet", "2026-10-28"), ("Tram card", "2026-10-29"),
+    ]  # today's charge was paid this morning
+    fc = ov["forecast"]
+    assert fc["variable_spent"] == 220.0 and fc["daily_avg"] == 10.0  # neither the tram card nor Claude
+    assert fc["history_daily_avg"] == 30.0  # September: Marjane only
+    assert fc["remaining_recurring"] == 350.0  # Internet + the tram charge of the 29th, once
+    assert fc["projected_spent"] == round(fc["spent_so_far"] + 350 + 10 * 9, 2)
+
+    default = _ov(TODAY, extra=extra, expenses=expenses)  # subscriptions default to the ones of extra_recurring
+    assert default["forecast"]["remaining_recurring"] == 350.0 and default["forecast"]["daily_avg"] == 10.0
 
 
 # ------------------------------------------------------------------ subscriptions API
@@ -249,6 +273,22 @@ def test_subscription_suggestions_accept_dismiss(app_hub) -> None:
     assert app_hub.get("/money/subscriptions/suggestions").json()["suggestions"] == []
     assert app_hub.post("/money/subscriptions/accept", json={"key": "spotify"}).status_code == 404
     assert app_hub.post("/money/subscriptions/accept", json={"key": "claude", "currency": "nope"}).status_code == 422
+
+
+def test_deleting_an_accepted_monthly_charge_frees_the_merchant(app_hub) -> None:
+    _seed_netflix(app_hub)
+    out = app_hub.post("/money/subscriptions/accept", json={"key": "netflix"}).json()
+    assert app_hub.delete(f"/money/recurring/{out['recurring']['id']}").status_code == 204
+    assert app_hub.get("/money/subscriptions").json()["subscriptions"] == []  # forgotten with its charge
+    assert "netflix" in [s["key"] for s in app_hub.get("/money/subscriptions/suggestions").json()["suggestions"]]
+    assert app_hub.post("/money/subscriptions/accept", json={"key": "netflix"}).status_code == 201
+
+    # a row already orphaned (charge deleted before this fix) no longer blocks the merchant either
+    fa.sql("DELETE FROM app_recurring")
+    assert "netflix" in [s["key"] for s in app_hub.get("/money/subscriptions/suggestions").json()["suggestions"]]
+    r = app_hub.post("/money/subscriptions/accept", json={"key": "netflix"})
+    assert r.status_code == 201, r.text
+    assert len(app_hub.get("/money/subscriptions").json()["subscriptions"]) == 1
 
 
 # ------------------------------------------------------------------ bills
@@ -318,10 +358,32 @@ def test_budget_alert_respects_prefs_and_never_breaks_the_insert(app_hub, sent, 
     async def boom(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("D1 down")
 
-    monkeypatch.setattr(money_intel, "_check_budget", boom)
+    monkeypatch.setattr(money_intel, "_budget_push", boom)
     app_hub.put("/notify/prefs", json={"prefs": {"spending": True}})
     r = app_hub.post("/expenses", json={"total": 10, "category": "food"})
     assert r.status_code == 201 and sent == []
+
+
+def test_budget_alert_timeout_releases_the_claim(app_hub, sent, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    app_hub.put("/money/budgets/food", json={"amount": 100})
+    real_publish = notifier.publish
+
+    async def slow_publish(*_a: Any, **_k: Any) -> dict[str, Any]:
+        await asyncio.sleep(1)
+        return {}
+
+    monkeypatch.setattr(money_intel, "ALERT_DELIVER_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(notifier, "publish", slow_publish)
+    assert app_hub.post("/expenses", json={"total": 85, "category": "food"}).status_code == 201
+    assert sent == [] and fa.sql("SELECT status, error FROM app_notify_log WHERE key LIKE 'spending:food:%'") == [
+        ("failed", "timed out")]
+
+    monkeypatch.setattr(notifier, "publish", real_publish)  # the next expense retries the same alert
+    assert app_hub.post("/expenses", json={"total": 1, "category": "food"}).status_code == 201
+    assert [m["title"] for m in sent] == ["⚠ Budget restaurants : 86 %"]
+    assert fa.sql("SELECT status FROM app_notify_log WHERE key LIKE 'spending:food:%'") == [("sent",)]
 
 
 def test_budget_alert_without_push_channel_is_silent(app_hub) -> None:

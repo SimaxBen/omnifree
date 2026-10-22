@@ -13,7 +13,7 @@
   2 days (monthly charges and active weekly/yearly subscriptions), deduplicated per charge and date.
 * **Live budget alerts** (:func:`budget_alert_after_insert`): called by the expenses insert path every expense
   goes through; pushes once when the category's monthly budget crosses 80 % and once at 100 % (deduplicated
-  per category, month and threshold). Bounded by a short timeout, cached FX only, never raises.
+  per category, month and threshold). Bounded by short timeouts, cached FX only, never raises.
 * **Goals**: ``app_goals`` (target, optional deadline, saved so far, optional linked account, emoji/colour)
   and ``app_goal_contributions`` (signed amounts); :func:`goal_out` adds progress and the monthly saving needed.
 
@@ -40,8 +40,8 @@ from hub_api.state import HubState
 
 __all__ = [
     "SCHEMA", "ensure_schema", "cached_rates", "detect_subscriptions", "next_after", "occurrences_between",
-    "subscription_charges", "upcoming_bills", "run_bills", "compose_bill", "budget_alert_after_insert",
-    "budget_level", "goal_out", "months_until",
+    "subscription_charges", "subscription_overview", "upcoming_bills", "run_bills", "compose_bill", "budget_alert_after_insert",
+    "budget_level", "goal_out", "months_until", "orphaned",
 ]
 
 log = logging.getLogger("omnifree.hub.money_intel")
@@ -73,7 +73,8 @@ LOOKBACK_DAYS = 800  # two years and a bit: a yearly charge needs two occurrence
 MIN_CONFIDENCE = 0.5
 BILLS_AHEAD_DAYS = 2
 MAX_BILLS = 10  # per run: stays well inside the 60 s serverless limit
-ALERT_TIMEOUT_S = 4.0  # the live budget alert never holds an expense insert longer than this
+ALERT_TIMEOUT_S = 4.0  # the live budget checks (budget, spend, prefs) never hold an expense insert longer than this
+ALERT_DELIVER_TIMEOUT_S = 8.0  # then the push itself; on timeout its dedupe claim is released for the next expense
 ALERT_LEVELS = (100, 80)  # percent, highest first
 
 _DISPLAY = {"chatgpt": "ChatGPT", "icloud": "iCloud", "github": "GitHub", "linkedin": "LinkedIn", "onee": "ONEE",
@@ -280,14 +281,26 @@ def detect_subscriptions(
 
 
 async def tracked_keys(db: AppDB, today: date) -> set[str]:
-    """Merchant keys not to suggest: accepted or dismissed ones, and monthly charges still running."""
-    keys = {str(r["merchant_key"]) for r in await db.fetch(f"SELECT merchant_key FROM {SUBS_TABLE}")}
+    """Merchant keys not to suggest: accepted or dismissed ones, and monthly charges still running.
+
+    An accepted monthly subscription whose charge was deleted since no longer counts (see :func:`orphaned`).
+    """
+    recurring = await db.fetch("SELECT id, name, end_month FROM app_recurring")
+    ids = {str(r["id"]) for r in recurring}
+    keys = {str(r["merchant_key"]) for r in await db.fetch(f"SELECT merchant_key, status, recurring_id FROM {SUBS_TABLE}")
+            if not orphaned(r, ids)}
     month = today.strftime("%Y-%m")
-    for r in await db.fetch("SELECT name, end_month FROM app_recurring"):
+    for r in recurring:
         if not r.get("end_month") or r["end_month"] >= month:
             if key := merchant_key(r.get("name")):
                 keys.add(key)
     return keys
+
+
+def orphaned(row: dict[str, Any], recurring_ids: set[str]) -> bool:
+    """An accepted subscription row tracked through a monthly charge that no longer exists."""
+    rid = row.get("recurring_id")
+    return row.get("status") == "accepted" and bool(rid) and str(rid) not in recurring_ids
 
 
 async def suggestions(db: AppDB, today: date, *, include_tracked: bool = False) -> list[dict[str, Any]]:
@@ -330,12 +343,20 @@ async def _active_subs(db: AppDB) -> list[dict[str, Any]]:
 
 
 async def subscription_charges(db: AppDB, month: str) -> list[dict[str, Any]]:
-    """Charges of the active weekly/yearly subscriptions in ``month`` (``id, name, amount, currency, category, on``)."""
+    """Charges of the active weekly/yearly subscriptions in ``month`` (``id, key, name, amount, currency, category,
+    on, frequency``)."""
+    return (await subscription_overview(db, month))[1]
+
+
+async def subscription_overview(db: AppDB, month: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(active weekly/yearly subscriptions as id/key/name/amount/currency/frequency, their charges in month)``."""
     try:
         rows = await _active_subs(db)
     except Exception as exc:  # noqa: BLE001 - the overview must not fail on this optional part
         log.warning("subscriptions unavailable for the overview: %r", exc)
-        return []
+        return [], []
+    subs = [{"id": r["id"], "key": r["merchant_key"], "name": r["name"], "amount": float(r["amount"] or 0),
+             "currency": r["currency"], "frequency": r["frequency"]} for r in rows]
     start = date(int(month[:4]), int(month[5:7]), 1)
     end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
     out = []
@@ -344,9 +365,10 @@ async def subscription_charges(db: AppDB, month: str) -> list[dict[str, Any]]:
         if anchor is None:
             continue
         for d in occurrences_between(anchor, r["frequency"], start, end):
-            out.append({"id": r["id"], "name": r["name"], "amount": float(r["amount"] or 0), "currency": r["currency"],
-                        "category": r.get("category") or "bills", "on": d.isoformat(), "frequency": r["frequency"]})
-    return out
+            out.append({"id": r["id"], "key": r["merchant_key"], "name": r["name"], "amount": float(r["amount"] or 0),
+                        "currency": r["currency"], "category": r.get("category") or "bills", "on": d.isoformat(),
+                        "frequency": r["frequency"]})
+    return subs, out
 
 
 # --------------------------------------------------------------------------- bills
@@ -454,7 +476,8 @@ async def category_spend(db: AppDB, category: str, month: str, rates: money.Rate
     return round(total, 2)
 
 
-async def _check_budget(state: HubState, db: AppDB, expense: dict[str, Any]) -> dict[str, Any] | None:
+async def _budget_push(db: AppDB, expense: dict[str, Any]) -> Any:
+    """The spending :class:`~hub_api.routers.notify.Push` the expense calls for, or None (reads only)."""
     from hub_api.routers import notify
 
     category = expense.get("category") or "other"
@@ -492,14 +515,31 @@ async def _check_budget(state: HubState, db: AppDB, expense: dict[str, Any]) -> 
         title = f"⚠ Budget {label} : {pct} %"
         left = notify.fmt_money(max(0.0, limit - spent), money.BASE)
         message = f"{amounts} ce mois-ci : il reste {left}."
-    push = notify.Push(title=title, message=message, tags=["warning"], priority=4 if level == 100 else 3,
+    return notify.Push(title=title, message=message, tags=["warning"], priority=4 if level == 100 else 3,
                        path="#/more/money", actions=[("Money", "#/more/money")],
                        dedupe=f"spending:{category}:{month}:{level}")
-    return await notify.deliver(state, db, "spending", push)
+
+
+async def _deliver_alert(state: HubState, db: AppDB, push: Any) -> dict[str, Any] | None:
+    """Send the alert within :data:`ALERT_DELIVER_TIMEOUT_S`; when cut short, a claim left 'sending' is set to
+    'failed' so the next expense retries it instead of finding it 'already sent' for the rest of the month."""
+    from hub_api.routers import notify
+
+    try:
+        return await asyncio.wait_for(notify.deliver(state, db, "spending", push), ALERT_DELIVER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.warning("live budget alert timed out: %s", push.dedupe)
+        try:
+            await db.execute("UPDATE app_notify_log SET status = 'failed', error = 'timed out' WHERE key = ?"
+                             " AND status = 'sending'", [push.dedupe])
+        except Exception as exc:  # noqa: BLE001 - nothing more to do
+            log.warning("could not release %s: %r", push.dedupe, exc)
+        return None
 
 
 async def budget_alert_after_insert(db: AppDB, expense: dict[str, Any]) -> dict[str, Any] | None:
-    """Live budget alert for a just-inserted expense. Best effort: bounded by :data:`ALERT_TIMEOUT_S`, never raises.
+    """Live budget alert for a just-inserted expense. Best effort: the checks are bounded by :data:`ALERT_TIMEOUT_S`
+    and the push by :data:`ALERT_DELIVER_TIMEOUT_S` (see :func:`_deliver_alert`); never raises.
 
     The hub state comes from the AppDB (:func:`hub_api.appdata.appdb_for` attaches it); without it, or
     without any push channel configured, nothing happens.
@@ -511,7 +551,8 @@ async def budget_alert_after_insert(db: AppDB, expense: dict[str, Any]) -> dict[
         if not (notifier.load_config(state.settings.secret).configured
                 or webpush.load_config(state.settings.secret).configured):
             return None
-        return await asyncio.wait_for(_check_budget(state, db, expense), ALERT_TIMEOUT_S)
+        push = await asyncio.wait_for(_budget_push(db, expense), ALERT_TIMEOUT_S)
+        return None if push is None else await _deliver_alert(state, db, push)
     except Exception as exc:  # noqa: BLE001 - the expense is already saved
         log.warning("live budget alert failed: %r", exc)
         return None
