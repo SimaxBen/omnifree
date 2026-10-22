@@ -950,7 +950,7 @@ export interface VoiceMoneyResult {
 
 // ------------------------------------------------------------------ notifications (ntfy) and calendar feed
 
-export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'bills' | 'summary' | 'inbox' | 'spending';
+export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'bills' | 'summary' | 'debts' | 'inbox' | 'spending';
 export type NotifyRunKind = Exclude<NotifyKind, 'inbox' | 'spending'>;
 export type NotifyChannel = 'ntfy' | 'webpush';
 

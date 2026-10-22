@@ -15,7 +15,9 @@ see :mod:`hub_api.money_match`) counts once: the expense stays, the charge is sh
 overview also carries an end-of-month ``forecast`` (see :func:`build_forecast`).
 
 Totals are in MAD; every item keeps its original amount and currency. ``POST /money/voice`` turns a
-recording ("j'ai payé 45 dh de taxi et 30 dh un café") into expenses (``source = 'voice'``) and incomes.
+recording ("j'ai payé 45 dh de taxi et 30 dh un café") into expenses (``source = 'voice'``) and incomes, and
+loans to or from people ("j'ai prêté 200 dh à Ayoub", "Ayoub m'a rendu 100") into debts (see
+:mod:`hub_api.routers.debts`).
 """
 
 from __future__ import annotations
@@ -769,7 +771,13 @@ def resolve_spent_date(value: Any, today: date) -> str:
 def parse_money_entries(
     data: dict[str, Any] | None, today: date, kind: Literal["auto", "expense", "income"] = "auto"
 ) -> list[dict[str, Any]]:
-    """Validated money entries from the LLM's ``{"entries": [...]}``; entries without a positive amount are dropped."""
+    """Validated money entries from the LLM's ``{"entries": [...]}``; entries without a positive amount are dropped.
+
+    Debt entries (``lend``, ``borrow``, ``repaid``, ``repay``) keep their type whatever ``kind`` says and need a
+    ``person``; the others become ``expense``/``income`` (forced by ``kind`` unless it is ``auto``).
+    """
+    from hub_api.routers.debts import DEBT_ENTRY_TYPES  # debts imports this module
+
     out: list[dict[str, Any]] = []
     raw = (data or {}).get("entries")
     for e in raw if isinstance(raw, list) else []:
@@ -779,6 +787,24 @@ def parse_money_entries(
         if amount is None or amount <= 0:
             continue
         typ = str(e.get("type") or "expense").strip().lower()
+        if typ in DEBT_ENTRY_TYPES:
+            person = next((v.strip() for v in (e.get("person"), e.get("merchant")) if isinstance(v, str) and v.strip()), "")
+            if not person:
+                continue
+            note = e.get("note")
+            out.append(
+                {
+                    "type": typ,
+                    "amount": round(amount, 2),
+                    "currency": normalise_currency(e.get("currency")) or BASE,
+                    "person": person[:100],
+                    "merchant": person[:100],
+                    "category": "other",
+                    "date": resolve_spent_date(e.get("date"), today),
+                    "note": note.strip()[:2000] if isinstance(note, str) and note.strip() else None,
+                }
+            )
+            continue
         typ = kind if kind != "auto" else ("income" if typ == "income" else "expense")
         category = str(e.get("category") or "").strip().lower()
         allowed = INCOME_CATEGORIES if typ == "income" else CATEGORIES
@@ -799,11 +825,16 @@ def parse_money_entries(
 
 
 async def create_entries(db: AppDB, entries: list[dict[str, Any]], *, audio_key: str | None) -> dict[str, list[dict[str, Any]]]:
-    """Store parsed entries: expenses through the expenses insert path (``source = 'voice'``), incomes here."""
+    """Store parsed entries: expenses through the expenses insert path (``source = 'voice'``), incomes here, loans and
+    repayments in :mod:`hub_api.routers.debts` (``debts`` lists one outcome per debt entry)."""
+    from hub_api.routers.debts import DEBT_ENTRY_TYPES, record_voice_debt  # debts imports this module
+
     await ensure_schema(db)
-    created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": []}
+    created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": [], "debts": []}
     for e in entries:
-        if e["type"] == "income":
+        if e["type"] in DEBT_ENTRY_TYPES:
+            created["debts"].append(await record_voice_debt(db, e, audio_key=audio_key))
+        elif e["type"] == "income":
             created["incomes"].append(
                 await insert_income(
                     db,
@@ -833,12 +864,17 @@ def _money_prompt(today: date, kind: str) -> str:
         f"Today is {today:%A} {today.isoformat()} (Africa/Casablanca). Past days: {past}.\n"
         f"{hint}"
         "Answer with ONE JSON object only, no prose, no code fences:\n"
-        '{"entries": [{"type": "expense|income", "amount": number, '
+        '{"entries": [{"type": "expense|income|lend|borrow|repaid|repay", "amount": number, '
         '"currency": "ISO 4217 code (dh, dhs, dirham, drahem = MAD; euro = EUR; dollar = USD) or null", '
         '"merchant": "for an expense who was paid (shop, café, person); for an income who paid (employer, client) or '
         'a label like Salaire", '
         f'"category": "expense: one of {"|".join(CATEGORIES)}; income: one of {"|".join(INCOME_CATEGORIES)}", '
         '"date": "YYYY-MM-DD or null", "note": "short detail or null"}]}\n'
+        "Loans between the speaker and a person use the type lend, borrow, repaid or repay with an extra "
+        '"person": "the person\'s name" (merchant = the same name, category null): lend = the speaker lent money '
+        "(j'ai prêté 200 dh à Ayoub, sl7t Ayoub 200); borrow = the speaker borrowed (j'ai emprunté 500 à Karim, "
+        "tsellft men Karim); repaid = someone paid the speaker back (Ayoub m'a rendu 100, Ayoub rjje3 lia 100); "
+        "repay = the speaker paid someone back (j'ai rendu 200 à Karim). A loan is never an expense or an income.\n"
         "Rules: one entry per amount; only money actually spent or received, not plans or prices mentioned in passing; "
         "salary, payment received, refund or gift = income; convert relative dates (hier, yesterday, lbare7, lundi "
         "dernier) to absolute dates, never in the future; date null when no day is said; never invent amounts; "

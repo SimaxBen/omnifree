@@ -39,6 +39,7 @@ from core.interfaces import ChatMessage, ChatRequest, ProviderError
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_today, local_tz, new_id, now_iso
 from hub_api.auth import _bearer, token_matches
 from hub_api.bank_sms import WALLETS, ParsedSms, guess_category, looks_like_bank, mask_text, parse_amount, parse_sms
+from hub_api.merchant_rules import merchant_aliases
 from hub_api.routers import money
 from hub_api.routers.expenses import insert_expense, normalise_currency
 from hub_api.state import HubState, get_state
@@ -249,9 +250,12 @@ async def _llm_parse(state: HubState, sender: str, text: str, today: date, fallb
 
 
 async def _same_expense(db: AppDB, p: ParsedSms) -> dict[str, Any] | None:
+    # A merchant rule may have stored the purchase under its display name: compare against both names.
+    names = await merchant_aliases(db, p.merchant)
     return await db.fetch_one(
-        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ? AND lower(merchant) = lower(?) LIMIT 1",
-        [p.date, p.amount, p.currency, p.merchant],
+        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ?"
+        f" AND lower(merchant) IN ({', '.join('lower(?)' for _ in names)}) LIMIT 1",
+        [p.date, p.amount, p.currency, *names],
     )
 
 

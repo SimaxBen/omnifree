@@ -49,6 +49,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso
+from hub_api.merchant_rules import merchant_aliases
 from hub_api.rag_extract import ExtractionError, extract, html_to_text
 from hub_api.receipts import read_receipt_file, read_receipt_text
 from hub_api.routers.expenses import _valid_date, ensure_schema, insert_expense, parse_receipt
@@ -473,11 +474,14 @@ async def _extract(state: HubState, msg: EmailMessage, meta: dict[str, Any], tod
             if pdf_text.strip():
                 data = await clock.bound(read_receipt_text(state, pdf_text, today, context))
                 if _usable(data):
+                    data.setdefault("text", pdf_text)  # kept as receipt_text for GET /expenses/search
                     return data, attachment, "pdf-text"
     text = body_text(msg)
     if not text:
         return data, None, "empty"
     data = await clock.bound(read_receipt_text(state, text, today, context))
+    if isinstance(data, dict):
+        data.setdefault("text", text)  # kept as receipt_text for GET /expenses/search
     return data, None, "body"
 
 
@@ -507,20 +511,25 @@ async def _process(
     fields["source_ref"] = meta["ref"]
     # One purchase often sends several emails (order, payment and exchange summaries): same merchant,
     # amount, currency and day as an expense already recorded -> treat it as the same purchase.
+    # A merchant rule may have stored the first one under its display name: compare against both names.
+    names = await merchant_aliases(db, fields["merchant"])
     same = await db.fetch(
-        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ? AND lower(merchant) = lower(?) LIMIT 1",
-        [fields["date"], fields["total"], fields["currency"], fields["merchant"]],
+        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ?"
+        f" AND lower(merchant) IN ({', '.join('lower(?)' for _ in names)}) LIMIT 1",
+        [fields["date"], fields["total"], fields["currency"], *names],
     )
     if same:
         return None, f"same purchase as expense {same[0]['id']}"
     if dry_run:
-        return {**fields, "id": None, "receipt_key": None, "created_at": None}, None
+        preview = {k: v for k, v in fields.items() if k != "receipt_text"}
+        return {**preview, "id": None, "receipt_key": None, "created_at": None}, None
     if attachment is not None:
         blob, ctype, name = attachment
         ext = "pdf" if ctype == "application/pdf" else _IMAGE_EXT.get(ctype, "bin")
         key = f"receipts/email/{today:%Y}/{today:%m}/{new_id()}.{ext}"
-        await clock.bound(state.router.storage_put(key, blob, ctype, {"original-filename": name[:200], "source": "email", "mailbox": meta["mailbox"]}))
+        stored = await clock.bound(state.router.storage_put(key, blob, ctype, {"original-filename": name[:200], "source": "email", "mailbox": meta["mailbox"]}))
         fields["receipt_key"] = key
+        fields["receipt_provider"] = stored.backend
     return await insert_expense(db, fields), None
 
 

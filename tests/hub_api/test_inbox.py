@@ -449,3 +449,15 @@ def test_sync_pushes_a_notification_best_effort(app_hub, monkeypatch: pytest.Mon
     monkeypatch.setattr(notifier, "transport", httpx.MockTransport(lambda r: httpx.Response(500)))
     r = app_hub.post("/inbox/receipts/sync")
     assert r.status_code == 200 and r.json()["created"] == [] and len(pushed) == 1
+
+
+def test_email_text_is_kept_for_receipt_search(app_hub) -> None:
+    _script_all()
+    out = app_hub.post("/inbox/receipts/sync").json()
+    created = {e["source_ref"].removeprefix("me@gmail.com#"): e for e in out["created"]}
+    html_id, pdf = created["html-1@careem.com"]["id"], created["pdf-1@shop.ma"]
+    text, provider = fa.sql("SELECT receipt_text, receipt_provider FROM app_expenses WHERE id = ?", [html_id])[0]
+    assert "Total paid: 54.00 MAD" in text and provider is None  # the email body, no attachment stored
+    assert fa.sql("SELECT receipt_provider FROM app_expenses WHERE id = ?", [pdf["id"]])[0][0] == "r2"
+    found = app_hub.get("/expenses/search", params={"q": "total paid"}).json()
+    assert [e["id"] for e in found["results"]] == [html_id]

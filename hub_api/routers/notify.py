@@ -10,7 +10,7 @@ stored in ``app_notify_log.channels`` (JSON) and returned as ``channels``.
   switches and the last pushes;
 * ``PUT /notify/prefs``: turn kinds (``prefs``) or channels (``channels``) on or off (stored in D1, all on by default);
 * ``POST /notify/test``: one test push (to every enabled channel);
-* ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders|bills``: what the QStash schedules call (no
+* ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders|bills|summary|debts``: what the QStash schedules call (no
   body needed). Daily/weekly/monthly kinds are deduplicated in D1 (one push per kind and day, week or month;
   ``force=1`` bypasses it, ``preview=1`` composes without sending); ``budget`` only pushes items that
   became ``warn``/``over`` since the last budget push; ``reminders`` (every 15 min) pushes one notification
@@ -68,8 +68,8 @@ log = logging.getLogger("omnifree.hub.notify")
 router = APIRouter(prefix="/notify", tags=["notify"])
 public_router = APIRouter(tags=["public"])
 
-RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary"]
-RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary")
+RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary", "debts"]
+RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary", "debts")
 KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox", "spending")  # inbox / spending: pushed by an event, not a schedule
 CHANNELS: tuple[str, ...] = ("ntfy", "webpush")
 _CHANNEL_PREFIX = "channel:"  # channel switches live in app_notify_prefs as "channel:ntfy" / "channel:webpush"
@@ -797,6 +797,13 @@ async def notify_run(
     """Compose and push one kind (the target of the QStash schedules; the body is ignored)."""
     if not (await get_prefs(db))[kind] and not preview:
         return {"kind": kind, "sent": False, "skipped": "turned off in the app", "title": None, "message": None}
+    if kind == "debts":  # due-date reminders daily, money lent and not returned on Mondays (hub_api.routers.debts)
+        from hub_api.routers.debts import run_debts  # debts imports this module
+
+        try:
+            return await run_debts(state, db, preview=preview, force=force)
+        except notifier.NotifyError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     if kind == "reminders":
         try:
             minutes = ahead_header or ahead

@@ -10,12 +10,15 @@ import { isQueuedVoice } from '../../lib/offline/client';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { loadPendingMeeting } from '../../lib/meeting';
 import { voiceMoneySummary } from '../../lib/money';
+import { voiceDebtUndo, voiceDebtsOf } from '../../lib/moneyTools';
+import type { VoiceDebtOutcome } from '../../lib/moneyTypes';
 import { readPref, writePref } from '../../lib/settings';
 import { eventSlot, slotLabel } from '../../lib/tasks';
 import type { Expense, GCalEvent, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
 import { CATEGORY_COLOR } from '../money/ExpenseEditor';
 import { INCOME_LABEL } from '../money/MoneySheets';
 import MeetingPanel from './MeetingPanel';
+import { VoiceDebts } from '../money/VoiceDebts';
 import { TaskRow } from './TaskRow';
 
 // 'both' behaves like 'auto' on the hub (a note plus any task), so the phone shows four clear choices.
@@ -31,7 +34,7 @@ const MODE_HINT: Record<VoiceMode, string> = {
   note: 'A cleaned-up note only.',
   tasks: 'Tasks only (a note is kept if no task is heard).',
   both: 'A note and every task in it.',
-  money: 'Say what you spent or received: "45 dh taxi, 30 dh coffee".',
+  money: 'Say what you spent, received or lent: "45 dh taxi", "j’ai prêté 200 dh à Ayoub".',
 };
 
 const MONEY_KINDS: { value: VoiceMoneyKind; label: string }[] = [
@@ -73,6 +76,7 @@ export default function VoiceSheet({
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<GCalEvent[]>([]);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [debts, setDebts] = useState<VoiceDebtOutcome[]>([]);
   const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [meeting, setMeeting] = useState(false);
@@ -106,11 +110,14 @@ export default function VoiceSheet({
     abort.current = ctrl;
     try {
       let res: VoiceNoteResult;
+      let found: VoiceDebtOutcome[];
       if (mode === 'money') {
         const m = await client.voiceMoney(blob, { kind: moneyKind, filename }, ctrl.signal);
         res = isQueuedVoice(m) ? (m as unknown as VoiceNoteResult) : { transcript: m.transcript, audio_key: m.audio_key, note: null, tasks: [], expenses: m.expenses, incomes: m.incomes };
+        found = voiceDebtsOf(m);
       } else {
         res = await client.voiceNote(blob, { mode, notebook, filename }, ctrl.signal);
+        found = voiceDebtsOf(res);
       }
       if (isQueuedVoice(res)) {
         // Offline: the recording is kept on the phone and uploaded when the hub answers again.
@@ -120,10 +127,11 @@ export default function VoiceSheet({
         return;
       }
       setResult(res);
+      setDebts(found);
       setTasks(res.tasks);
       setEvents(res.events ?? []);
       announce('notes', 'tasks');
-      if (res.expenses?.length || res.incomes?.length) announce('expenses', 'money');
+      if (res.expenses?.length || res.incomes?.length || found.length) announce('expenses', 'money');
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const msg = errorText(err);
@@ -155,6 +163,7 @@ export default function VoiceSheet({
     setResult(null);
     setTasks([]);
     setEvents([]);
+    setDebts([]);
     setError(null);
     rec.reset();
   };
@@ -167,7 +176,7 @@ export default function VoiceSheet({
       await Promise.all([...expenses.map((e) => client.deleteExpense(e.id)), ...incomes.map((i) => client.deleteIncome(i.id))]);
       announce('expenses', 'money');
       notify(`Removed ${voiceMoneySummary(expenses, incomes)}`, 'ok');
-      if (!result?.note && !tasks.length) again();
+      if (!result?.note && !tasks.length && !debts.length) again();
       else setResult((r) => r && { ...r, expenses: [], incomes: [] });
     } catch (err) {
       notify(errorText(err), 'error');
@@ -201,6 +210,24 @@ export default function VoiceSheet({
       if (!ok) return;
     }
     onClose();
+  };
+
+  const debtUndo = voiceDebtUndo(debts);
+  const undoDebts = async () => {
+    setUndoing(true);
+    try {
+      // Repayments first: deleting a loan also deletes its repayments.
+      await Promise.all(debtUndo.flatMap((op) => (op.kind === 'payment' ? [client.deleteDebtPayment(op.debtId, op.paymentId)] : [])));
+      await Promise.all(debtUndo.flatMap((op) => (op.kind === 'debt' ? [client.deleteDebt(op.id)] : [])));
+      announce('money');
+      notify(`Removed ${debtUndo.length} debt record${debtUndo.length === 1 ? '' : 's'}`, 'ok');
+      setDebts([]);
+      if (!result?.note && !tasks.length && !expenses.length && !incomes.length) again();
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setUndoing(false);
+    }
   };
 
   const notebooks = Array.from(new Set(['Inbox', ...(books.data?.notebooks.map((b) => b.name) ?? [])]));
@@ -380,7 +407,9 @@ export default function VoiceSheet({
             </div>
           )}
 
-          {mode === 'money' && !expenses.length && !incomes.length && (
+          <VoiceDebts debts={debts} onUndo={debtUndo.length ? () => void undoDebts() : undefined} undoing={undoing} />
+
+          {mode === 'money' && !expenses.length && !incomes.length && !debts.length && (
             <div className="rise rounded-card bg-ink-850 p-4 ring-1 ring-inset ring-ink-700">
               <Badge tone="warn">No amount heard</Badge>
               <p className="pt-2 text-[14px] text-ink-300">Say the amount and what it was for, for example "45 dirhams taxi".</p>

@@ -16,6 +16,7 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
     label: 'Daily summary',
     detail: 'One notification kept up to date: today’s events, next tasks, money left this month. The app notification is replaced in place; ntfy cannot replace, so it gets a new quiet one each time',
   },
+  { kind: 'debts', label: 'Debts', detail: 'A loan’s due date, and on Mondays the money lent more than 14 days ago' },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
   { kind: 'spending', label: 'Budget alerts', detail: 'Right after an expense takes a category past 80 % or 100 % of its monthly budget' },
 ];
@@ -75,6 +76,10 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
   {
     id: 'summary', name: 'push-summary', label: 'Daily summary: 07:00 and 13:00', schedule: '0 7,13 * * *', path: '/notify/run?kind=summary',
     description: 'Refreshes the one persistent summary notification (events, next tasks, money left) twice a day. 2 calls a day',
+  },
+  {
+    id: 'debts', name: 'push-debts', label: 'Debts reminder', schedule: '15 9 * * *', path: '/notify/run?kind=debts',
+    description: 'Daily 09:15 Morocco: loans due today; on Mondays also the money lent more than 14 days ago',
   },
 ];
 

@@ -48,7 +48,7 @@ RECEIPT_PROMPT = (
     '{{"merchant": "store name", "date": "YYYY-MM-DD or null", "total": number (the grand total paid), '
     '"currency": "ISO 4217 code (DH/Dhs = MAD) or null", "category": one of {categories}, '
     '"items": [{{"name": "...", "qty": number or null, "price": number or null}}], '
-    '"confidence": "high|medium|low"}}\n'
+    '"confidence": "high|medium|low", "text": "the printed text of the receipt, line by line, at most 1500 characters"}}\n'
     "Use null for anything unreadable; never invent amounts. confidence is low when the image is blurry, cut or not a receipt."
 )
 
