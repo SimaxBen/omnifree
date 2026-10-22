@@ -150,6 +150,7 @@ def create_app(
     app.include_router(sms_router.router, dependencies=protected)  # /money/sms/log, /money/sms/setup
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)
     app.include_router(calendar_router.public_router)  # PUBLIC: /calendar/{token}.ics (token in the path)
+    app.include_router(notify_router.public_router)  # PUBLIC: POST /notify/done/{task_id}?sig= (HMAC per task)
     app.include_router(sms_router.webhook_router)  # POST /money/sms: hub token or SMS_WEBHOOK_TOKEN (header or ?token=)
 
     @app.get("/events/recent", tags=["meta"], dependencies=protected)

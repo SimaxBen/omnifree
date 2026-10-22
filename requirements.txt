@@ -10,6 +10,7 @@ python-multipart>=0.0.9
 aiosqlite>=0.20
 pypdf>=4.0
 mcp==2.3.0
+tzdata>=2024.1  # Africa/Casablanca on hosts without a system tz database (Vercel)
 pytest>=8
 pytest-asyncio>=0.24
 respx>=0.21

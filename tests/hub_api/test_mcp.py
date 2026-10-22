@@ -155,6 +155,7 @@ def test_tools_list_has_every_tool_with_schemas(mcp: MCP) -> None:
     assert set(read["required"]) == {"provider", "key"}
     assert read["properties"]["max_bytes"]["maximum"] == 1_000_000
     assert tools["tasks_add"]["inputSchema"]["properties"]["priority"]["enum"] == ["low", "normal", "high"]
+    assert "HH:MM" in tools["tasks_add"]["inputSchema"]["properties"]["due_time"]["description"]
     assert "food" in tools["expense_add"]["inputSchema"]["properties"]["category"]["enum"]
     assert tools["notes_get"]["annotations"]["readOnlyHint"] is True
     assert tools["notes_create"]["annotations"]["destructiveHint"] is False
@@ -286,6 +287,17 @@ def test_notes_and_tasks(mcp: MCP) -> None:
     done = mcp.ok("tasks_complete", id=task["id"])
     assert done["done"] is True and done["done_at"]
     assert [t["id"] for t in mcp.ok("tasks_list", status="done")["tasks"]] == [task["id"]]
+
+    # Times: an HH:MM due_time, a phrase in due, a time alone (today, or tomorrow once past).
+    timed = mcp.ok("tasks_add", title="Dentist", due="2030-01-03", due_time="9:30")
+    assert timed["due"] == "2030-01-03" and timed["due_time"] == "09:30"
+    phrase = mcp.ok("tasks_add", title="Call", due="tomorrow at 3pm")
+    assert phrase["due_time"] == "15:00" and phrase["due"] == rel["due"]
+    only_time = mcp.ok("tasks_add", title="Soon", due_time="23:59")
+    assert only_time["due"] and only_time["due_time"] == "23:59"
+    res = mcp.call("tasks_add", title="Bad time", due="2030-01-03", due_time="half past never")
+    assert res["isError"] is True and "due_time" in res["content"][0]["text"]
+    assert {t["id"]: t["due_time"] for t in mcp.ok("tasks_list")["tasks"]}[timed["id"]] == "09:30"
 
 
 def test_expenses(mcp: MCP) -> None:

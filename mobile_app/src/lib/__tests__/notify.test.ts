@@ -3,13 +3,14 @@ import { describeCron, isValidCron } from '../cron';
 import { NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscribeLink, templateJob } from '../notify';
 
 describe('notification schedule templates', () => {
-  it('has the five templates with valid UTC schedules and readable descriptions', () => {
+  it('has the six templates with valid UTC schedules and readable descriptions', () => {
     expect(SCHEDULE_TEMPLATES.map((t) => [t.id, t.schedule])).toEqual([
       ['morning', '0 7 * * *'],
       ['evening', '0 19 * * *'],
       ['weekly', '30 7 * * 1'],
       ['budget', '0 6,18 * * *'],
       ['month', '0 8 28 * *'],
+      ['reminders', '*/15 * * * *'],
     ]);
     for (const t of SCHEDULE_TEMPLATES) {
       expect(isValidCron(t.schedule)).toBe(true);
@@ -19,6 +20,22 @@ describe('notification schedule templates', () => {
     expect(describeCron('0 6,18 * * *')).toBe('Daily at 06:00 and 18:00 UTC');
     expect(describeCron('0 6,12,18 * * *')).toBe('Daily at 06:00, 12:00 and 18:00 UTC');
     expect(SCHEDULE_TEMPLATES.some((t) => t.path.includes('inbox'))).toBe(false); // the email import template is gone
+  });
+
+  it('offers task reminders every 15 minutes, with the QStash budget spelled out', () => {
+    const tpl = SCHEDULE_TEMPLATES.find((t) => t.id === 'reminders')!;
+    expect(tpl.label).toBe('Task reminders: every 15 min');
+    expect(describeCron(tpl.schedule)).toBe('Every 15 minutes');
+    expect(tpl.description).toContain('96 calls a day');
+    expect(tpl.description).toContain('keep-warm');
+    expect(templateJob(tpl, 'https://hub.example/')).toEqual({
+      name: 'push-reminders',
+      schedule: '*/15 * * * *',
+      target: 'https://hub.example/notify/run?kind=reminders',
+      method: 'POST',
+      body: '',
+      withToken: true,
+    });
   });
 
   it('fills a POST to this hub with the token on', () => {
@@ -33,7 +50,7 @@ describe('notification schedule templates', () => {
   });
 
   it('lists every server-side kind once', () => {
-    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'inbox']);
+    expect(NOTIFY_KINDS.map((k) => k.kind)).toEqual(['morning', 'evening', 'weekly', 'budget', 'month', 'reminders', 'inbox']);
   });
 });
 

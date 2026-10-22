@@ -40,7 +40,7 @@ from hub_api.routers.expenses import (
     normalise_currency,
 )
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
-from hub_api.routers.notes import _WEEKDAYS, resolve_due, store_and_transcribe
+from hub_api.routers.notes import _WEEKDAYS, resolve_due, split_time, store_and_transcribe
 from hub_api.state import HubState, get_state
 
 __all__ = [
@@ -561,6 +561,9 @@ _PAST_OFFSETS = {
 def resolve_spent_date(value: Any, today: date) -> str:
     """A spending/income date: ISO or relative ("hier", "lbare7", "lundi"), never in the future; else today."""
     text = str(value or "").strip().lower().rstrip(".!")
+    rest, hhmm, _, _ = split_time(text)
+    if hhmm and rest:  # "hier soir", "lbare7 f 8": the day part
+        text = rest
     if text in _PAST_OFFSETS:
         return (today - timedelta(days=_PAST_OFFSETS[text])).isoformat()
     for prefix in ("last ", "dernier ", "nhar "):

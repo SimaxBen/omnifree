@@ -3,7 +3,7 @@ import { Icon } from '../../components/icons';
 import { Sheet, useConfirm } from '../../components/Sheet';
 import { SwipeRow } from '../../components/SwipeRow';
 import { Button, Chip, EmptyState, ErrorNote, Field, IconButton, Segmented, SkeletonList, cx, haptic, inputClass, riseStyle } from '../../components/ui';
-import { addDays, dueInfo, isoDay, sortTasks } from '../../lib/apps';
+import { addDays, dueInfo, isoDay, sortTasks, taskDue, validTime } from '../../lib/apps';
 import { announce, useTopic } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
@@ -15,14 +15,25 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
   const confirm = useConfirm();
   const [title, setTitle] = useState(task.title);
   const [details, setDetails] = useState(task.details ?? '');
-  const [due, setDue] = useState(task.due ?? '');
+  const [due, setDueRaw] = useState(task.due ?? '');
+  const [time, setTimeRaw] = useState(validTime(task.due_time) ?? '');
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [busy, setBusy] = useState(false);
+  // A time needs a day: picking one with no date means today; clearing the date clears the time.
+  const setDue = (d: string) => {
+    setDueRaw(d);
+    if (!d) setTimeRaw('');
+  };
+  const setTime = (t: string) => {
+    setTimeRaw(t);
+    if (t && !due) setDueRaw(isoDay());
+  };
 
   const save = async () => {
     setBusy(true);
     try {
-      const t = await client.updateTask(task.id, { title: title.trim() || task.title, details: details.trim() || null, due: due || null, priority });
+      const at = due ? validTime(time) : null;
+      const t = await client.updateTask(task.id, { title: title.trim() || task.title, details: details.trim() || null, due: due || null, due_time: at, priority });
       onSaved(t);
       announce('tasks');
       onClose();
@@ -82,6 +93,23 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
           <input type="date" aria-label="Due date" value={due} onChange={(e) => setDue(e.target.value)} className={inputClass} />
         </div>
         <div className="space-y-1.5">
+          <span className="block px-1 text-[13px] text-ink-300">Time</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="time"
+              aria-label="Due time"
+              value={time}
+              step={300}
+              onChange={(e) => setTime(e.target.value)}
+              className={cx(inputClass, 'min-w-0 flex-1', !time && 'text-ink-500')}
+            />
+            {time && (
+              <IconButton icon="x" label="Clear time" onClick={() => setTimeRaw('')} className="h-11 w-11 shrink-0" />
+            )}
+          </div>
+          <p className="px-1 text-[12px] text-ink-500">{time ? 'A reminder is pushed 15 min before.' : 'Optional: all day without a time.'}</p>
+        </div>
+        <div className="space-y-1.5">
           <span className="block px-1 text-[13px] text-ink-300">Priority</span>
           <Segmented
             value={priority}
@@ -114,6 +142,7 @@ export default function TasksPanel() {
   const done = useHubData((c, s) => (showDone ? c.tasks({ status: 'done' }, s) : Promise.resolve([] as Task[])), [showDone]);
   const [title, setTitle] = useState('');
   const [due, setDue] = useState<string>('');
+  const [time, setTime] = useState<string>('');
   const [high, setHigh] = useState(false);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<{ id: number; open: boolean; task: Task } | null>(null);
@@ -133,7 +162,8 @@ export default function TasksPanel() {
 
   const grouped = useMemo(() => {
     const out: Record<Bucket, Task[]> = { overdue: [], today: [], soon: [], later: [], none: [] };
-    for (const t of sortTasks(open.data ?? [])) out[dueInfo(t.due, today).tone].push(t);
+    const now = new Date();
+    for (const t of sortTasks(open.data ?? [])) out[taskDue(t, now).tone].push(t);
     return out;
   }, [open.data, today]);
 
@@ -143,11 +173,18 @@ export default function TasksPanel() {
     if (!text || adding) return;
     setAdding(true);
     try {
-      const t = await client.createTask({ title: text, ...(due ? { due } : {}), ...(high ? { priority: 'high' as const } : {}) });
+      const day = due || (time ? today : '');
+      const t = await client.createTask({
+        title: text,
+        ...(day ? { due: day } : {}),
+        ...(day && validTime(time) ? { due_time: time } : {}),
+        ...(high ? { priority: 'high' as const } : {}),
+      });
       haptic(10);
       setFresh(t.id);
       open.setData((ts) => [...(ts ?? []), t]);
       setTitle('');
+      setTime('');
       setHigh(false);
       announce('tasks');
       inputRef.current?.focus();
@@ -233,6 +270,11 @@ export default function TasksPanel() {
             <Icon name="calendar" size={14} />
             {due && due !== today && due !== addDays(today, 1) ? dueInfo(due, today).label : 'Date'}
             <input type="date" aria-label="Due date" value={due} onChange={(e) => setDue(e.target.value)} className="absolute inset-0 opacity-0" />
+          </label>
+          <label className={cx('relative inline-flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-full px-3.5 text-[14px] ring-1 ring-inset', time ? 'bg-ink-100 font-semibold text-ink-950 ring-ink-100' : 'bg-ink-850 text-ink-300 ring-ink-700')}>
+            <Icon name="clock" size={14} />
+            {time || 'Time'}
+            <input type="time" aria-label="Due time" value={time} onChange={(e) => setTime(e.target.value)} className="absolute inset-0 opacity-0" />
           </label>
           <Chip active={high} onClick={() => setHigh((v) => !v)}>
             <Icon name="flag" size={14} />

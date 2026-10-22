@@ -387,6 +387,8 @@ export interface Task {
   details: string | null;
   /** YYYY-MM-DD */
   due: string | null;
+  /** HH:MM local (Africa/Casablanca) time; only with a due date. */
+  due_time?: string | null;
   done: boolean;
   priority: TaskPriority;
   note_id: string | null;
@@ -398,6 +400,8 @@ export interface TaskCreate {
   title: string;
   details?: string;
   due?: string;
+  /** HH:MM; needs `due`. */
+  due_time?: string;
   priority?: TaskPriority;
   note_id?: string;
 }
@@ -815,7 +819,7 @@ export interface VoiceMoneyResult {
 
 // ------------------------------------------------------------------ notifications (ntfy) and calendar feed
 
-export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'inbox';
+export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'inbox';
 export type NotifyRunKind = Exclude<NotifyKind, 'inbox'>;
 
 export interface NotifyLogEntry {

@@ -46,7 +46,7 @@ from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, ProviderKind
-from hub_api.appdata import AppDB, appdb_for, local_today
+from hub_api.appdata import AppDB, appdb_for, local_now
 from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
@@ -179,13 +179,18 @@ def _note_preview(note: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _resolve_due(value: str | None) -> str | None:
-    if value is None or not value.strip():
-        return None
-    resolved = notes.resolve_due(value, local_today())
-    if resolved is None:
-        raise ToolError(f"could not understand due date {value!r}: use YYYY-MM-DD or e.g. 'tomorrow', 'friday'")
-    return resolved
+def _resolve_when(due: str | None, due_time: str | None) -> tuple[str | None, str | None]:
+    """(due, due_time) for tasks_add: a date and/or time phrase plus an optional HH:MM."""
+    has_due = bool(due and due.strip())
+    has_time = bool(due_time and due_time.strip())
+    if not has_due and not has_time:
+        return None, None
+    if has_time and notes.normalize_time(due_time) is None:
+        raise ToolError(f"could not understand due_time {due_time!r}: use HH:MM, e.g. '15:00'")
+    day, at = notes.resolve_when(due if has_due else None, due_time, local_now())
+    if day is None:
+        raise ToolError(f"could not understand due date {due!r}: use YYYY-MM-DD or e.g. 'tomorrow', 'friday'")
+    return day, at
 
 
 # --------------------------------------------------------------------------- server
@@ -454,18 +459,22 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
     @tool(
         description=(
             "Add a task. `due` accepts YYYY-MM-DD or a relative day ('today', 'tomorrow', 'friday', 'in 3 days', "
-            "'demain' ...) resolved in Africa/Casablanca."
+            "'demain' ...) resolved in Africa/Casablanca, optionally with a time ('demain à 15h', 'friday 10am'). "
+            "`due_time` is HH:MM local time (Africa/Casablanca); a time without a day means today, or tomorrow "
+            "once that time has passed. Timed tasks get a reminder push and a timed calendar event."
         ),
         annotations=CREATES,
     )
     @_guard
     async def tasks_add(
         title: Annotated[str, Field(min_length=1, max_length=300)],
-        due: Annotated[str | None, Field(description="Due date (YYYY-MM-DD or relative).")] = None,
+        due: Annotated[str | None, Field(description="Due date (YYYY-MM-DD or relative, may include a time).")] = None,
         priority: Literal["low", "normal", "high"] = "normal",
         details: Annotated[str | None, Field(max_length=20_000)] = None,
+        due_time: Annotated[str | None, Field(description="Time of day, HH:MM (24 h, Africa/Casablanca).")] = None,
     ) -> dict[str, Any]:
-        body = notes.TaskCreate(title=title, due=_resolve_due(due), priority=priority, details=details)
+        day, at = _resolve_when(due, due_time)
+        body = notes.TaskCreate(title=title, due=day, due_time=at, priority=priority, details=details)
         return await notes.create_task(body, db=await notes_db())
 
     @tool(description="Mark a task as done (by id, from tasks_list).", annotations=UPDATES)
