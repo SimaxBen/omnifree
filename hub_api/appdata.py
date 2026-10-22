@@ -165,6 +165,7 @@ def iso(dt: datetime) -> str:
 
 
 _LOCAL_TZ: tzinfo | None = None
+LOCAL_TZ_SOURCE = "unloaded"  # tzdata-wheel | system | fixed-utc+1 (shown on /healthz)
 
 
 def local_tz() -> tzinfo:
@@ -173,7 +174,7 @@ def local_tz() -> tzinfo:
     The system database can be years old (Vercel's runtime still has Morocco on UTC+0 in October),
     so the pinned ``tzdata`` wheel wins; then the system database; then a fixed UTC+1.
     """
-    global _LOCAL_TZ
+    global _LOCAL_TZ, LOCAL_TZ_SOURCE
     if _LOCAL_TZ is None:
         try:
             from importlib import resources
@@ -181,13 +182,16 @@ def local_tz() -> tzinfo:
 
             with resources.files("tzdata.zoneinfo").joinpath("Africa/Casablanca").open("rb") as fh:
                 _LOCAL_TZ = ZoneInfo.from_file(fh, key="Africa/Casablanca")
-        except Exception:  # noqa: BLE001 - tzdata wheel missing
+            LOCAL_TZ_SOURCE = "tzdata-wheel"
+        except Exception as exc:  # noqa: BLE001 - tzdata wheel missing
+            LOCAL_TZ_SOURCE = f"system ({type(exc).__name__})"
             try:
                 from zoneinfo import ZoneInfo
 
                 _LOCAL_TZ = ZoneInfo("Africa/Casablanca")
             except Exception:  # noqa: BLE001 - no tz database at all on slim images
                 _LOCAL_TZ = timezone(timedelta(hours=1), "UTC+01")
+                LOCAL_TZ_SOURCE = "fixed-utc+1"
     return _LOCAL_TZ
 
 

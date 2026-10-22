@@ -5,11 +5,11 @@ import { NOTIFY_KINDS, SCHEDULE_TEMPLATES, maskFeedUrl, maskSecret, ntfySubscrib
 describe('notification schedule templates', () => {
   it('has the six templates with valid UTC schedules and readable descriptions', () => {
     expect(SCHEDULE_TEMPLATES.map((t) => [t.id, t.schedule])).toEqual([
-      ['morning', '0 7 * * *'],
-      ['evening', '0 19 * * *'],
-      ['weekly', '30 7 * * 1'],
-      ['budget', '0 6,18 * * *'],
-      ['month', '0 8 28 * *'],
+      ['morning', '0 8 * * *'],
+      ['evening', '0 20 * * *'],
+      ['weekly', '30 8 * * 1'],
+      ['budget', '0 7,19 * * *'],
+      ['month', '0 9 28 * *'],
       ['reminders', '*/15 * * * *'],
     ]);
     for (const t of SCHEDULE_TEMPLATES) {
@@ -41,7 +41,7 @@ describe('notification schedule templates', () => {
   it('fills a POST to this hub with the token on', () => {
     expect(templateJob(SCHEDULE_TEMPLATES[0], 'https://api.ilyasouhnine.tech/')).toEqual({
       name: 'push-morning',
-      schedule: '0 7 * * *',
+      schedule: '0 8 * * *',
       target: 'https://api.ilyasouhnine.tech/notify/run?kind=morning',
       method: 'POST',
       body: '',

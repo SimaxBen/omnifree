@@ -140,7 +140,11 @@ def create_app(
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict[str, Any]:
         """Unauthenticated liveness probe (Cloud Run / uptime monitors)."""
-        return {"ok": True, "version": VERSION, "plugins": len(state.registry.specs)}
+        from hub_api import appdata
+
+        offset = appdata.local_now().utcoffset()
+        return {"ok": True, "version": VERSION, "plugins": len(state.registry.specs),
+                "tz": {"source": appdata.LOCAL_TZ_SOURCE, "utc_offset_h": offset.total_seconds() / 3600 if offset else 0}}
 
     protected = [Depends(require_token)]
     for module in (llm, agent, drive, dns, db, plugins, compute, cron, rag_router, budget_router):

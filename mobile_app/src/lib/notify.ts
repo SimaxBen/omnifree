@@ -25,26 +25,27 @@ export interface ScheduleTemplate {
   path: string;
 }
 
-/** Ready-made schedules (UTC; Morocco is UTC+1, so 07:00 UTC is 08:00 there). All call this hub with the token. */
+/** Ready-made schedules. QStash runs in UTC; Morocco currently keeps UTC+0, so the hours are the same there.
+ * All call this hub with the token. */
 export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
   {
-    id: 'morning', name: 'push-morning', label: 'Morning push', schedule: '0 7 * * *', path: '/notify/run?kind=morning',
+    id: 'morning', name: 'push-morning', label: 'Morning push', schedule: '0 8 * * *', path: '/notify/run?kind=morning',
     description: 'Daily 08:00 Morocco: tasks due today and yesterday’s spend',
   },
   {
-    id: 'evening', name: 'push-evening', label: 'Evening push', schedule: '0 19 * * *', path: '/notify/run?kind=evening',
+    id: 'evening', name: 'push-evening', label: 'Evening push', schedule: '0 20 * * *', path: '/notify/run?kind=evening',
     description: 'Daily 20:00 Morocco: open tasks, log-your-expenses nudge',
   },
   {
-    id: 'weekly', name: 'push-weekly', label: 'Weekly summary push', schedule: '30 7 * * 1', path: '/notify/run?kind=weekly',
+    id: 'weekly', name: 'push-weekly', label: 'Weekly summary push', schedule: '30 8 * * 1', path: '/notify/run?kind=weekly',
     description: 'Mondays 08:30 Morocco: last week in one notification',
   },
   {
-    id: 'budget', name: 'push-budget', label: 'Free-tier budget check', schedule: '0 6,18 * * *', path: '/notify/run?kind=budget',
-    description: 'Twice a day: pushes quotas that newly hit warn or over',
+    id: 'budget', name: 'push-budget', label: 'Free-tier budget check', schedule: '0 7,19 * * *', path: '/notify/run?kind=budget',
+    description: '07:00 and 19:00 Morocco: pushes quotas that newly hit warn or over',
   },
   {
-    id: 'month', name: 'push-month', label: 'Month-end money recap', schedule: '0 8 28 * *', path: '/notify/run?kind=month',
+    id: 'month', name: 'push-month', label: 'Month-end money recap', schedule: '0 9 28 * *', path: '/notify/run?kind=month',
     description: 'Day 28, 09:00 Morocco: the month’s spending so far',
   },
   {
