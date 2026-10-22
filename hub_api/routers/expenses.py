@@ -12,6 +12,7 @@ import json
 import logging
 import mimetypes
 import re
+import unicodedata
 from datetime import date
 from typing import Any, Literal
 
@@ -25,7 +26,7 @@ from hub_api.state import HubState, get_state
 
 __all__ = [
     "router", "CATEGORIES", "normalise_currency", "parse_receipt", "summarise", "SCHEMA",
-    "ensure_schema", "insert_expense", "expense_out", "clean_receipt_text", "search_terms",
+    "ensure_schema", "insert_expense", "expense_out", "clean_receipt_text", "search_terms", "search_fold",
 ]
 
 log = logging.getLogger("omnifree.hub.expenses")
@@ -382,10 +383,41 @@ async def scan_receipt(
     return {"expense": expense, "confidence": confidence}
 
 
+# Accented Latin letters are folded to their base letter on both sides of the search: SQLite's lower() only folds
+# ASCII, so "CAFÉ" would never match "café" (nor "cafe"). The SQL side (_fold_sql) and the Python side
+# (search_fold) apply the very same mapping, one character for one.
+_ACCENTED = "àáâãäåçèéêëìíîïñòóôõöùúûüýÿÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝ"
+_FOLD = {c: unicodedata.normalize("NFKD", c)[0].lower() for c in _ACCENTED}
+
+
+def search_fold(text: str) -> str:
+    """ASCII lower case and accents removed, one character for one (positions match the original text)."""
+    return "".join(_FOLD.get(c, c.lower() if c.isascii() else c) for c in text)
+
+
+def _fold_sql(expr: str) -> str:
+    out = f"lower({expr})"
+    for src, dst in _FOLD.items():  # constants only: no user input reaches this SQL text
+        out = f"replace({out}, '{src}', '{dst}')"
+    return out
+
+
+# What a search looks into: the merchant, the note, the item *names* (not the JSON keys, or "price" would match
+# every expense) and the receipt's text.
+_ITEM_NAMES_SQL = (
+    "(SELECT group_concat(json_extract(j.value, '$.name'), ' ') FROM json_each("
+    "CASE WHEN json_valid(items) THEN items ELSE '[]' END) AS j WHERE j.type = 'object')"
+)
+_HAYSTACK_SQL = _fold_sql(
+    f"coalesce(merchant, '') || ' ' || coalesce(note, '') || ' ' || coalesce({_ITEM_NAMES_SQL}, '')"
+    " || ' ' || coalesce(receipt_text, '')"
+)
+
+
 def search_terms(q: str) -> list[str]:
-    """Up to 6 distinct words of at least 2 characters (LIKE wildcards are escaped by _like)."""
+    """Up to 6 distinct folded words of at least 2 characters (LIKE wildcards are escaped by _like)."""
     out: list[str] = []
-    for word in re.split(r"\s+", q.strip().lower()):
+    for word in re.split(r"\s+", search_fold(q.strip())):
         word = word.strip(".,;:!?\"'()")
         if len(word) >= 2 and word not in out:
             out.append(word)
@@ -403,9 +435,9 @@ def _snippet(row: dict[str, Any], terms: list[str], width: int = 80) -> str | No
     except ValueError:
         items = []
     names = ", ".join(str(i.get("name")) for i in items if isinstance(i, dict) and i.get("name")) if isinstance(items, list) else ""
-    for source in (row.get("receipt_text"), names):
+    for source in (row.get("receipt_text"), names, row.get("note")):
         text = re.sub(r"\s+", " ", str(source or ""))
-        low = text.lower()
+        low = search_fold(text)
         for term in terms:
             at = low.find(term)
             if at >= 0:
@@ -449,24 +481,17 @@ async def search_expenses(
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
-    """Every word of ``q`` must appear in the merchant, the note, the items or the receipt's text (any order,
-    case-insensitive); newest first. Results carry a presigned ``receipt_url`` (1 h) when there is a receipt."""
+    """Every word of ``q`` must appear in the merchant, the note, the item names or the receipt's text (any order,
+    case and accents ignored); newest first. Results carry a presigned ``receipt_url`` (1 h) when there is a receipt."""
     terms = search_terms(q)
     if not terms and not receipts_only:
         raise HTTPException(422, detail="type at least one word of 2 characters")
-    where: list[str] = []
-    params: list[Any] = []
-    for term in terms:
-        where.append(
-            "(lower(merchant) LIKE ? ESCAPE '!' OR lower(coalesce(note, '')) LIKE ? ESCAPE '!'"
-            " OR lower(items) LIKE ? ESCAPE '!' OR lower(coalesce(receipt_text, '')) LIKE ? ESCAPE '!')"
-        )
-        params += [_like(term)] * 4
-    if receipts_only:
-        where.append("receipt_key IS NOT NULL AND receipt_key != ''")
+    inner = "receipt_key IS NOT NULL AND receipt_key != ''" if receipts_only else "1 = 1"
+    where = " AND ".join("hay LIKE ? ESCAPE '!'" for _ in terms) or "1 = 1"
     rows = await db.fetch(
-        f"SELECT * FROM app_expenses WHERE {' AND '.join(where)} ORDER BY date DESC, created_at DESC LIMIT ?",
-        [*params, limit],
+        f"SELECT * FROM (SELECT *, {_HAYSTACK_SQL} AS hay FROM app_expenses WHERE {inner})"
+        f" WHERE {where} ORDER BY date DESC, created_at DESC LIMIT ?",
+        [*(_like(t) for t in terms), limit],
         limit=limit,
     )
     expenses = [_expense_out(r) for r in rows]
@@ -486,7 +511,7 @@ async def get_expense(expense_id: str, db: AppDB = Depends(_db)) -> dict[str, An
 
 @router.patch("/{expense_id}")
 async def patch_expense(expense_id: str, body: ExpensePatch, db: AppDB = Depends(_db)) -> dict[str, Any]:
-    await _get(db, expense_id)
+    current = await _get(db, expense_id)
     changes: dict[str, Any] = {}
     for field in body.model_fields_set:
         value = getattr(body, field)
@@ -495,6 +520,9 @@ async def patch_expense(expense_id: str, body: ExpensePatch, db: AppDB = Depends
         if field == "items":
             value = json.dumps([i.model_dump() for i in value], ensure_ascii=False)
         changes[field] = value
+    if "receipt_key" in changes and changes["receipt_key"] != current.get("receipt_key"):
+        # The backend remembered for the old receipt does not hold the new one: found again on the next search.
+        changes["receipt_provider"] = None
     if changes:
         sets = ", ".join(f"{k} = ?" for k in changes)
         await db.execute(f"UPDATE app_expenses SET {sets} WHERE id = ?", [*changes.values(), expense_id])

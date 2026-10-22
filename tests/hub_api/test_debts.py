@@ -187,7 +187,8 @@ def test_debts_push_monday_and_due_dates(app_hub, sent) -> None:
     assert titles[2] == "On te doit encore 290 MAD"
     weekly = sent[2]["message"]
     assert "Ayoub : 200 MAD (depuis 4 sem.)" in weekly and "Old : 10 MAD" in weekly and "Sara" not in weekly
-    assert "prévu le 17/10" in sent[0]["message"]
+    assert sent[0]["message"].startswith("En retard : c'était prévu le 17/10")
+    assert sent[1]["message"].startswith("Échéance aujourd'hui.")
 
     again = app_hub.post("/notify/run", params={"kind": "debts"}).json()
     assert again["sent"] is False and again["skipped"] == "already sent" and len(sent) == 3
@@ -200,3 +201,68 @@ def test_debts_push_monday_and_due_dates(app_hub, sent) -> None:
 
     app_hub.put("/notify/prefs", json={"prefs": {"debts": False}})
     assert app_hub.post("/notify/run", params={"kind": "debts"}).json()["skipped"] == "turned off in the app"
+
+
+def test_settled_by_hand_stays_settled_and_repaid_loans_stay_closed(app_hub) -> None:
+    # "Forget the rest": 500 lent, 200 back, settled by hand.
+    d = _debt(app_hub, person="Sara", direction="lent", amount=500, date="2026-10-01")
+    d = app_hub.post(f"/money/debts/{d['id']}/repay", json={"amount": 100}).json()
+    d = app_hub.post(f"/money/debts/{d['id']}/repay", json={"amount": 100}).json()
+    d = app_hub.patch(f"/money/debts/{d['id']}", json={"settled": True}).json()
+    assert (d["settled"], d["paid"]) == (True, 200.0)
+    # The loan sheet saves every field back (same amount): editing the note must not open it again.
+    same = {"person": "Sara", "direction": "lent", "amount": 500, "currency": "MAD", "date": "2026-10-01",
+            "due_date": None, "note": "cadeau"}
+    d = app_hub.patch(f"/money/debts/{d['id']}", json=same).json()
+    assert (d["settled"], d["note"]) == (True, "cadeau")
+    d = app_hub.patch(f"/money/debts/{d['id']}", json={**same, "amount": 600}).json()
+    assert d["settled"] is True  # still forgiven
+    # Removing one of its repayments does not open it again either.
+    d = app_hub.delete(f"/money/debts/{d['id']}/payments/{d['payments'][0]['id']}").json()
+    assert (d["settled"], d["paid"]) == (True, 100.0)
+    # A loan closed by its repayments: "open it again" makes no sense (nothing left), it is refused.
+    full = _debt(app_hub, person="Omar", direction="borrowed", amount=50)
+    full = app_hub.post(f"/money/debts/{full['id']}/repay", json={}).json()
+    assert full["settled"] is True
+    r = app_hub.patch(f"/money/debts/{full['id']}", json={"settled": False})
+    assert r.status_code == 422 and "remove a repayment" in r.text
+    assert app_hub.patch(f"/money/debts/{full['id']}", json={"settled": True}).json()["settled"] is True  # no-op
+    # Raising its amount opens it again (there is something left now).
+    again = app_hub.patch(f"/money/debts/{full['id']}", json={"amount": 80}).json()
+    assert (again["settled"], again["remaining"]) == (False, 30.0)
+    # An open loan with nothing left (legacy rows) cannot take a zero repayment.
+    fa.sql("UPDATE app_debts SET settled = 0, amount = 50 WHERE id = ?", [full["id"]])
+    assert app_hub.post(f"/money/debts/{full['id']}/repay", json={}).status_code == 409
+    # Amounts are bounded.
+    assert app_hub.post("/money/debts", json={"person": "x", "direction": "lent", "amount": 1e12}).status_code == 422
+
+
+def test_voice_duplicates_are_not_stored_twice_and_can_be_undone(app_hub) -> None:
+    lend = [{"type": "lend", "amount": 200, "currency": "MAD", "person": "Ayoub"}]
+    first = _voice(app_hub, "j'ai prêté 200 dh à Ayoub", lend)["debts"][0]
+    assert first["action"] == "created" and first["payment_ids"] == []
+    # The same memo sent again (the first answer timed out on the phone): not a second loan.
+    again = _voice(app_hub, "j'ai prêté 200 dh à Ayoub", lend)["debts"][0]
+    assert again["action"] == "duplicate" and again["debts"][0]["id"] == first["debts"][0]["id"]
+    assert len(app_hub.get("/money/debts").json()["debts"]) == 1
+    # Two loans said in one memo are two loans.
+    two = _voice(app_hub, "j'ai prêté 50 à Karim, et encore 50 à Karim", [
+        {"type": "lend", "amount": 50, "person": "Karim"}, {"type": "lend", "amount": 50, "person": "Karim"}])
+    assert [d["action"] for d in two["debts"]] == ["created", "created"]
+    # A different amount, or later than the window, is a new loan.
+    assert _voice(app_hub, "j'ai prêté 300 à Ayoub", [{**lend[0], "amount": 300}])["debts"][0]["action"] == "created"
+    fa.sql("UPDATE app_debts SET created_at = '2026-01-01T00:00:00Z'")
+    assert _voice(app_hub, "j'ai prêté 200 dh à Ayoub", lend)["debts"][0]["action"] == "created"
+
+    # Repayments: applied once, the same memo again is a duplicate; payment_ids lists what to undo.
+    repaid = [{"type": "repaid", "amount": 250, "person": "Ayoub"}]
+    out = _voice(app_hub, "Ayoub m'a rendu 250", repaid)["debts"][0]
+    assert out["action"] == "repaid" and len(out["payment_ids"]) == len(out["debts"]) >= 1
+    dup = _voice(app_hub, "Ayoub m'a rendu 250", repaid)["debts"][0]
+    assert dup["action"] == "duplicate" and dup["payment_ids"] == []
+    paid = sum(d["paid"] for d in app_hub.get("/money/debts", params={"status": "all", "person": "Ayoub"}).json()["debts"])
+    assert paid == 250.0
+    for debt, pid in zip(out["debts"], out["payment_ids"], strict=True):  # what the PWA's Undo does
+        assert app_hub.delete(f"/money/debts/{debt['id']}/payments/{pid}").status_code == 200
+    paid = sum(d["paid"] for d in app_hub.get("/money/debts", params={"status": "all", "person": "Ayoub"}).json()["debts"])
+    assert paid == 0.0

@@ -114,6 +114,7 @@ export function ReceiptSearch({ onActive }: { onActive: (active: boolean) => voi
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ hit: ExpenseSearchHit; open: boolean; id: number } | null>(null);
+  const [tick, setTick] = useState(0);
   const active = q.trim().length >= 2;
 
   useEffect(() => {
@@ -122,6 +123,8 @@ export function ReceiptSearch({ onActive }: { onActive: (active: boolean) => voi
 
   useEffect(() => {
     if (!active) {
+      // Cleared while a search was running: that request is aborted below, so nothing else stops the spinner.
+      setLoading(false);
       setResult(null);
       setError(null);
       return undefined;
@@ -138,13 +141,16 @@ export function ReceiptSearch({ onActive }: { onActive: (active: boolean) => voi
         .catch((err) => {
           if (!(err instanceof DOMException && err.name === 'AbortError')) setError(errorText(err));
         })
-        .finally(() => !ctrl.signal.aborted && setLoading(false));
+        .finally(() => {
+          if (!ctrl.signal.aborted) setLoading(false);
+        });
     }, DEBOUNCE_MS);
     return () => {
+      // A newer query (or a cleared box) replaces this one; the next effect run decides the spinner.
       window.clearTimeout(t);
       ctrl.abort();
     };
-  }, [client, q, active]);
+  }, [client, q, active, tick]);
 
   return (
     <div className="space-y-3">
@@ -154,7 +160,7 @@ export function ReceiptSearch({ onActive }: { onActive: (active: boolean) => voi
         <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search receipts: lait, glovo, pharmacie…" className={cx(inputClass, 'pl-10 pr-10')} />
         {loading && <Spinner className="absolute right-3.5 top-1/2 -translate-y-1/2" />}
       </label>
-      {active && error && <ErrorNote message={error} />}
+      {active && error && <ErrorNote message={error} onRetry={() => setTick((n) => n + 1)} />}
       {active && result && !result.results.length && !loading && <p className="px-1 text-[14px] text-ink-400">Nothing matches “{q.trim()}”.</p>}
       {active && result && result.results.length > 0 && (
         <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-900 ring-1 ring-inset ring-ink-800">

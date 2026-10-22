@@ -10,6 +10,9 @@ Routes: ``GET/POST /money/debts``, ``GET/PATCH/DELETE /money/debts/{id}``, ``POS
 Voice (``POST /money/voice``): the money parser also returns ``lend`` / ``borrow`` entries ("j'ai prêté 200 dh à
 Ayoub", "j'ai emprunté 500 à Karim"), recorded as new loans, and ``repaid`` / ``repay`` entries ("Ayoub m'a rendu
 100", "j'ai rendu 200 à Karim"), applied to that person's open loans oldest first (:func:`record_voice_debt`).
+The same loan or repayment heard again from another recording within :data:`VOICE_DUPLICATE_S` (the memo sent
+twice after a timeout) is reported as ``duplicate`` and not stored again; every outcome lists what it stored
+(``payment_ids``) so the PWA can undo it.
 
 Reminders (``POST /notify/run?kind=debts``, daily): one push per open loan whose due date is today or was in the last
 :data:`DUE_GRACE_DAYS` days (once per loan and due date) and, on Mondays, one push listing the money lent more than
@@ -19,13 +22,13 @@ Reminders (``POST /notify/run?kind=debts``, daily): one push per open loan whose
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import Field, field_validator
 
-from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso
+from hub_api.appdata import AppDB, get_appdb, iso, local_today, new_id, now_iso
 from hub_api.merchant_rules import normalise_merchant
 from hub_api.routers.expenses import _Fields
 from hub_api.state import HubState
@@ -46,6 +49,8 @@ LENT_STALE_DAYS = 14
 DUE_GRACE_DAYS = 3
 MAX_LINES = 8
 EPS = 0.005
+MAX_AMOUNT = 1e9
+VOICE_DUPLICATE_S = 600  # the same voice loan/repayment from another recording within 10 min is the memo sent twice
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_debts ("
@@ -56,7 +61,7 @@ SCHEMA = (
     "CREATE INDEX IF NOT EXISTS app_debts_open ON app_debts (settled, date)",
     "CREATE TABLE IF NOT EXISTS app_debt_payments ("
     " id TEXT PRIMARY KEY, debt_id TEXT NOT NULL, amount REAL NOT NULL, date TEXT NOT NULL, note TEXT,"
-    " origin TEXT, created_at TEXT NOT NULL)",
+    " origin TEXT, audio_key TEXT, created_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_debt_payments_debt ON app_debt_payments (debt_id)",
 )
 
@@ -163,11 +168,16 @@ async def insert_debt(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
     return debt_out(row, [])
 
 
-async def add_payment(db: AppDB, debt: dict[str, Any], amount: float, day: str, note: str | None, origin: str) -> dict[str, Any]:
-    """Record a repayment (``amount`` <= what is left) and settle the loan when it is fully repaid."""
+async def add_payment(
+    db: AppDB, debt: dict[str, Any], amount: float, day: str, note: str | None, origin: str, *, audio_key: str | None = None
+) -> dict[str, Any]:
+    """Record a repayment (``amount`` <= what is left) and settle the loan when it is fully repaid; returns the loan
+    with ``payment_id`` set to the new repayment."""
+    payment_id = new_id()
     await db.execute(
-        "INSERT INTO app_debt_payments (id, debt_id, amount, date, note, origin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [new_id(), debt["id"], round(amount, 2), day, note, origin, now_iso()],
+        "INSERT INTO app_debt_payments (id, debt_id, amount, date, note, origin, audio_key, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [payment_id, debt["id"], round(amount, 2), day, note, origin, audio_key, now_iso()],
     )
     if debt["remaining"] - amount <= EPS:
         await db.execute(
@@ -176,7 +186,7 @@ async def add_payment(db: AppDB, debt: dict[str, Any], amount: float, day: str, 
         )
     else:
         await db.execute("UPDATE app_debts SET updated_at = ? WHERE id = ?", [now_iso(), debt["id"]])
-    return await _get(db, debt["id"])
+    return {**await _get(db, debt["id"]), "payment_id": payment_id}
 
 
 def same_person(a: str, b: str) -> bool:
@@ -198,14 +208,57 @@ async def find_open_debts(db: AppDB, person: str, direction: Direction) -> list[
 # --------------------------------------------------------------------------- voice
 
 
+def _recent_cutoff() -> str:
+    return iso(datetime.now(timezone.utc) - timedelta(seconds=VOICE_DUPLICATE_S))
+
+
+async def _voice_duplicate_loan(db: AppDB, entry: dict[str, Any], person: str, audio_key: str | None) -> dict[str, Any] | None:
+    """The loan a recent *other* recording already created for this very entry (same person, direction, amount,
+    currency and day), else None."""
+    direction = "lent" if entry["type"] == "lend" else "borrowed"
+    rows = await db.fetch(
+        "SELECT id, person, audio_key FROM app_debts WHERE origin = 'voice' AND direction = ? AND amount = ?"
+        " AND currency = ? AND date = ? AND created_at >= ?",
+        [direction, round(float(entry["amount"]), 2), entry["currency"], entry["date"], _recent_cutoff()],
+    )
+    for r in rows:
+        if r.get("audio_key") != audio_key and normalise_merchant(r["person"]) == normalise_merchant(person):
+            return await _get(db, r["id"])
+    return None
+
+
+async def _voice_duplicate_repayment(
+    db: AppDB, entry: dict[str, Any], person: str, direction: Direction, audio_key: str | None
+) -> list[dict[str, Any]] | None:
+    """The loans a recent *other* recording already repaid with this very entry (same person, direction, total
+    amount and day), else None."""
+    rows = await db.fetch(
+        "SELECT p.debt_id, p.amount, p.audio_key, d.person FROM app_debt_payments p JOIN app_debts d ON d.id = p.debt_id"
+        " WHERE p.origin = 'voice' AND p.date = ? AND p.created_at >= ? AND d.direction = ? AND d.currency = ?",
+        [entry["date"], _recent_cutoff(), direction, entry["currency"]],
+    )
+    by_audio: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if r.get("audio_key") and r["audio_key"] != audio_key and same_person(r["person"], person):
+            by_audio.setdefault(r["audio_key"], []).append(r)
+    for group in by_audio.values():
+        if abs(sum(float(r["amount"]) for r in group) - float(entry["amount"])) <= EPS:
+            return [await _get(db, i) for i in dict.fromkeys(r["debt_id"] for r in group)]
+    return None
+
+
 async def record_voice_debt(db: AppDB, entry: dict[str, Any], *, audio_key: str | None) -> dict[str, Any]:
     """One parsed voice entry of type lend/borrow/repaid/repay -> {"action", "person", "amount", "currency", "debts",
-    "applied", "unapplied"}. A repayment without a matching open loan is reported as ``unmatched`` (nothing stored)."""
+    "payment_ids", "applied", "unapplied"}. A repayment without a matching open loan is reported as ``unmatched``
+    (nothing stored); the same entry already stored by another recording a moment ago as ``duplicate``."""
     await ensure_schema(db)
     typ = entry["type"]
     person = entry.get("person") or entry.get("merchant") or ""
-    base = {"type": typ, "person": person, "amount": entry["amount"], "currency": entry["currency"]}
+    base = {"type": typ, "person": person, "amount": entry["amount"], "currency": entry["currency"], "payment_ids": []}
     if typ in ("lend", "borrow"):
+        same = await _voice_duplicate_loan(db, entry, person, audio_key)
+        if same is not None:
+            return {**base, "action": "duplicate", "debts": [same], "applied": 0.0, "unapplied": 0.0}
         debt = await insert_debt(
             db,
             {"person": person, "direction": "lent" if typ == "lend" else "borrowed", "amount": entry["amount"],
@@ -214,8 +267,12 @@ async def record_voice_debt(db: AppDB, entry: dict[str, Any], *, audio_key: str 
         )
         return {**base, "action": "created", "debts": [debt], "applied": 0.0, "unapplied": 0.0}
     direction: Direction = "lent" if typ == "repaid" else "borrowed"
+    repaid_before = await _voice_duplicate_repayment(db, entry, person, direction, audio_key)
+    if repaid_before is not None:
+        return {**base, "action": "duplicate", "debts": repaid_before, "applied": 0.0, "unapplied": 0.0}
     left = float(entry["amount"])
     touched: list[dict[str, Any]] = []
+    payment_ids: list[str] = []
     for debt in await find_open_debts(db, person, direction):
         if left <= EPS:
             break
@@ -224,11 +281,14 @@ async def record_voice_debt(db: AppDB, entry: dict[str, Any], *, audio_key: str 
         part = min(left, debt["remaining"])
         if part <= EPS:
             continue
-        touched.append(await add_payment(db, debt, part, entry["date"], entry.get("note"), "voice"))
+        paid = await add_payment(db, debt, part, entry["date"], entry.get("note"), "voice", audio_key=audio_key)
+        payment_ids.append(paid.pop("payment_id"))
+        touched.append(paid)
         left -= part
     applied = round(float(entry["amount"]) - left, 2)
     action = "repaid" if touched else "unmatched"
-    return {**base, "action": action, "debts": touched, "applied": applied, "unapplied": round(max(left, 0.0), 2)}
+    return {**base, "action": action, "debts": touched, "payment_ids": payment_ids, "applied": applied,
+            "unapplied": round(max(left, 0.0), 2)}
 
 
 # --------------------------------------------------------------------------- models
@@ -259,7 +319,7 @@ class _DebtFields(_Fields):
 class DebtCreate(_DebtFields):
     person: str = Field(min_length=1, max_length=100)
     direction: Direction
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=MAX_AMOUNT, allow_inf_nan=False)
     currency: str = "MAD"
     date: str | None = None  # default: today (Africa/Casablanca)
     due_date: str | None = None
@@ -269,7 +329,7 @@ class DebtCreate(_DebtFields):
 class DebtPatch(_DebtFields):
     person: str | None = Field(None, min_length=1, max_length=100)
     direction: Direction | None = None
-    amount: float | None = Field(None, gt=0)
+    amount: float | None = Field(None, gt=0, le=MAX_AMOUNT, allow_inf_nan=False)
     currency: str | None = None
     date: str | None = None
     due_date: str | None = None
@@ -278,7 +338,7 @@ class DebtPatch(_DebtFields):
 
 
 class RepayBody(_Fields):
-    amount: float | None = Field(None, gt=0, description="Default: everything that is left")
+    amount: float | None = Field(None, gt=0, le=MAX_AMOUNT, allow_inf_nan=False, description="Default: everything that is left")
     date: str | None = None
     note: str | None = Field(None, max_length=2000)
 
@@ -359,13 +419,22 @@ async def patch_debt(debt_id: str, body: DebtPatch, db: AppDB = Depends(_db)) ->
         changes[field] = value
     if "amount" in changes and changes["amount"] + EPS < current["paid"]:
         raise HTTPException(422, detail=f"amount cannot be less than what was already repaid ({current['paid']})")
+    amount = changes.get("amount", current["amount"])
+    # Settled by its repayments (as opposed to "forget the rest", which stays settled whatever is edited).
+    repaid_in_full = current["paid"] > 0 and current["amount"] - current["paid"] <= EPS
     if "settled" in changes:
-        changes["settled_at"] = now_iso() if changes["settled"] else None
-        changes["settled"] = 1 if changes["settled"] else 0
-    elif "amount" in changes and not current["settled"] and changes["amount"] - current["paid"] <= EPS:
-        changes.update(settled=1, settled_at=now_iso())
-    elif "amount" in changes and current["settled"] and changes["amount"] - current["paid"] > EPS and current["paid"] > 0:
-        changes.update(settled=0, settled_at=None)  # raised above what was repaid: open again
+        if changes["settled"] == current["settled"]:
+            changes.pop("settled")  # the PWA sends the whole loan back: nothing to change
+        elif not changes["settled"] and amount - current["paid"] <= EPS:
+            raise HTTPException(422, detail="this loan is fully repaid: remove a repayment to open it again")
+        else:
+            changes["settled_at"] = now_iso() if changes["settled"] else None
+            changes["settled"] = 1 if changes["settled"] else 0
+    if "settled" not in changes and "amount" in changes:
+        if not current["settled"] and amount - current["paid"] <= EPS:
+            changes.update(settled=1, settled_at=now_iso())  # lowered to what was repaid: settled
+        elif current["settled"] and repaid_in_full and amount - current["paid"] > EPS:
+            changes.update(settled=0, settled_at=None)  # raised above what was repaid: open again
     day, due = changes.get("date", current["date"]), changes.get("due_date", current["due_date"])
     if due and day and due < day:
         raise HTTPException(422, detail="due_date must not be before the loan date")
@@ -391,6 +460,8 @@ async def repay_debt(debt_id: str, body: RepayBody, db: AppDB = Depends(_db)) ->
     if debt["settled"]:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="this debt is already settled")
     amount = body.amount if body.amount is not None else debt["remaining"]
+    if debt["remaining"] <= EPS:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="nothing is left to repay on this debt")
     if amount - debt["remaining"] > EPS:
         raise HTTPException(422, detail=f"only {debt['remaining']} {debt['currency']} is left to repay")
     return await add_payment(db, debt, amount, body.date or local_today().isoformat(), body.note, "manual")
@@ -398,13 +469,15 @@ async def repay_debt(debt_id: str, body: RepayBody, db: AppDB = Depends(_db)) ->
 
 @router.delete("/{debt_id}/payments/{payment_id}")
 async def delete_payment(debt_id: str, payment_id: str, db: AppDB = Depends(_db)) -> dict[str, Any]:
-    """Remove a repayment (a mistake); a loan settled by its repayments opens again."""
-    await _get(db, debt_id)
+    """Remove a repayment (a mistake); a loan settled by its repayments opens again (one settled by hand, "forget the
+    rest", stays settled)."""
+    before = await _get(db, debt_id)
+    repaid_in_full = before["amount"] - before["paid"] <= EPS
     gone = await db.execute("DELETE FROM app_debt_payments WHERE id = ? AND debt_id = ?", [payment_id, debt_id])
     if not gone:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="payment not found")
     debt = await _get(db, debt_id)
-    if debt["settled"] and debt["amount"] - debt["paid"] > EPS:
+    if debt["settled"] and repaid_in_full and debt["amount"] - debt["paid"] > EPS:
         await db.execute("UPDATE app_debts SET settled = 0, settled_at = NULL, updated_at = ? WHERE id = ?",
                          [now_iso(), debt_id])
         debt = await _get(db, debt_id)
@@ -430,11 +503,12 @@ async def compose_debts(db: AppDB, today: date) -> list[Any]:
         if not d["due_date"] or not (first_due <= d["due_date"] <= today.isoformat()) or d["remaining"] <= 0:
             continue
         left = fmt_money(d["remaining"], d["currency"])
-        late = "" if d["due_date"] == today.isoformat() else f" (prévu le {d['due_date'][8:10]}/{d['due_date'][5:7]})"
+        line = ("Échéance aujourd'hui." if d["due_date"] == today.isoformat()
+                else f"En retard : c'était prévu le {d['due_date'][8:10]}/{d['due_date'][5:7]}.")
         if d["direction"] == "lent":
-            title, line = f"💸 {d['person']} doit te rendre {left}", f"Échéance aujourd'hui{late}."
+            title = f"💸 {d['person']} doit te rendre {left}"
         else:
-            title, line = f"💸 Tu dois rendre {left} à {d['person']}", f"Échéance aujourd'hui{late}."
+            title = f"💸 Tu dois rendre {left} à {d['person']}"
         if d.get("note"):
             line += f"\n{str(d['note'])[:200]}"
         pushes.append(Push(title=title[:250], message=line, tags=["money_with_wings"], priority=4,

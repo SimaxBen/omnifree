@@ -144,14 +144,17 @@ export function DebtSheet({ open, onClose, debt: initial, direction: initialDire
                       {p.origin === 'voice' ? ' · voice' : ''}
                     </span>
                     <span className="tabular-nums text-ink-100">{formatMoney(p.amount, debt.currency)}</span>
-                    <IconButton icon="x" label="Remove repayment" onClick={() => void act(() => client.deleteDebtPayment(debt.id, p.id), 'Repayment removed')} />
+                    <IconButton icon="x" label="Remove repayment" disabled={busy} onClick={() => void act(() => client.deleteDebtPayment(debt.id, p.id), 'Repayment removed')} />
                   </li>
                 ))}
               </ul>
             )}
-            <Button variant="ghost" className="w-full" onClick={() => void act(() => client.updateDebt(debt.id, { settled: !debt.settled }), debt.settled ? 'Opened again' : 'Marked as settled')} disabled={busy}>
-              {debt.settled ? 'Open it again' : 'Mark as settled (forget the rest)'}
-            </Button>
+            {/* A loan closed by its repayments has nothing left: it opens again by removing a repayment above. */}
+            {!(debt.settled && debt.paid >= debt.amount - 0.005) && (
+              <Button variant="ghost" className="w-full" onClick={() => void act(() => client.updateDebt(debt.id, { settled: !debt.settled }), debt.settled ? 'Opened again' : 'Marked as settled')} disabled={busy}>
+                {debt.settled ? 'Open it again' : 'Mark as settled (forget the rest)'}
+              </Button>
+            )}
           </section>
         )}
         <Segmented

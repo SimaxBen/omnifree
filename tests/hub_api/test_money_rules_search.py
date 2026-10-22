@@ -134,6 +134,23 @@ def test_rule_applies_to_bank_sms(app_hub) -> None:
     assert r.status_code == 200, r.text
     expense = r.json()["expense"]
     assert (expense["merchant"], expense["category"], expense["source"]) == ("Marjane", "shopping", "sms")
+    # The same purchase again (a second SMS, another stamp): stored as "Marjane", still recognised as the same one.
+    r = app_hub.post("/money/sms", json={"from": "CIH BANK", "text": text, "receivedStamp": 1792569660000})
+    assert r.status_code == 200 and r.json().get("expense") is None, r.text
+    assert fa.sql("SELECT COUNT(*) FROM app_expenses")[0][0] == 1
+
+
+def test_rule_upsert_keeps_the_other_action(app_hub) -> None:
+    rule = app_hub.post("/money/rules", json={"pattern": "marjane", "category": "groceries"}).json()
+    # "Always show it as Marjane" (only the name changed in the editor) must not wipe the category.
+    r = app_hub.post("/money/rules", json={"pattern": "MARJANE", "category": None, "rename": "Marjane"})
+    assert r.status_code == 200 and r.json()["id"] == rule["id"]
+    assert (r.json()["category"], r.json()["rename"]) == ("groceries", "Marjane")
+    r = app_hub.post("/money/rules", json={"pattern": "marjane", "category": "shopping", "rename": None})
+    assert (r.json()["category"], r.json()["rename"]) == ("shopping", "Marjane")
+    # PATCH still clears an action explicitly.
+    r = app_hub.patch(f"/money/rules/{rule['id']}", json={"rename": None})
+    assert (r.json()["category"], r.json()["rename"]) == ("shopping", None)
 
 
 # ------------------------------------------------------------------ search
@@ -190,3 +207,34 @@ def test_search_locates_old_receipts_and_survives_presign_failure(app_hub) -> No
     fa.sql("UPDATE app_expenses SET receipt_key = 'k.jpg', receipt_provider = 'r2' WHERE id = ?", [e2["id"]])
     hit2 = app_hub.get("/expenses/search", params={"q": "two"}).json()["results"][0]
     assert hit2["receipt_url"] is None and hit2["receipt_provider"] == "r2"
+
+
+def test_search_ignores_case_and_accents_and_json_keys(app_hub) -> None:
+    _expense(app_hub, merchant="CAFÉ BAB", note="Petit-déjeuner ÉTÉ")
+    _expense(app_hub, merchant="Épicerie Nour", items=[{"name": "Crème fraîche", "price": 12}])
+    _expense(app_hub, merchant="Glovo", items=[{"name": "Pizza", "qty": 1, "price": 60}])
+    names = lambda q: sorted(e["merchant"] for e in app_hub.get("/expenses/search", params={"q": q}).json()["results"])  # noqa: E731
+    assert names("café") == ["CAFÉ BAB"] and names("cafe") == ["CAFÉ BAB"] and names("CAFE") == ["CAFÉ BAB"]
+    assert names("epicerie") == ["Épicerie Nour"] and names("ÉPICERIE") == ["Épicerie Nour"]
+    assert names("ete dejeuner") == ["CAFÉ BAB"]
+    assert names("creme") == ["Épicerie Nour"]
+    hit = app_hub.get("/expenses/search", params={"q": "creme"}).json()["results"][0]
+    assert hit["snippet"] == "Crème fraîche"
+    # The items' JSON keys are not content: "price" or "name" match nothing.
+    assert names("price") == [] and names("name") == [] and names("qty") == []
+    # Items stored before (ASCII-escaped JSON) are found too.
+    legacy = _expense(app_hub, merchant="Old")
+    fa.sql("UPDATE app_expenses SET items = ? WHERE id = ?", ['[{"name": "Th\u00e9 vert", "qty": null, "price": null}]', legacy["id"]])
+    assert names("the vert") == ["Old"]
+    # A broken items column does not break the search.
+    fa.sql("UPDATE app_expenses SET items = 'not json' WHERE id = ?", [legacy["id"]])
+    assert names("old") == ["Old"]
+
+
+def test_patching_the_receipt_key_forgets_the_old_backend(app_hub) -> None:
+    e = _expense(app_hub, merchant="Shop")
+    fa.sql("UPDATE app_expenses SET receipt_key = 'receipts/a.jpg', receipt_provider = 'r2' WHERE id = ?", [e["id"]])
+    same = app_hub.patch(f"/expenses/{e['id']}", json={"receipt_key": "receipts/a.jpg", "note": "x"}).json()
+    assert same["receipt_provider"] == "r2"
+    moved = app_hub.patch(f"/expenses/{e['id']}", json={"receipt_key": "receipts/b.jpg"}).json()
+    assert moved["receipt_key"] == "receipts/b.jpg" and moved["receipt_provider"] is None

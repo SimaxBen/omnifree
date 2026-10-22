@@ -112,6 +112,7 @@ export function voiceDebtsOf(body: unknown): VoiceDebtOutcome[] {
 /** "Lent to Ayoub", "Ayoub paid you back", "No open loan with Sara (nothing recorded)". */
 export function voiceDebtLine(d: Pick<VoiceDebtOutcome, 'type' | 'action' | 'person' | 'unapplied' | 'currency'>): string {
   if (d.action === 'unmatched') return `No open loan with ${d.person} (nothing recorded)`;
+  if (d.action === 'duplicate') return `Already recorded a moment ago (${d.person}), not added twice`;
   const extra = d.unapplied > 0 ? ` (${d.unapplied} ${d.currency} more than owed)` : '';
   switch (d.type) {
     case 'lend':
@@ -123,6 +124,24 @@ export function voiceDebtLine(d: Pick<VoiceDebtOutcome, 'type' | 'action' | 'per
     default:
       return `You paid ${d.person} back${extra}`;
   }
+}
+
+export type VoiceDebtUndo = { kind: 'debt'; id: string } | { kind: 'payment'; debtId: string; paymentId: string };
+
+/** What Undo removes for the debts of a voice memo: the loans it created and the repayments it recorded. */
+export function voiceDebtUndo(outcomes: VoiceDebtOutcome[]): VoiceDebtUndo[] {
+  const ops: VoiceDebtUndo[] = [];
+  for (const o of outcomes) {
+    if (o.action === 'created') {
+      for (const d of o.debts) ops.push({ kind: 'debt', id: d.id });
+    } else if (o.action === 'repaid') {
+      (o.payment_ids ?? []).forEach((paymentId, i) => {
+        const debt = o.debts[i];
+        if (debt && paymentId) ops.push({ kind: 'payment', debtId: debt.id, paymentId });
+      });
+    }
+  }
+  return ops;
 }
 
 // ------------------------------------------------------------------ splits

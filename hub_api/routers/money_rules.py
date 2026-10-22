@@ -2,7 +2,7 @@
 
 * ``GET /money/rules``: every rule, with how many past expenses it matches;
 * ``POST /money/rules``: create, or update the rule with the same normalised pattern and match mode (the PWA's
-  "Always do this for <merchant>?" after an edit);
+  "Always do this for <merchant>?" after an edit); on an update, a null ``category`` or ``rename`` keeps the current one;
 * ``PATCH`` / ``DELETE /money/rules/{id}``;
 * ``POST /money/rules/{id}/apply?dry_run=1``: apply the rule to past expenses (bulk update); ``dry_run`` only counts.
 """
@@ -109,9 +109,11 @@ async def create_rule(body: RuleCreate, response: Response, db: AppDB = Depends(
         "SELECT * FROM app_merchant_rules WHERE pattern = ? AND match = ?", [body.pattern, body.match]
     )
     if existing:
+        # Merge: an action left out (null) keeps the rule's current one, so "Always show it as X" after a rename
+        # does not wipe the category the rule already sets (PATCH clears an action explicitly).
         await db.execute(
             "UPDATE app_merchant_rules SET category = ?, rename = ?, updated_at = ? WHERE id = ?",
-            [body.category, body.rename, now, existing["id"]],
+            [body.category or existing.get("category"), body.rename or existing.get("rename"), now, existing["id"]],
         )
         response.status_code = status.HTTP_200_OK
         row = await _get(db, existing["id"])

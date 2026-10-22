@@ -271,7 +271,7 @@ function EntrySheet({ open, onClose, group, entry, onSaved }: { open: boolean; o
             ))}
           </div>
         </div>
-        <p className="px-1 text-[12px] text-ink-500">When you pay, only your share is added to your expenses and budgets; the rest is what the others owe you.</p>
+        <p className="px-1 text-[12px] text-ink-500">Only your share is added to your expenses and budgets, whoever paid; repayments between you are transfers, not expenses.</p>
       </div>
     </Sheet>
   );

@@ -8,16 +8,21 @@
 Balances: a member's net is what they paid minus their shares (positive: the group owes them). Settle-up suggestions
 pair the biggest debtor with the biggest creditor until everyone is even (at most n - 1 payments).
 
-**The owner's spending rule.** A shared expense *paid by the owner* is also recorded in ``app_expenses`` for the
-owner's share only (``source = 'split'``, ``source_ref`` = the shared expense id): the friends' part is money they owe
-back, not the owner's spending, so only the owner's share counts in budgets and the month totals. It is kept in sync
-when the shared expense changes and removed with it. A shared expense paid by someone else is not mirrored: the
-owner's share is a debt to that member, settled in the group (a settlement is a transfer, never an expense).
+**The owner's spending rule.** Every shared expense the owner has a share of is also recorded in ``app_expenses``
+for that share only (``source = 'split'``, ``source_ref`` = the shared expense id), whoever paid: the owner's share
+is what the owner consumed, the rest is the others' spending. When the owner paid, the friends' part is money they
+owe back; when a friend paid, the owner's share is a debt to that friend. Either way the money that changes hands
+later is a settlement, a transfer that is never an expense, so nothing is counted twice. The mirror is kept in sync
+when the shared expense changes and removed with it.
+
+Amounts are handled in cents: the amount and every share are rounded once with :func:`_cents`, so the shares always
+add up to the amount and the balances always sum to zero.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -68,6 +73,11 @@ def _cents(x: float) -> int:
     return int(round(x * 100))
 
 
+def _money(x: float) -> float:
+    """``x`` rounded to the cent the same way the shares are (one rounding everywhere)."""
+    return _cents(x) / 100
+
+
 def equal_shares(amount: float, member_ids: list[str]) -> dict[str, float]:
     """``amount`` split equally; the leftover cents go to the first members so the shares add up exactly."""
     if not member_ids:
@@ -111,9 +121,9 @@ def settle_up(nets: dict[str, float]) -> list[dict[str, Any]]:
 
 
 def owner_share(group: dict[str, Any], entry: dict[str, Any]) -> float:
-    """The owner's share of a shared expense *they paid*; 0 otherwise (settlements included)."""
+    """The owner's share of a shared expense, whoever paid it; 0 for a settlement (a transfer, not spending)."""
     me = _me(group)
-    if entry.get("kind") != "expense" or entry["paid_by"] != me:
+    if entry.get("kind") != "expense":
         return 0.0
     return round(float(entry["shares"].get(me, 0.0)), 2)
 
@@ -214,7 +224,9 @@ async def _sync_mirror(db: AppDB, group: dict[str, Any], entry: dict[str, Any]) 
     share = owner_share(group, entry)
     if share <= 0:
         return None
-    note = f"Your share of {entry['amount']:.2f} {group['currency']} (split: {group['name']})"
+    payer = next((m["name"] for m in group["members"] if m["id"] == entry["paid_by"]), "?")
+    paid = "" if entry["paid_by"] == _me(group) else f", paid by {payer}"
+    note = f"Your share of {entry['amount']:.2f} {group['currency']}{paid} (split: {group['name']})"
     if entry.get("note"):
         note += f". {entry['note']}"
     expense = await insert_expense(
@@ -256,26 +268,31 @@ class EntryFields(_Fields):
         return v.strip() if isinstance(v, str) else v
 
 
+MAX_AMOUNT = 1e9  # anything larger is a typo (and keeps the cents arithmetic exact)
+
+
 class EntryCreate(EntryFields):
     description: str = Field("", max_length=200)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=MAX_AMOUNT, allow_inf_nan=False)
     paid_by: str = Field(min_length=1, max_length=40)
     date: str | None = None
     split: SplitMode = "equal"
-    participants: list[str] | None = Field(None, description="equal split: who shares it (default: everyone)")
-    shares: dict[str, float] | None = Field(None, description="custom split: amount per member id")
+    participants: list[str] | None = Field(
+        None, max_length=MAX_MEMBERS, description="equal split: who shares it (default: everyone)"
+    )
+    shares: dict[str, float] | None = Field(None, max_length=MAX_MEMBERS, description="custom split: amount per member id")
     category: Category = "other"
     note: str | None = Field(None, max_length=2000)
 
 
 class EntryPatch(EntryFields):
     description: str | None = Field(None, max_length=200)
-    amount: float | None = Field(None, gt=0)
+    amount: float | None = Field(None, gt=0, le=MAX_AMOUNT, allow_inf_nan=False)
     paid_by: str | None = Field(None, min_length=1, max_length=40)
     date: str | None = None
     split: SplitMode | None = None
-    participants: list[str] | None = None
-    shares: dict[str, float] | None = None
+    participants: list[str] | None = Field(None, max_length=MAX_MEMBERS)
+    shares: dict[str, float] | None = Field(None, max_length=MAX_MEMBERS)
     category: Category | None = None
     note: str | None = Field(None, max_length=2000)
 
@@ -283,7 +300,7 @@ class EntryPatch(EntryFields):
 class SettleBody(_Fields):
     from_member: str = Field(alias="from", min_length=1, max_length=40)
     to_member: str = Field(alias="to", min_length=1, max_length=40)
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=MAX_AMOUNT, allow_inf_nan=False)
     date: str | None = None
     note: str | None = Field(None, max_length=2000)
 
@@ -306,9 +323,9 @@ def _shares_for(group: dict[str, Any], amount: float, split: str, participants: 
         unknown = sorted(set(shares) - set(ids))
         if unknown:
             raise HTTPException(422, detail=f"unknown members: {', '.join(unknown)}")
-        if any(v < 0 for v in shares.values()):
-            raise HTTPException(422, detail="shares cannot be negative")
-        clean = {m: round(float(v), 2) for m, v in shares.items() if _cents(v) > 0}
+        if any(not math.isfinite(v) or v < 0 or v > MAX_AMOUNT for v in shares.values()):
+            raise HTTPException(422, detail="shares must be amounts of 0 or more")
+        clean = {m: _money(v) for m, v in shares.items() if _cents(v) > 0}
         if not clean:
             raise HTTPException(422, detail="at least one member needs a share")
         if sum(_cents(v) for v in clean.values()) != _cents(amount):
@@ -320,6 +337,14 @@ def _shares_for(group: dict[str, Any], amount: float, split: str, participants: 
         raise HTTPException(422, detail=f"unknown members: {', '.join(unknown)}")
     ordered = [m for m in ids if m in set(who)]  # member order: the leftover cents are deterministic
     return equal_shares(amount, ordered)
+
+
+def _positive(amount: float) -> float:
+    """The amount in cents; 422 when it rounds to nothing (0.001)."""
+    value = _money(amount)
+    if value <= 0:
+        raise HTTPException(422, detail="the amount must be at least 0.01")
+    return value
 
 
 def _check_member(group: dict[str, Any], member: str, what: str) -> None:
@@ -447,11 +472,12 @@ async def _store_entry(db: AppDB, group: dict[str, Any], row: dict[str, Any]) ->
 async def add_entry(group_id: str, body: EntryCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
     group = await _group(db, group_id)
     _check_member(group, body.paid_by, "paid_by")
-    shares = _shares_for(group, body.amount, body.split, body.participants, body.shares)
+    amount = _positive(body.amount)
+    shares = _shares_for(group, amount, body.split, body.participants, body.shares)
     now = now_iso()
     row = {
         "id": new_id(), "group_id": group_id, "kind": "expense", "date": body.date or local_today().isoformat(),
-        "description": body.description, "amount": round(body.amount, 2), "paid_by": body.paid_by, "split": body.split,
+        "description": body.description, "amount": amount, "paid_by": body.paid_by, "split": body.split,
         "shares": json.dumps(shares), "category": body.category, "note": body.note, "expense_id": None,
         "created_at": now, "updated_at": now,
     }
@@ -475,7 +501,7 @@ async def patch_entry(group_id: str, entry_id: str, body: EntryPatch, db: AppDB 
             raise HTTPException(422, detail=f"{f} cannot be null")
     paid_by = body.paid_by if "paid_by" in fields else entry["paid_by"]
     _check_member(group, paid_by, "paid_by")
-    amount = round(body.amount, 2) if body.amount is not None else entry["amount"]
+    amount = _positive(body.amount) if body.amount is not None else entry["amount"]
     split = body.split or entry["split"]
     shares = entry["shares"]
     if fields & {"amount", "split", "participants", "shares"}:
@@ -519,11 +545,12 @@ async def settle(group_id: str, body: SettleBody, db: AppDB = Depends(_db)) -> d
     if body.from_member == body.to_member:
         raise HTTPException(422, detail="from and to must be different members")
     names = {m["id"]: m["name"] for m in group["members"]}
+    amount = _positive(body.amount)
     now = now_iso()
     row = {
         "id": new_id(), "group_id": group_id, "kind": "settlement", "date": body.date or local_today().isoformat(),
-        "description": f"{names[body.from_member]} → {names[body.to_member]}", "amount": round(body.amount, 2),
-        "paid_by": body.from_member, "split": "custom", "shares": json.dumps({body.to_member: round(body.amount, 2)}),
+        "description": f"{names[body.from_member]} → {names[body.to_member]}", "amount": amount,
+        "paid_by": body.from_member, "split": "custom", "shares": json.dumps({body.to_member: amount}),
         "category": "other", "note": body.note, "expense_id": None, "created_at": now, "updated_at": now,
     }
     await _store_entry(db, group, row)

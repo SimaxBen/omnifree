@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { Icon, type IconName } from '../../components/icons';
-import { IconButton, SectionTitle, riseStyle } from '../../components/ui';
+import { ErrorNote, IconButton, SectionTitle, riseStyle } from '../../components/ui';
 import { useTopic } from '../../lib/bus';
 import { useHubData } from '../../lib/hub';
 import type { Debt, DebtDirection } from '../../lib/moneyTypes';
@@ -22,7 +22,11 @@ export function OwedSection({ i }: { i: number }) {
   return (
     <section className="rise" style={riseStyle(i)}>
       <SectionTitle action={<IconButton icon="plus" label="Add a loan" onClick={() => open(null, 'lent')} />}>Owed</SectionTitle>
-      {data.data && debts.length > 0 ? (
+      {data.error && !data.data ? (
+        <ErrorNote message={data.error} onRetry={data.reload} />
+      ) : !data.data ? (
+        <div className="skeleton h-[124px] rounded-card" aria-label="Loading debts" />
+      ) : debts.length > 0 ? (
         <div className="space-y-2">
           <OwedTotals data={data.data} />
           <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-900 ring-1 ring-inset ring-ink-800">

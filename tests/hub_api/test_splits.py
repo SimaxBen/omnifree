@@ -87,10 +87,12 @@ def test_split_flow_and_owner_share_rule(app_hub) -> None:
         "Riad", 100.0, "travel", "split", riad["id"])
     assert "Your share of 300.00 MAD (split: Chefchaouen)" in mine["note"]
 
-    # Sara pays dinner 90 for Sara and me only: not my spending (I owe her), nothing mirrored.
+    # Sara pays dinner 90 for Sara and me: my 45 is still my spending (I owe it to her), so it is mirrored too.
     dinner = app_hub.post(f"/money/splits/{g['id']}/expenses",
                           json={"description": "Dinner", "amount": 90, "paid_by": sara, "participants": [sara, me]}).json()["entry"]
-    assert dinner["expense_id"] is None and dinner["shares"] == {me: 45.0, sara: 45.0}
+    assert dinner["shares"] == {me: 45.0, sara: 45.0} and dinner["expense_id"]
+    mine = app_hub.get(f"/expenses/{dinner['expense_id']}").json()
+    assert mine["total"] == 45.0 and "Your share of 90.00 MAD, paid by Sara (split: Chefchaouen)" in mine["note"]
 
     # Custom shares must add up.
     bad = {"description": "Taxi", "amount": 60, "paid_by": me, "split": "custom", "shares": {me: 10, ayoub: 20}}
@@ -103,17 +105,17 @@ def test_split_flow_and_owner_share_rule(app_hub) -> None:
     assert [(s["from_name"], s["to_name"], s["amount"]) for s in detail["settle"]] == [("Ayoub", "Me", 150.0), ("Sara", "Me", 55.0)]
     assert detail["totals"] == {"spent": 450.0, "my_share": 155.0, "my_net": 205.0, "count": 3}
 
-    # Budgets/overview only see my shares: 100 (riad) + 10 (taxi).
+    # Budgets/overview only see my shares: 100 (riad) + 45 (dinner) + 10 (taxi), never the whole bills.
     month = app_hub.get("/expenses", params={"month": "2026-10"}).json()
-    assert sorted(e["total"] for e in month["expenses"]) == [10.0, 100.0]
-    assert app_hub.get("/money/overview", params={"month": "2026-10"}).json()["spent"]["expenses"] == 110.0
+    assert sorted(e["total"] for e in month["expenses"]) == [10.0, 45.0, 100.0]
+    assert app_hub.get("/money/overview", params={"month": "2026-10"}).json()["spent"]["expenses"] == 155.0
 
     for wrong in ({"description": "x", "amount": 5, "paid_by": "nobody"},
                   {"description": "x", "amount": 5, "paid_by": me, "participants": ["ghost"]},
                   {"description": "x", "amount": 5, "paid_by": me, "split": "custom"}):
         assert app_hub.post(f"/money/splits/{g['id']}/expenses", json=wrong).status_code == 422, wrong
 
-    # Editing keeps the mirror in sync: Ayoub paid the riad after all -> my share leaves my expenses.
+    # Editing keeps the mirror in sync (a new mirror replaces the old one).
     r = app_hub.patch(f"/money/splits/{g['id']}/expenses/{riad['id']}", json={"amount": 330})
     assert r.status_code == 200
     riad2 = r.json()["entry"]
@@ -121,8 +123,13 @@ def test_split_flow_and_owner_share_rule(app_hub) -> None:
     assert app_hub.get(f"/expenses/{riad2['expense_id']}").json()["total"] == 110.0
     assert app_hub.get(f"/expenses/{riad['expense_id']}").status_code == 404  # the old mirror is gone
     r = app_hub.patch(f"/money/splits/{g['id']}/expenses/{riad['id']}", json={"paid_by": ayoub})
-    assert r.json()["entry"]["expense_id"] is None
+    riad3 = r.json()["entry"]
     assert app_hub.get(f"/expenses/{riad2['expense_id']}").status_code == 404
+    assert "paid by Ayoub" in app_hub.get(f"/expenses/{riad3['expense_id']}").json()["note"]
+    # Leaving myself out of it removes my share from my expenses.
+    r = app_hub.patch(f"/money/splits/{g['id']}/expenses/{riad['id']}", json={"participants": [ayoub, sara]})
+    assert r.json()["entry"]["expense_id"] is None
+    assert app_hub.get(f"/expenses/{riad3['expense_id']}").status_code == 404
 
     # Settle up: Sara pays me back.
     s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 45})
@@ -151,3 +158,31 @@ def test_split_flow_and_owner_share_rule(app_hub) -> None:
     assert app_hub.delete(f"/money/splits/{g['id']}").status_code == 204
     assert app_hub.get(f"/money/splits/{g['id']}").status_code == 404
     assert fa.sql("SELECT COUNT(*) FROM app_split_expenses")[0][0] == 0
+
+
+def test_amounts_are_rounded_once_and_bounded(app_hub) -> None:
+    g = _group(app_hub)
+    me, ayoub, sara = (m["id"] for m in g["members"])
+    url = f"/money/splits/{g['id']}/expenses"
+    # 0.155 must not be stored as 0.15 while its shares add up to 0.16: one rounding for both.
+    for amount in (0.155, 0.075, 1.115, 2.675, 10.005, 0.125):
+        out = app_hub.post(url, json={"description": "x", "amount": amount, "paid_by": ayoub}).json()
+        entry = out["entry"]
+        assert round(sum(entry["shares"].values()), 2) == entry["amount"], (amount, entry)
+        assert abs(sum(b["net"] for b in out["group"]["balances"])) < 0.001, amount
+    custom = app_hub.post(url, json={"description": "y", "amount": 1.115, "paid_by": me, "split": "custom",
+                                     "shares": {me: 0.555, ayoub: 0.56}})
+    assert custom.status_code == 201, custom.text
+    assert sum(custom.json()["entry"]["shares"].values()) == pytest.approx(custom.json()["entry"]["amount"])
+    # Absurd amounts, an amount of nothing, a huge share, too many participants: 422, never a 500.
+    for bad in ('{"description": "x", "amount": 1e12, "paid_by": "%s"}' % me,
+                '{"description": "x", "amount": 0.001, "paid_by": "%s"}' % me,
+                '{"description": "x", "amount": 5, "paid_by": "%s", "split": "custom", "shares": {"%s": 1e300}}' % (me, me)):
+        r = app_hub.post(url, content=bad, headers={"Content-Type": "application/json"})
+        assert r.status_code == 422, (bad, r.status_code, r.text)
+    many = {"description": "x", "amount": 5, "paid_by": me, "participants": [me] * 31}
+    assert app_hub.post(url, json=many).status_code == 422
+    assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 0.001}).status_code == 422
+    s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 1.115}).json()
+    assert next(e for e in s["entries"] if e["kind"] == "settlement")["amount"] in (1.11, 1.12)
+    assert abs(sum(b["net"] for b in s["balances"])) < 0.001

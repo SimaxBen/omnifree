@@ -8,7 +8,7 @@ import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { voiceMoneySummary } from '../../lib/money';
-import { voiceDebtsOf } from '../../lib/moneyTools';
+import { voiceDebtUndo, voiceDebtsOf } from '../../lib/moneyTools';
 import type { VoiceDebtOutcome } from '../../lib/moneyTypes';
 import { readPref, writePref } from '../../lib/settings';
 import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
@@ -156,8 +156,26 @@ export default function VoiceSheet({
       await Promise.all([...expenses.map((e) => client.deleteExpense(e.id)), ...incomes.map((i) => client.deleteIncome(i.id))]);
       announce('expenses', 'money');
       notify(`Removed ${voiceMoneySummary(expenses, incomes)}`, 'ok');
-      if (!result?.note && !tasks.length) again();
+      if (!result?.note && !tasks.length && !debts.length) again();
       else setResult((r) => r && { ...r, expenses: [], incomes: [] });
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setUndoing(false);
+    }
+  };
+
+  const debtUndo = voiceDebtUndo(debts);
+  const undoDebts = async () => {
+    setUndoing(true);
+    try {
+      // Repayments first: deleting a loan also deletes its repayments.
+      await Promise.all(debtUndo.flatMap((op) => (op.kind === 'payment' ? [client.deleteDebtPayment(op.debtId, op.paymentId)] : [])));
+      await Promise.all(debtUndo.flatMap((op) => (op.kind === 'debt' ? [client.deleteDebt(op.id)] : [])));
+      announce('money');
+      notify(`Removed ${debtUndo.length} debt record${debtUndo.length === 1 ? '' : 's'}`, 'ok');
+      setDebts([]);
+      if (!result?.note && !tasks.length && !expenses.length && !incomes.length) again();
     } catch (err) {
       notify(errorText(err), 'error');
     } finally {
@@ -332,7 +350,7 @@ export default function VoiceSheet({
             </div>
           )}
 
-          <VoiceDebts debts={debts} />
+          <VoiceDebts debts={debts} onUndo={debtUndo.length ? () => void undoDebts() : undefined} undoing={undoing} />
 
           {mode === 'money' && !expenses.length && !incomes.length && !debts.length && (
             <div className="rise rounded-card bg-ink-850 p-4 ring-1 ring-inset ring-ink-700">

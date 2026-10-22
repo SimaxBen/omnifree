@@ -14,6 +14,7 @@ import {
   ruleSuggestion,
   staleLent,
   voiceDebtLine,
+  voiceDebtUndo,
   voiceDebtsOf,
 } from '../moneyTools';
 import type { Debt } from '../moneyTypes';
@@ -71,6 +72,7 @@ describe('debts helpers', () => {
     expect(voiceDebtLine({ type: 'repay', action: 'repaid', person: 'Karim', unapplied: 0, currency: 'MAD' })).toBe('You paid Karim back');
     expect(voiceDebtLine({ type: 'borrow', action: 'created', person: 'Karim', unapplied: 0, currency: 'MAD' })).toBe('Borrowed from Karim');
     expect(voiceDebtLine({ type: 'repaid', action: 'unmatched', person: 'Sara', unapplied: 20, currency: 'MAD' })).toBe('No open loan with Sara (nothing recorded)');
+    expect(voiceDebtLine({ type: 'lend', action: 'duplicate', person: 'Ayoub', unapplied: 0, currency: 'MAD' })).toBe('Already recorded a moment ago (Ayoub), not added twice');
   });
 });
 
@@ -176,5 +178,23 @@ describe('money tools client', () => {
     expect(calls[0].url.pathname).toBe('/api/expenses/search');
     expect(calls[0].url.search).toBe('?q=lait&receipts_only=1');
     expect(calls[0].auth).toBe('Bearer tok');
+  });
+});
+
+describe('voice debt undo', () => {
+  it('removes the loans created and the repayments recorded, nothing for duplicates or unmatched', () => {
+    const ops = voiceDebtUndo([
+      { type: 'lend', action: 'created', person: 'Ayoub', amount: 200, currency: 'MAD', debts: [debt({ id: 'new' })], payment_ids: [], applied: 0, unapplied: 0 },
+      { type: 'repaid', action: 'repaid', person: 'Karim', amount: 250, currency: 'MAD', debts: [debt({ id: 'k1' }), debt({ id: 'k2' })], payment_ids: ['p1', 'p2'], applied: 250, unapplied: 0 },
+      { type: 'lend', action: 'duplicate', person: 'Ayoub', amount: 200, currency: 'MAD', debts: [debt({ id: 'old' })], payment_ids: [], applied: 0, unapplied: 0 },
+      { type: 'repaid', action: 'unmatched', person: 'Sara', amount: 20, currency: 'MAD', debts: [], applied: 0, unapplied: 20 },
+      { type: 'repay', action: 'repaid', person: 'Omar', amount: 5, currency: 'MAD', debts: [debt({ id: 'o1' })], applied: 5, unapplied: 0 },
+    ]);
+    expect(ops).toEqual([
+      { kind: 'debt', id: 'new' },
+      { kind: 'payment', debtId: 'k1', paymentId: 'p1' },
+      { kind: 'payment', debtId: 'k2', paymentId: 'p2' },
+    ]);
+    expect(voiceDebtUndo([])).toEqual([]);
   });
 });

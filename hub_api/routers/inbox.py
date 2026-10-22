@@ -49,6 +49,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso
+from hub_api.merchant_rules import merchant_aliases
 from hub_api.rag_extract import ExtractionError, extract, html_to_text
 from hub_api.receipts import read_receipt_file, read_receipt_text
 from hub_api.routers.expenses import _valid_date, ensure_schema, insert_expense, parse_receipt
@@ -510,9 +511,12 @@ async def _process(
     fields["source_ref"] = meta["ref"]
     # One purchase often sends several emails (order, payment and exchange summaries): same merchant,
     # amount, currency and day as an expense already recorded -> treat it as the same purchase.
+    # A merchant rule may have stored the first one under its display name: compare against both names.
+    names = await merchant_aliases(db, fields["merchant"])
     same = await db.fetch(
-        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ? AND lower(merchant) = lower(?) LIMIT 1",
-        [fields["date"], fields["total"], fields["currency"], fields["merchant"]],
+        "SELECT id FROM app_expenses WHERE date = ? AND total = ? AND currency = ?"
+        f" AND lower(merchant) IN ({', '.join('lower(?)' for _ in names)}) LIMIT 1",
+        [fields["date"], fields["total"], fields["currency"], *names],
     )
     if same:
         return None, f"same purchase as expense {same[0]['id']}"

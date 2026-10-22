@@ -98,11 +98,14 @@ export interface DebtListing {
 /** One loan or repayment heard by `POST /money/voice`. */
 export interface VoiceDebtOutcome {
   type: 'lend' | 'borrow' | 'repaid' | 'repay';
-  action: 'created' | 'repaid' | 'unmatched';
+  /** `duplicate`: the same loan or repayment was stored from another recording a moment ago; nothing new stored. */
+  action: 'created' | 'repaid' | 'unmatched' | 'duplicate';
   person: string;
   amount: number;
   currency: string;
   debts: Debt[];
+  /** The repayments this entry stored, one per loan in `debts` (what Undo removes). */
+  payment_ids?: string[];
   applied: number;
   unapplied: number;
 }
@@ -127,7 +130,7 @@ export interface SplitEntry {
   shares: Record<string, number>;
   category: ExpenseCategory;
   note: string | null;
-  /** The owner's-share expense in app_expenses (only when the owner paid). */
+  /** The owner's-share expense in app_expenses (whoever paid; null when the owner has no share). */
   expense_id: string | null;
   created_at: string;
   updated_at: string;

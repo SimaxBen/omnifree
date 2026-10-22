@@ -21,7 +21,7 @@ from hub_api.appdata import AppDB
 
 __all__ = [
     "RULES_SCHEMA", "MATCH_MODES", "normalise_merchant", "rule_matches", "best_rule", "apply_rule",
-    "ensure_rules", "load_rules", "apply_rules", "rule_out",
+    "ensure_rules", "load_rules", "apply_rules", "merchant_aliases", "rule_out",
 ]
 
 MATCH_MODES = ("contains", "equals")
@@ -90,6 +90,15 @@ async def apply_rules(db: AppDB, fields: dict[str, Any], *, keep_category: bool 
     if not fields.get("merchant"):
         return fields
     return apply_rule(fields, best_rule(await load_rules(db), fields["merchant"]), keep_category=keep_category)
+
+
+async def merchant_aliases(db: AppDB, merchant: Any) -> list[str]:
+    """The names an expense from ``merchant`` can be stored under: the raw name and, when a rule renames it, the
+    display name. The duplicate checks of the email and SMS imports compare against both, so a renamed expense
+    still catches the same purchase arriving again under its raw name."""
+    raw = merchant if isinstance(merchant, str) else ""
+    renamed = (await apply_rules(db, {"merchant": raw})).get("merchant") or raw
+    return [raw] if renamed.lower() == raw.lower() else [raw, renamed]
 
 
 def rule_out(row: dict[str, Any]) -> dict[str, Any]:
