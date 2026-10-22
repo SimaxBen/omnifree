@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { canRecord, formatClock, useRecorder } from '../../components/Recorder';
 import { Card, ErrorNote, IconButton, Toggle, cx, haptic } from '../../components/ui';
-import { type AssistantReply, SPEECH_TAGS, type SpeechLang, detectLanguage, isSpokenNo, isSpokenYes, pickVoice, speakableText } from '../../lib/assistant';
+import {
+  type AskResult,
+  SPEECH_TAGS,
+  type SpeechLang,
+  busyLine,
+  detectLanguage,
+  failureLine,
+  isSpokenNo,
+  isSpokenYes,
+  pickVoice,
+  speakableText,
+} from '../../lib/assistant';
 import { errorText, useHub } from '../../lib/hub';
 import { readPref, writePref } from '../../lib/settings';
 
@@ -66,7 +77,7 @@ export default function VoiceAssistant({
   onDismissPending,
   onClose,
 }: {
-  ask: (text: string) => Promise<AssistantReply | null>;
+  ask: (text: string) => Promise<AskResult>;
   hasPending: boolean;
   onConfirmPending: () => Promise<string>;
   onDismissPending: () => void;
@@ -167,8 +178,17 @@ export default function VoiceAssistant({
           await say(detectLanguage(text) === 'en' ? 'Cancelled.' : 'Annulé.');
         } else {
           setPhase('thinking');
-          const reply = await ask(text);
-          if (reply?.content) await say(reply.content, reply.language);
+          const res = await ask(text);
+          if (!res.ok) {
+            // Say it (the owner may not be looking), then stop: hands-free must not listen again after a failure.
+            if (!alive.current) return;
+            if (!res.aborted) await say(res.busy ? busyLine(detectLanguage(text)) : failureLine(detectLanguage(text)));
+            if (!alive.current) return;
+            if (!res.aborted) setError(res.error);
+            setPhase('idle');
+            return;
+          }
+          if (res.reply.content) await say(res.reply.content, res.reply.language);
         }
         if (!alive.current) return;
         if (conversation) {

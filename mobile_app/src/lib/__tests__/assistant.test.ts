@@ -3,9 +3,14 @@ import { HubClient } from '../api';
 import {
   assistantChat,
   assistantConfirm,
+  assistantRoute,
   attachmentKey,
   attachmentKind,
+  busyLine,
+  chipState,
   detectLanguage,
+  failureLine,
+  generalHistory,
   isSpokenNo,
   isSpokenYes,
   memoryCreate,
@@ -14,6 +19,9 @@ import {
   memoryList,
   memoryUpdate,
   pickVoice,
+  preferenceSystem,
+  savedTools,
+  sendPath,
   speakableText,
   toolLabel,
   usesAssistant,
@@ -25,6 +33,62 @@ describe('assistant pure helpers', () => {
     expect(usesAssistant('always', 0)).toBe(true);
     expect(usesAssistant('never', 0)).toBe(false);
     expect(usesAssistant('never', 1)).toBe(true);
+  });
+
+  it('streams general questions: plain in Never, a keyword probe in Auto when streaming, else the assistant', () => {
+    expect(sendPath('never', 0, true)).toBe('plain');
+    expect(sendPath('auto', 0, true)).toBe('probe');
+    expect(sendPath('auto', 0, false)).toBe('assistant');
+    expect(sendPath('auto', 1, true)).toBe('assistant');
+    expect(sendPath('always', 0, true)).toBe('assistant');
+    expect(sendPath('never', 2, true)).toBe('assistant');
+  });
+
+  it('withholds earlier data answers from a general (plain) chat', () => {
+    const out = generalHistory([
+      { role: 'user', content: 'combien j ai dépensé ?' },
+      { role: 'assistant', content: '3 200 MAD', data: true },
+      { role: 'assistant', content: 'Bonjour' },
+    ]);
+    expect(out[1].content).toMatch(/withheld/);
+    expect(out[2]).toEqual({ role: 'assistant', content: 'Bonjour' });
+    expect(JSON.stringify(out)).not.toMatch(/3 200|"data"/);
+  });
+
+  it('turns answer preferences into one system message', () => {
+    expect(preferenceSystem([])).toBeNull();
+    expect(preferenceSystem([' ', ''])).toBeNull();
+    expect(preferenceSystem(['Je préfère le darija', 'short answers'])).toBe(
+      'How the owner wants answers (saved preferences, follow them):\n- Je préfère le darija\n- short answers',
+    );
+  });
+
+  it('shows proposed writes as proposed until confirmed, and saves their final status', () => {
+    const read = { name: 'tasks_list', summary: '2 tasks', ok: true };
+    const failed = { name: 'expenses_month', summary: 'error: x', ok: false };
+    const proposed = { name: 'expense_add', summary: 'Expense 350 MAD', ok: true, pending: true, action_id: 'a1' };
+    expect(chipState(read)).toBe('ok');
+    expect(chipState(failed)).toBe('error');
+    expect(chipState(proposed)).toBe('proposed');
+    expect(chipState(proposed, [{ id: 'a1', status: 'waiting' }])).toBe('proposed');
+    expect(chipState(proposed, [{ id: 'a1', status: 'done' }])).toBe('created');
+    expect(chipState(proposed, [{ id: 'a1', status: 'dismissed' }])).toBe('dismissed');
+    expect(chipState({ name: 'expense_add', summary: 'x', status: 'not-created' })).toBe('not-created');
+    expect(savedTools([read, proposed], [{ id: 'a1', status: 'done' }])).toEqual([
+      { name: 'tasks_list', summary: '2 tasks', ok: true },
+      { name: 'expense_add', summary: 'Expense 350 MAD', ok: true, status: 'created' },
+    ]);
+    expect(savedTools([proposed], [{ id: 'a1', status: 'error' }])[0].status).toBe('not-created');
+    expect(savedTools([proposed])[0].status).toBe('not-created');
+    expect(savedTools([{ name: 'expense_add', summary: 'x', status: 'dismissed' }])[0].status).toBe('dismissed');
+  });
+
+  it('has a spoken failure and busy line per language', () => {
+    expect(failureLine('fr')).toMatch(/^Désolé/);
+    expect(failureLine('en')).toMatch(/^Sorry/);
+    expect(failureLine('ar').length).toBeGreaterThan(5);
+    expect(busyLine('fr')).toMatch(/^Un instant/);
+    expect(busyLine('en')).toMatch(/^One moment/);
   });
 
   it('builds chat/YYYY/MM attachment keys with a timestamp and a safe name', () => {
@@ -82,11 +146,25 @@ describe('assistant pure helpers', () => {
     expect(isSpokenNo('non merci')).toBe(true);
     expect(isSpokenNo('annule')).toBe(true);
     expect(isSpokenNo('note ça')).toBe(false);
+    // Arabic script (Whisper writes Darija this way) and short French words that are not answers
+    expect(isSpokenYes('نعم')).toBe(true);
+    expect(isSpokenYes('واخا')).toBe(true);
+    expect(isSpokenYes('واخا، زيدها')).toBe(true);
+    expect(isSpokenNo('لا')).toBe(true);
+    expect(isSpokenNo('لا شكرا')).toBe(true);
+    expect(isSpokenYes('لا')).toBe(false);
+    expect(isSpokenNo("la facture d'eau ?")).toBe(false);
+    expect(isSpokenNo('la')).toBe(true);
+    expect(isSpokenNo('Lla.')).toBe(true);
+    expect(isSpokenYes('ah bon ?')).toBe(false);
+    expect(isSpokenYes('Ah !')).toBe(true);
+    expect(isSpokenYes('ok non attends')).toBe(false);
+    expect(isSpokenYes('okapi')).toBe(false);
   });
 
   it('labels tools for the chips', () => {
     expect(toolLabel('expenses_month')).toBe('Expenses');
-    expect(toolLabel('remember')).toBe('Remembered');
+    expect(toolLabel('remember')).toBe('Memory');
     expect(toolLabel('some_new_tool')).toBe('some new tool');
   });
 });
@@ -129,6 +207,14 @@ describe('assistant hub calls', () => {
     const done = await assistantConfirm(client, { tool: 'tasks_add', args: { title: 'x' } });
     expect(done.ok).toBe(true);
     expect(calls[1].json).toEqual({ tool: 'tasks_add', args: { title: 'x' } });
+  });
+
+  it('asks the keyword router', async () => {
+    const calls = mockHub(() => ({ body: { route: 'general', reason: 'general-keyword', preferences: ['x'] } }));
+    const r = await assistantRoute(client, { text: 'translate hi', previous_route: 'data', mode: 'auto' });
+    expect(r.route).toBe('general');
+    expect(calls[0].url.pathname).toBe('/api/assistant/route');
+    expect(calls[0].json).toEqual({ text: 'translate hi', previous_route: 'data', mode: 'auto' });
   });
 
   it('lists, creates, updates, deletes and forgets memories', async () => {

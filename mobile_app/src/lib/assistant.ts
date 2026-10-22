@@ -10,13 +10,21 @@ export const DATA_MODES: { value: DataMode; label: string }[] = [
   { value: 'never', label: 'Never' },
 ];
 
-export type WriteTool = 'tasks_add' | 'expense_add' | 'notes_create' | 'income_add' | 'calendar_add_event';
+/** Writes the owner confirms; `remember` too when the turn read third-party text (a file, notes, Drive). */
+export type WriteTool = 'tasks_add' | 'expense_add' | 'notes_create' | 'income_add' | 'calendar_add_event' | 'remember';
+
+/** Final state of a proposed write, kept with the saved chat: created, dismissed or never confirmed. */
+export type ProposedStatus = 'created' | 'dismissed' | 'not-created';
 
 export interface UsedTool {
   name: string;
   args?: Record<string, unknown>;
   summary: string;
   ok?: boolean;
+  /** A write only proposed (waiting for Confirm), tied to its card by `action_id`. */
+  pending?: boolean;
+  action_id?: string;
+  status?: ProposedStatus;
 }
 
 export interface PendingAction {
@@ -38,17 +46,34 @@ export interface AttachmentRef {
   truncated?: boolean;
 }
 
+export type MemoryKind = 'fact' | 'preference';
+
 export interface MemoryFact {
   id: string;
   fact: string;
   pinned: boolean;
+  /** preference: how to answer (sent with every chat); fact: only with questions about your data. */
+  kind?: MemoryKind;
   source_chat: string | null;
   created_at: string;
   updated_at: string;
 }
 
+/** A history message; `data` marks an earlier answer drawn from the owner's data (tools or facts). */
+export interface AssistantMessage extends ChatMessage {
+  data?: boolean;
+}
+
+/** What replaces a data answer in the history of a general question (no personal data leaves then). */
+export const WITHHELD_ANSWER = "[Earlier answer drawn from the owner's personal data: withheld from this general question.]";
+
+/** History for a plain (general) chat: earlier data answers are withheld, the `data` flags dropped. */
+export function generalHistory(messages: readonly AssistantMessage[]): ChatMessage[] {
+  return messages.map((m) => ({ role: m.role, content: m.data && m.role === 'assistant' ? WITHHELD_ANSWER : m.content }));
+}
+
 export interface AssistantRequest {
-  messages: ChatMessage[];
+  messages: AssistantMessage[];
   mode: DataMode;
   auto_confirm?: boolean;
   chat_id?: string;
@@ -56,6 +81,8 @@ export interface AssistantRequest {
   model?: string | null;
   provider?: string | null;
   allow_fallback?: boolean;
+  /** How the previous reply was routed: a short follow-up of a data turn stays on data. */
+  previous_route?: 'data' | 'general';
 }
 
 export interface AssistantReply {
@@ -66,12 +93,24 @@ export interface AssistantReply {
   pending_actions: PendingAction[];
   remembered: MemoryFact[];
   memories_used: number;
+  /** The final answer failed after tools ran: `content` lists what was read, created or proposed. */
+  partial?: boolean;
   attachments: AttachmentRef[];
   language: SpeechLang;
   routed_via: string;
   model: string;
   latency_ms: number;
 }
+
+export interface RouteResult {
+  route: 'data' | 'general' | 'ambiguous';
+  reason: string;
+  /** Answer-style preferences a general turn may carry (sent as a system message when streaming). */
+  preferences: string[];
+}
+
+/** What ChatPanel.send gives the voice assistant: the reply, or why there is none. */
+export type AskResult = { ok: true; reply: AssistantReply } | { ok: false; error: string; busy?: boolean; aborted?: boolean };
 
 export interface ConfirmResult {
   ok: boolean;
@@ -84,6 +123,15 @@ export interface ConfirmResult {
 
 export function assistantChat(client: HubClient, req: AssistantRequest, signal?: AbortSignal): Promise<AssistantReply> {
   return client.request<AssistantReply>('POST', '/assistant/chat', { json: req, signal });
+}
+
+/** Keyword routing only (no LLM): lets the PWA stream general answers in Auto mode. */
+export function assistantRoute(
+  client: HubClient,
+  body: { text: string; previous?: string; previous_route?: 'data' | 'general'; mode: DataMode },
+  signal?: AbortSignal,
+): Promise<RouteResult> {
+  return client.request<RouteResult>('POST', '/assistant/route', { json: body, signal });
 }
 
 export function assistantConfirm(client: HubClient, action: Pick<PendingAction, 'tool' | 'args'>): Promise<ConfirmResult> {
@@ -99,7 +147,7 @@ export function memoryCreate(client: HubClient, fact: string, pinned = false): P
   return client.request<MemoryFact>('POST', '/assistant/memory', { json: { fact, pinned } });
 }
 
-export function memoryUpdate(client: HubClient, id: string, patch: { fact?: string; pinned?: boolean }): Promise<MemoryFact> {
+export function memoryUpdate(client: HubClient, id: string, patch: { fact?: string; pinned?: boolean; kind?: MemoryKind }): Promise<MemoryFact> {
   return client.request<MemoryFact>('PATCH', `/assistant/memory/${encodeURIComponent(id)}`, { json: patch });
 }
 
@@ -128,7 +176,7 @@ const TOOL_LABELS: Record<string, string> = {
   notes_create: 'New note',
   income_add: 'New income',
   calendar_add_event: 'New event',
-  remember: 'Remembered',
+  remember: 'Memory',
 };
 
 /** Short chip label for a tool name. */
@@ -139,6 +187,48 @@ export function toolLabel(name: string): string {
 /** Whether a message goes through /assistant/chat (data modes, or files attached) rather than the plain pool chat. */
 export function usesAssistant(mode: DataMode, attachmentCount: number): boolean {
   return mode !== 'never' || attachmentCount > 0;
+}
+
+/**
+ * How a typed message is sent: `assistant` (/assistant/chat), `plain` (pool chat, streamed or not),
+ * or `probe` (Auto with streaming on: ask /assistant/route first and stream when it says general).
+ */
+export function sendPath(mode: DataMode, attachmentCount: number, streaming: boolean): 'assistant' | 'plain' | 'probe' {
+  if (!usesAssistant(mode, attachmentCount)) return 'plain';
+  return mode === 'auto' && attachmentCount === 0 && streaming ? 'probe' : 'assistant';
+}
+
+/** The system message carrying answer-style preferences on a streamed general turn (null when none). */
+export function preferenceSystem(preferences: readonly string[]): string | null {
+  const items = preferences.map((p) => p.trim()).filter(Boolean);
+  return items.length ? ['How the owner wants answers (saved preferences, follow them):', ...items.map((p) => `- ${p}`)].join('\n') : null;
+}
+
+export type ChipState = 'ok' | 'error' | 'proposed' | 'created' | 'dismissed' | 'not-created';
+
+interface ActionLike {
+  id: string;
+  status: string;
+}
+
+/** What a tool chip shows: a proposed write follows its Confirm card (live) or its saved status. */
+export function chipState(tool: UsedTool, actions?: readonly ActionLike[]): ChipState {
+  if (tool.status) return tool.status;
+  if (tool.ok === false) return 'error';
+  if (!tool.pending) return 'ok';
+  const action = actions?.find((a) => a.id === tool.action_id);
+  if (action?.status === 'done') return 'created';
+  if (action?.status === 'dismissed') return 'dismissed';
+  return 'proposed';
+}
+
+/** Tool records kept with a saved chat: proposed writes carry their final status (a card cannot come back). */
+export function savedTools(tools: readonly UsedTool[], actions?: readonly ActionLike[]): { name: string; summary: string; ok?: boolean; status?: ProposedStatus }[] {
+  return tools.map((t) => {
+    const state = chipState(t, actions);
+    const status: ProposedStatus | undefined = !t.pending && !t.status ? undefined : state === 'created' || state === 'dismissed' ? state : 'not-created';
+    return { name: t.name, summary: t.summary, ...(t.ok !== undefined ? { ok: t.ok } : {}), ...(status ? { status } : {}) };
+  });
 }
 
 /** Drive key of a chat attachment: chat/YYYY/MM/<yyyymmdd-hhmmss>-<safe name>. */
@@ -193,6 +283,16 @@ export function detectLanguage(text: string): SpeechLang {
   return fr > en ? 'fr' : 'en';
 }
 
+/** Spoken when the assistant could not answer (hub error, timeout), in the language of the question. */
+export function failureLine(lang: SpeechLang): string {
+  return { fr: "Désolé, ça n'a pas marché. Réessaie dans un instant.", en: "Sorry, that didn't work. Try again in a moment.", ar: 'سمح ليا، ما خدمش. عاود من بعد شوية.' }[lang];
+}
+
+/** Spoken when a previous request is still running. */
+export function busyLine(lang: SpeechLang): string {
+  return { fr: 'Un instant, je termine la demande précédente.', en: 'One moment, I am still on the previous request.', ar: 'لحظة، مازال كنكمل الطلب اللي قبل.' }[lang];
+}
+
 export const SPEECH_TAGS: Record<SpeechLang, string> = { fr: 'fr-FR', ar: 'ar-MA', en: 'en-US' };
 
 interface VoiceLike {
@@ -232,11 +332,18 @@ export function speakableText(markdown: string, max = 1200): string {
   return (end > max / 2 ? cut.slice(0, end + 1) : cut).trim();
 }
 
-/** Short French/English confirmation phrases for hands-free use ("oui", "confirme", "yes", "wakha"). */
+// Word ends that also work after Arabic letters (`\b` does not: they are not ASCII word characters).
+// Short words that are also common ("la facture ?", "ah bon") only count as the whole utterance.
+const SPOKEN_YES = /^(?:oui|ouais|yes|yeah|yep|ok|okay|d['’]accord|confirme[rsz]?|confirm|vas-y|go|wakha|iyeh|نعم|واخا|إيه|ايه)(?![\p{L}\p{N}])|^(?:ah|اه|آه)[\s.,!?؟،]*$/iu;
+const SPOKEN_NO = /^(?:non|no|nope|annule[rsz]?|cancel|stop|لا|لالا)(?![\p{L}\p{N}])|^(?:la|lla)[\s.,!?؟،]*$/iu;
+const SPOKEN_NEGATION = /(?:^|[^\p{L}\p{N}])(?:non|no|nope|annule[rsz]?|cancel|stop|لا)(?![\p{L}\p{N}])/iu;
+
+/** Short French/English/Darija confirmation phrases for hands-free use ("oui", "confirme", "yes", "wakha", "واخا"). */
 export function isSpokenYes(text: string): boolean {
-  return /^\s*(oui|ouais|yes|yeah|yep|ok|okay|d'accord|confirme[rsz]?|confirm|vas-y|go|wakha|iyeh|ah|نعم|واخا|اه)\b/i.test(text.trim());
+  const t = text.trim();
+  return SPOKEN_YES.test(t) && !SPOKEN_NEGATION.test(t); // "ok non attends" is not a yes
 }
 
 export function isSpokenNo(text: string): boolean {
-  return /^\s*(non|no|nope|annule[rsz]?|cancel|stop|la|lla|لا)\b/i.test(text.trim());
+  return SPOKEN_NO.test(text.trim());
 }

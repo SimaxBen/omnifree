@@ -8,10 +8,15 @@ import {
   MAX_ATTACHMENTS,
   assistantChat,
   assistantConfirm,
+  assistantRoute,
   attachmentKey,
   attachmentKind,
-  usesAssistant,
-  type AssistantReply,
+  generalHistory,
+  preferenceSystem,
+  savedTools,
+  sendPath,
+  type AskResult,
+  type AssistantMessage,
   type AttachmentRef,
   type DataMode,
   type UsedTool,
@@ -51,6 +56,8 @@ interface Turn {
   usage?: Usage | null;
   error?: string;
   pending?: boolean;
+  /** What a pending reply is doing ("Checking your data..."), shown instead of "routing...". */
+  status?: string;
   /** Assistant turns (/assistant/chat): data route, tools used, writes to confirm, files sent. */
   routed?: 'data' | 'general';
   tools?: UsedTool[];
@@ -180,7 +187,8 @@ export default function ChatPanel() {
           routedVia: m.routed_via,
           model: m.model,
           ...(m.attachments?.length ? { attachments: m.attachments } : {}),
-          ...(m.tools?.length ? { tools: m.tools } : {}),
+          // A saved reply that used tools came from the owner's data (withheld from later general questions).
+          ...(m.tools?.length ? { tools: m.tools, routed: 'data' as const } : {}),
         })),
     );
     setSync(synced ? 'saved' : 'pending');
@@ -241,7 +249,7 @@ export default function ChatPanel() {
       ...(t.routedVia ? { routed_via: t.routedVia } : {}),
       ...(t.model ? { model: t.model } : {}),
       ...(t.attachments?.length ? { attachments: t.attachments.map(({ provider, key, name, content_type, size }) => ({ provider, key, name, content_type, size })) } : {}),
-      ...(t.tools?.length ? { tools: t.tools.map(({ name, summary, ok }) => ({ name, summary, ok })) } : {}),
+      ...(t.tools?.length ? { tools: savedTools(t.tools, t.actions) } : {}),
     }));
     const lastModel = [...current].reverse().find((t) => t.role === 'assistant' && t.model)?.model ?? null;
     const title = m.titleSource === 'auto' ? chatTitleFrom(messages) : m.title;
@@ -339,7 +347,11 @@ export default function ChatPanel() {
       client
         .driveUploadFile(file, { key: attachmentKey(file.name), onProgress: (p) => patchDraft(id, { progress: p }) })
         .then((res) => patchDraft(id, { progress: 1, ref: { provider: res.provider, key: res.key, name: file.name, content_type: file.type || null, size: file.size } }))
-        .catch((err) => patchDraft(id, { error: errorText(err) }));
+        .catch((err) => {
+          const error = errorText(err);
+          patchDraft(id, { error });
+          notify(`${file.name}: ${error}`, 'error');
+        });
     }
   };
 
@@ -372,7 +384,7 @@ export default function ChatPanel() {
       const res = await assistantConfirm(client, action);
       setAction(turnId, action.id, { status: 'done' });
       announce(...(TOOL_TOPICS[action.tool] ?? []));
-      notify(`Created: ${res.summary}`, 'ok');
+      notify(action.tool === 'remember' ? res.summary : `Created: ${res.summary}`, 'ok');
       return true;
     } catch (err) {
       setAction(turnId, action.id, { status: 'error', error: errorText(err) });
@@ -398,21 +410,31 @@ export default function ChatPanel() {
 
   // ---------------------------------------------------------------- send
 
-  /** Sends `override` (voice) or the input box. Returns the assistant reply when it went through /assistant/chat. */
-  const send = async (override?: string): Promise<AssistantReply | null> => {
+  /** Sends `override` (voice) or the input box. Resolves with the assistant reply, or why there is none (voice speaks it). */
+  const send = async (override?: string): Promise<AskResult> => {
     const text = (override ?? input).trim();
     const files = override === undefined ? drafts.filter((d) => d.ref).map((d) => d.ref as AttachmentRef) : [];
-    if ((!text && !files.length) || busy || (override === undefined && uploading)) return null;
+    if (busy) return { ok: false, busy: true, error: 'Still answering the previous message' };
+    if ((!text && !files.length) || (override === undefined && uploading)) return { ok: false, error: 'Nothing to send' };
     // Voice turns always go through the assistant (it answers in JSON to speak; "Never" still keeps data out).
-    const viaAssistant = override !== undefined || usesAssistant(dataMode, files.length);
+    let path = override !== undefined ? 'assistant' : sendPath(dataMode, files.length, streaming);
+    const previousRoute = [...turns].reverse().find((t) => t.role === 'assistant' && t.routed)?.routed;
+    const previousText = [...turns].reverse().find((t) => t.role === 'user')?.content;
     const userTurn: Turn = { id: idRef.current++, role: 'user', content: text || 'What is in this file?', ...(files.length ? { attachments: files } : {}) };
-    const reply: Turn = { id: idRef.current++, role: 'assistant', content: '', pending: true };
+    const reply: Turn = {
+      id: idRef.current++,
+      role: 'assistant',
+      content: '',
+      pending: true,
+      ...(path === 'assistant' && dataMode === 'always' ? { status: 'Checking your data...' } : {}),
+    };
     // The whole conversation goes back to the model; the oldest turns are dropped when it gets too long.
-    const history: ChatMessage[] = trimHistory([
+    // Replies drawn from the owner's data are flagged: a general turn gets them withheld (hub or generalHistory).
+    const history = trimHistory([
       ...(system.trim() ? [{ role: 'system' as const, content: system.trim() }] : []),
-      ...turns.filter((t) => !t.error && t.content).map((t) => ({ role: t.role, content: t.content })),
+      ...turns.filter((t) => !t.error && t.content).map((t): AssistantMessage => ({ role: t.role, content: t.content, ...(t.role === 'assistant' && t.routed === 'data' ? { data: true } : {}) })),
       { role: 'user', content: userTurn.content },
-    ]);
+    ]) as AssistantMessage[];
     setTurns((ts) => [...ts, userTurn, reply]);
     if (override === undefined) {
       setInput('');
@@ -424,18 +446,37 @@ export default function ChatPanel() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const { provider, model } = parseModelChoice(choice);
-    const req = { messages: history, model, provider, allow_fallback: allowFallback };
+    let req: { messages: ChatMessage[]; model: typeof model; provider: typeof provider; allow_fallback: boolean } = {
+      messages: generalHistory(history),
+      model,
+      provider,
+      allow_fallback: allowFallback,
+    };
     const started = performance.now();
     try {
-      if (viaAssistant) {
+      if (path === 'probe') {
+        // Auto + streaming: a cheap keyword check (no LLM) decides whether to stream a general answer.
+        try {
+          const r = await assistantRoute(client, { text: userTurn.content, previous: previousText, previous_route: previousRoute, mode: dataMode }, ctrl.signal);
+          path = r.route === 'general' ? 'plain' : 'assistant';
+          const prefs = r.route === 'general' ? preferenceSystem(r.preferences) : null;
+          if (prefs) req = { ...req, messages: trimHistory([{ role: 'system', content: prefs }, ...generalHistory(history)]) };
+          patch(reply.id, (t) => ({ ...t, status: r.route === 'data' ? 'Checking your data...' : r.route === 'ambiguous' ? 'Thinking...' : undefined }));
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') throw err;
+          path = 'assistant';
+        }
+      }
+      if (path === 'assistant') {
         const res = await assistantChat(
           client,
-          { ...req, mode: dataMode, auto_confirm: autoConfirm, chat_id: chatIdRef.current, attachments: files },
+          { ...req, messages: history, mode: dataMode, auto_confirm: autoConfirm, chat_id: chatIdRef.current, attachments: files, previous_route: previousRoute },
           ctrl.signal,
         );
         patch(reply.id, (t) => ({
           ...t,
           pending: false,
+          status: undefined,
           content: res.content,
           routedVia: res.routed_via || undefined,
           model: res.model || undefined,
@@ -450,7 +491,7 @@ export default function ChatPanel() {
           if (topics.length) announce(...topics);
         }
         if (res.remembered.length) notify(`Remembered: ${res.remembered.map((m) => m.fact).join(' · ')}`, 'ok');
-        return res;
+        return { ok: true, reply: res };
       }
       if (streaming) {
         await client.stream(
@@ -484,12 +525,14 @@ export default function ChatPanel() {
       }
     } catch (err) {
       const aborted = err instanceof DOMException && err.name === 'AbortError';
-      patch(reply.id, (t) => ({ ...t, pending: false, error: aborted ? 'Stopped.' : errorText(err) }));
+      const message = aborted ? 'Stopped.' : errorText(err);
+      patch(reply.id, (t) => ({ ...t, pending: false, status: undefined, error: message }));
+      return { ok: false, error: message, aborted };
     } finally {
       setBusy(false);
       abortRef.current = null;
     }
-    return null;
+    return { ok: false, error: 'Not an assistant reply' };
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -559,7 +602,10 @@ export default function ChatPanel() {
               <Toggle checked={autoConfirm} onChange={setAutoConfirm} label="Auto-confirm" />
             </label>
             <label className="flex items-center justify-between gap-3 text-sm text-ink-200">
-              Stream tokens (SSE, when not using your data)
+              <span>
+                Stream tokens
+                <span className="block text-[12px] text-ink-500">General questions; in Auto a quick keyword check runs first</span>
+              </span>
               <Toggle checked={streaming} onChange={setStreaming} label="Stream tokens" />
             </label>
             <label className="flex items-center justify-between gap-3 text-sm text-ink-200">
@@ -613,13 +659,13 @@ ${text}` : text));
                     {t.routedVia}
                   </Badge>
                 ) : (
-                  t.pending && <Badge>routing...</Badge>
+                  t.pending && <Badge>{t.status ?? 'routing...'}</Badge>
                 )}
                 {t.model && <Badge>{t.model}</Badge>}
                 {t.latencyMs != null && <Badge>{formatMs(t.latencyMs)}</Badge>}
                 {t.usage && t.usage.total_tokens > 0 && <Badge>{t.usage.total_tokens} tok</Badge>}
               </div>
-              <ToolChips tools={t.tools} routed={t.routed} />
+              <ToolChips tools={t.tools} routed={t.routed} actions={t.actions} />
               {t.attempts && t.attempts.length > 0 && (
                 <p className="text-[12px] text-amber-400">failover: {t.attempts.join(' -> ')}</p>
               )}

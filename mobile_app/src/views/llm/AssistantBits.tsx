@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../../components/icons';
 import { Sheet } from '../../components/Sheet';
-import { Badge, Button, ErrorNote, IconButton, Spinner, cx, inputClass } from '../../components/ui';
+import { Badge, Button, ErrorNote, Spinner, cx, inputClass } from '../../components/ui';
 import type { AttachmentRef, PendingAction, UsedTool } from '../../lib/assistant';
-import { toolLabel } from '../../lib/assistant';
+import { chipState, toolLabel, type ChipState } from '../../lib/assistant';
 import { fileKind } from '../../lib/files';
 import { formatBytes } from '../../lib/format';
 import { errorText, useHub } from '../../lib/hub';
@@ -15,57 +15,74 @@ export interface ActionState extends PendingAction {
   error?: string;
 }
 
-/** Small chips under an assistant reply: which of the owner's data it looked at (or created). */
-export function ToolChips({ tools, routed }: { tools?: UsedTool[]; routed?: 'data' | 'general' }) {
+const CHIP_TONE: Record<ChipState, string> = {
+  ok: 'bg-signal/10 text-signal ring-signal/30',
+  created: 'bg-mint-400/10 text-mint-400 ring-mint-400/30',
+  error: 'bg-danger-400/10 text-danger-400 ring-danger-400/30',
+  proposed: 'bg-ink-800 text-ink-200 ring-ink-700',
+  dismissed: 'bg-ink-800 text-ink-500 ring-ink-700',
+  'not-created': 'bg-ink-800 text-ink-500 ring-ink-700',
+};
+const CHIP_PREFIX: Partial<Record<ChipState, string>> = { proposed: 'Proposed', dismissed: 'Dismissed', 'not-created': 'Not created' };
+
+/** Small chips under an assistant reply: which of the owner's data it looked at, created or only proposed. */
+export function ToolChips({ tools, routed, actions }: { tools?: UsedTool[]; routed?: 'data' | 'general'; actions?: ActionState[] }) {
   if (!tools?.length) {
     return routed === 'data' ? <Badge className="gap-1"><Icon name="spark" size={11} />your data: nothing needed</Badge> : null;
   }
   return (
     <div className="flex flex-wrap gap-1.5" aria-label="Data used for this answer">
-      {tools.map((t, i) => (
-        <span
-          key={`${t.name}-${i}`}
-          title={t.summary}
-          className={cx(
-            'inline-flex max-w-full items-center gap-1 truncate rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset',
-            t.ok === false ? 'bg-danger-400/10 text-danger-400 ring-danger-400/30' : 'bg-signal/10 text-signal ring-signal/30',
-          )}
-        >
-          <Icon name={t.name === 'remember' ? 'book' : 'spark'} size={11} />
-          <span className="font-semibold">{toolLabel(t.name)}</span>
-          {t.summary && t.name !== 'remember' && <span className="truncate text-ink-300">{t.summary}</span>}
-        </span>
-      ))}
+      {tools.map((t, i) => {
+        const state = chipState(t, actions);
+        const prefix = CHIP_PREFIX[state];
+        return (
+          <span
+            key={`${t.name}-${i}`}
+            title={prefix ? `${prefix}: ${t.summary}` : t.summary}
+            className={cx('inline-flex max-w-full items-center gap-1 truncate rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset', CHIP_TONE[state])}
+          >
+            <Icon name={t.name === 'remember' ? 'book' : state === 'created' ? 'check' : 'spark'} size={11} />
+            {prefix && <span>{prefix}:</span>}
+            <span className="font-semibold">{toolLabel(t.name)}</span>
+            {t.summary && t.name !== 'remember' && <span className="truncate text-ink-300">{t.summary}</span>}
+          </span>
+        );
+      })}
     </div>
   );
 }
 
-/** "Will create ..." card: one tap to confirm a write the assistant proposed. */
+/** "Will create ..." card: the full summary (wrapped, never cut), then one tap to confirm. */
 export function ActionCard({ action, onConfirm, onDismiss }: { action: ActionState; onConfirm: () => void; onDismiss: () => void }) {
   const done = action.status === 'done';
+  const open = action.status === 'waiting' || action.status === 'error';
   return (
     <div
       className={cx(
-        'flex items-center gap-2 rounded-2xl px-3 py-2 ring-1 ring-inset',
+        'space-y-2 rounded-2xl px-3 py-2.5 ring-1 ring-inset',
         done ? 'bg-mint-400/10 ring-mint-400/30' : action.status === 'dismissed' ? 'bg-ink-900 opacity-60 ring-ink-800' : 'bg-ink-900 ring-signal/40',
       )}
     >
-      <Icon name={done ? 'check' : 'plus'} size={16} className={done ? 'text-mint-400' : 'text-signal'} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[14px] text-ink-100">{action.summary}</p>
-        <p className="text-[11px] text-ink-500">
-          {done ? 'Created' : action.status === 'dismissed' ? 'Dismissed' : action.status === 'error' ? action.error : `${toolLabel(action.tool)}: waiting for your OK`}
-        </p>
+      <div className="flex items-start gap-2">
+        <Icon name={done ? 'check' : 'plus'} size={16} className={cx('mt-0.5 shrink-0', done ? 'text-mint-400' : 'text-signal')} />
+        <div className="min-w-0 flex-1">
+          <p className="break-words text-[14px] leading-snug text-ink-100">{action.summary}</p>
+          <p className={cx('break-words text-[11px]', action.status === 'error' ? 'text-danger-400' : 'text-ink-500')}>
+            {done ? 'Created' : action.status === 'dismissed' ? 'Dismissed' : action.status === 'error' ? action.error : `${toolLabel(action.tool)}: waiting for your OK`}
+          </p>
+        </div>
+        {action.status === 'running' && <Spinner />}
       </div>
-      {(action.status === 'waiting' || action.status === 'error') && (
-        <>
-          <IconButton icon="x" label="Dismiss" onClick={onDismiss} />
-          <Button variant="primary" icon="check" onClick={onConfirm}>
+      {open && (
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="ghost" icon="x" onClick={onDismiss}>
+            Dismiss
+          </Button>
+          <Button variant="primary" icon="check" onClick={onConfirm} className="flex-1">
             Confirm
           </Button>
-        </>
+        </div>
       )}
-      {action.status === 'running' && <Spinner />}
     </div>
   );
 }
@@ -82,34 +99,43 @@ export interface DraftAttachment {
 /** Files attached to the message being written (uploading, ready or failed), or to a sent one. */
 export function AttachmentChips({ items, onRemove }: { items: (DraftAttachment | AttachmentRef)[]; onRemove?: (index: number) => void }) {
   if (!items.length) return null;
+  // Why an upload failed is written out: a hover title never shows on a phone.
+  const failed = items.filter((a): a is DraftAttachment => 'progress' in a && !!a.error);
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((a, i) => {
-        const draft = 'progress' in a ? a : null;
-        const ref = draft ? draft.ref : (a as AttachmentRef);
-        const name = draft ? draft.name : (ref?.name ?? ref?.key.split('/').pop() ?? 'file');
-        const kind = fileKind(name, ref?.content_type);
-        return (
-          <span
-            key={draft ? draft.id : `${ref?.provider}:${ref?.key}`}
-            className={cx(
-              'inline-flex max-w-[220px] items-center gap-1.5 rounded-full bg-ink-800 py-1 pl-2.5 pr-1.5 text-[12px] ring-1 ring-inset',
-              draft?.error ? 'text-danger-400 ring-danger-400/40' : 'text-ink-200 ring-ink-700',
-            )}
-            title={draft?.error ?? name}
-          >
-            <Icon name={kind === 'image' ? 'camera' : 'file'} size={12} />
-            <span className="truncate">{name}</span>
-            {draft && !draft.ref && !draft.error && <span className="font-mono text-ink-500">{Math.round(draft.progress * 100)}%</span>}
-            {ref?.pages ? <span className="text-ink-500">{ref.pages} p</span> : null}
-            {onRemove && (
-              <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(i)} className="press grid h-5 w-5 place-items-center rounded-full text-ink-400 hover:text-ink-100">
-                <Icon name="x" size={12} />
-              </button>
-            )}
-          </span>
-        );
-      })}
+    <div className="space-y-1">
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((a, i) => {
+          const draft = 'progress' in a ? a : null;
+          const ref = draft ? draft.ref : (a as AttachmentRef);
+          const name = draft ? draft.name : (ref?.name ?? ref?.key.split('/').pop() ?? 'file');
+          const kind = fileKind(name, ref?.content_type);
+          return (
+            <span
+              key={draft ? draft.id : `${ref?.provider}:${ref?.key}`}
+              className={cx(
+                'inline-flex max-w-[220px] items-center gap-1.5 rounded-full bg-ink-800 py-1 pl-2.5 pr-1.5 text-[12px] ring-1 ring-inset',
+                draft?.error ? 'text-danger-400 ring-danger-400/40' : 'text-ink-200 ring-ink-700',
+              )}
+              title={draft?.error ?? name}
+            >
+              <Icon name={kind === 'image' ? 'camera' : 'file'} size={12} />
+              <span className="truncate">{name}</span>
+              {draft && !draft.ref && !draft.error && <span className="font-mono text-ink-500">{Math.round(draft.progress * 100)}%</span>}
+              {ref?.pages ? <span className="text-ink-500">{ref.pages} p</span> : null}
+              {onRemove && (
+                <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(i)} className="press grid h-5 w-5 place-items-center rounded-full text-ink-400 hover:text-ink-100">
+                  <Icon name="x" size={12} />
+                </button>
+              )}
+            </span>
+          );
+        })}
+      </div>
+      {failed.map((d) => (
+        <p key={d.id} role="alert" className="break-words text-[12px] text-danger-400">
+          {d.name}: {d.error} (remove it and attach it again)
+        </p>
+      ))}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Icon } from '../components/icons';
 import { useConfirm } from '../components/Sheet';
 import { Badge, Button, EmptyState, ErrorNote, IconButton, SkeletonList, cx, haptic, inputClass, riseStyle } from '../components/ui';
@@ -12,6 +12,28 @@ function FactRow({ fact, onSaved, onDeleted }: { fact: MemoryFact; onSaved: (f: 
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(fact.fact);
   const [busy, setBusy] = useState(false);
+  // Delete takes two taps (the button sits next to the text a thumb taps to edit): the first arms it for 3 s.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
+  const remove = () => {
+    if (!armed) {
+      haptic(5);
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    void run(async () => {
+      await memoryDelete(client, fact.id);
+      haptic(10);
+      onDeleted(fact.id);
+      notify(`Forgot: ${fact.fact}`, 'ok');
+    });
+  };
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -42,7 +64,7 @@ function FactRow({ fact, onSaved, onDeleted }: { fact: MemoryFact; onSaved: (f: 
         onClick={() => void run(async () => onSaved(await memoryUpdate(client, fact.id, { pinned: !fact.pinned })))}
         disabled={busy}
         aria-pressed={fact.pinned}
-        aria-label={fact.pinned ? 'Unpin: use only when relevant' : 'Pin: always use this fact'}
+        aria-label={fact.pinned ? 'Unpin: use only when relevant' : 'Pin: always use this fact with your data'}
         className={cx('press mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full', fact.pinned ? 'bg-signal/15 text-signal' : 'text-ink-500')}
       >
         <Icon name="pin" size={16} />
@@ -69,8 +91,17 @@ function FactRow({ fact, onSaved, onDeleted }: { fact: MemoryFact; onSaved: (f: 
           </button>
         )}
         <p className="pt-0.5 text-[12px] text-ink-500">
-          {fact.pinned ? 'Always used · ' : ''}
+          {fact.kind === 'preference' ? 'Answer preference, every chat · ' : fact.pinned ? 'Always used with your data · ' : ''}
           {fact.source_chat ? 'learned in a chat' : 'added by you'} · {relativeTime(fact.updated_at)}
+          {' · '}
+          <button
+            type="button"
+            disabled={busy}
+            className="press text-ink-300 underline decoration-ink-600 underline-offset-2"
+            onClick={() => void run(async () => onSaved(await memoryUpdate(client, fact.id, { kind: fact.kind === 'preference' ? 'fact' : 'preference' })))}
+          >
+            {fact.kind === 'preference' ? 'Make it a fact' : 'Make it a preference'}
+          </button>
         </p>
       </div>
       {editing ? (
@@ -79,7 +110,13 @@ function FactRow({ fact, onSaved, onDeleted }: { fact: MemoryFact; onSaved: (f: 
           <IconButton icon="check" label="Save fact" onClick={() => void save()} disabled={busy} className="text-signal" />
         </>
       ) : (
-        <IconButton icon="trash" label="Delete fact" disabled={busy} onClick={() => void run(async () => { await memoryDelete(client, fact.id); haptic(10); onDeleted(fact.id); })} />
+        armed ? (
+          <Button variant="danger" icon="trash" onClick={remove} disabled={busy}>
+            Delete?
+          </Button>
+        ) : (
+          <IconButton icon="trash" label="Delete fact" disabled={busy} onClick={remove} />
+        )
       )}
     </div>
   );
@@ -133,8 +170,9 @@ export default function MemoryView() {
   return (
     <div className="space-y-4">
       <p className="px-1 text-[13px] text-ink-400">
-        Facts the assistant learned when you told it about yourself (“mon salaire tombe le 25”). Pinned facts are used in every chat; the others only
-        when your question is about your own data and they are relevant.
+        Facts the assistant learned when you told it about yourself (“mon salaire tombe le 25”). Answer preferences (language, tone, length) go with
+        every chat, except in Never mode. Other facts are only sent when your question is about your own data: pinned ones always, the rest when
+        relevant.
       </p>
       <form onSubmit={(e) => void add(e)} className="flex gap-2">
         <input className={inputClass} value={draft} maxLength={300} onChange={(e) => setDraft(e.target.value)} placeholder="Add a fact, e.g. I prefer answers in Darija" aria-label="New fact" />

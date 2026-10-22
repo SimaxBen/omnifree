@@ -43,7 +43,7 @@ export interface ChatThreadMessage {
   created_at?: string;
   /** Assistant turns: files attached to the message (Drive refs) and the tools used for the reply. */
   attachments?: { provider: string; key: string; name?: string; content_type?: string | null; size?: number | null }[];
-  tools?: { name: string; summary: string; ok?: boolean }[];
+  tools?: { name: string; summary: string; ok?: boolean; status?: 'created' | 'dismissed' | 'not-created' }[];
 }
 
 /** `GET /chats` row: a saved conversation without its messages. */

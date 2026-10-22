@@ -7,9 +7,17 @@ Routing ("choose when and when not")
     Arabic script). It answers ``data`` (the message is about the owner's money, tasks, agenda,
     notes, files or asks to create/remember something), ``general`` (coding, translation, knowledge,
     chit-chat) or ``ambiguous``; only the last one costs a tiny LLM routing call. A general message
-    never reaches a tool and never carries personal data.
+    never reaches a tool and never carries personal data (only the owner's answer-style
+    *preferences*, see below). "add" / "create" / "remember" alone are not enough for ``data``: a
+    write needs a data object ("ajoute une tâche", "add an expense") or a first-person statement
+    ("j'ai payé"), so "how do I add an item to a list in python" stays general.
+    :func:`classify_turn` also looks at the previous user message: a short follow-up of a data turn
+    ("et le mois dernier ?", "mark it done") is ``ambiguous`` instead of plain general.
 
 Memory relevance
+    Facts are of two kinds: ``preference`` (how the owner wants answers: language, tone, length)
+    and ``fact`` (everything else). :func:`select_memories` sends preferences on every turn and
+    facts on data turns only (pinned first, then by keyword overlap).
     :func:`rank_memories` scores saved facts by keyword overlap with the conversation (accents
     folded, stop words dropped, long words cut to a common stem); pinned facts always come first.
 """
@@ -27,21 +35,26 @@ __all__ = [
     "Route",
     "Decision",
     "classify",
+    "classify_turn",
     "parse_route_answer",
     "detect_language",
     "fold",
     "keywords",
     "rank_memories",
+    "memory_kind",
+    "select_memories",
     "openai_tool",
     "parse_tool_args",
     "parse_plan",
     "compact_json",
     "result_summary",
     "write_summary",
+    "fallback_answer",
     "pdf_context",
     "READ_TOOLS",
     "WRITE_TOOLS",
     "REMEMBER_TOOL",
+    "CONTENT_TOOLS",
     "REMEMBER_SPEC",
 ]
 
@@ -55,6 +68,9 @@ READ_TOOLS: tuple[str, ...] = (
 )
 WRITE_TOOLS: tuple[str, ...] = ("tasks_add", "expense_add", "notes_create", "income_add", "calendar_add_event")
 REMEMBER_TOOL = "remember"
+# Reads that return third-party text (notes and receipts from mail/SMS, Drive files, invites): once one
+# ran (or a file is attached) the turn is "untrusted" and every write, `remember` included, waits for a tap.
+CONTENT_TOOLS: frozenset[str] = frozenset({"notes_search", "notes_get", "ask_drive", "drive_search", "calendar_events"})
 
 REMEMBER_SPEC: dict[str, Any] = {
     "type": "function",
@@ -67,7 +83,13 @@ REMEMBER_SPEC: dict[str, Any] = {
         ),
         "parameters": {
             "type": "object",
-            "properties": {"fact": {"type": "string", "description": "The fact, one sentence (max 300 chars)."}},
+            "properties": {
+                "fact": {"type": "string", "description": "The fact, one sentence (max 300 chars)."},
+                "kind": {
+                    "type": "string", "enum": ["fact", "preference"],
+                    "description": "preference = how the owner wants answers (language, tone, length); fact = anything else.",
+                },
+            },
             "required": ["fact"],
         },
     },
@@ -119,28 +141,48 @@ _DOMAINS: dict[str, re.Pattern[str]] = {
         r"\bdrive\b", r"\bmes (fichiers|documents|docs|pdfs?)\b", r"\bmy (files|documents|docs|pdfs?)\b",
         r"\bfichiers?\b", "ملفات", "ملف",
     ),
-    "write": _rx(
-        r"\bajout\w*", r"\badd\b", r"\bcree[rz]?\b", r"\bcreate\b", r"\bplanifie\w*", r"\benregistre\w*",
-        r"\bj'ai (paye|depense|achete|recu)\b", r"\bi (paid|spent|bought|received)\b", r"\bzid\b", r"\bktb\b",
-        r"\bsjl\b", "زيد", "سجل", "اكتب",
-    ),
+    # First-person statements only: a bare "add" / "create" / "remember" is anchored in classify().
+    "write": _rx(r"\bj'ai (paye|depense|achete|recu)\b", r"\bi (paid|spent|bought|received)\b"),
     "memory": _rx(
-        r"\bremember\b", r"\bsouviens\b", r"\bretiens\b", r"\bn'oublie pas\b", r"\bdon'?t forget\b",
         r"\bje prefere\b", r"\bi prefer\b", r"\bmy name is\b", r"\bje m'appelle\b", r"\bje suis ne\b",
-        r"\bmon (salaire|anniversaire|loyer)\b", r"\bmy (salary|birthday|rent)\b", r"\bt?fakar\b", "تذكر", "عقل",
+        r"\bmon (salaire|anniversaire|loyer)\b", r"\bmy (salary|birthday|rent)\b",
     ),
     "quota": _rx(r"\bquotas?\b", r"\bfree[- ]tier\b"),
 }
 
-_GENERAL = _rx(
+# "add" / "create" count as data only next to a data object ("ajoute une tâche", "add an expense");
+# "remember" only when the message has no general keyword ("remember the difference between...").
+_WRITE_VERB = _rx(
+    r"\bajout\w*", r"\badd\b", r"\bcree[rz]?\b", r"\bcreate\b", r"\bplanifie\w*", r"\benregistre\w*",
+    r"\bzid\b", r"\bktb\b", r"\bsjl\b", "زيد", "سجل", "اكتب",
+)
+_WRITE_OBJECT = _rx(
+    r"\btaches?\b", r"\btasks?\b", r"\bto-?dos?\b", r"\bdepenses?\b", r"\bexpenses?\b", r"\bnotes?\b",
+    r"\brdv\b", r"\brendez-?vous\b", r"\bevents?\b", r"\bevenements?\b", r"\brappels?\b", r"\breminders?\b",
+    r"\bmeetings?\b", r"\breunions?\b", r"\brevenus?\b", r"\bincomes?\b", r"\bsalaire\b", r"\bagenda\b",
+    r"\bcalendri?e?r\b", r"\bachats?\b", r"\bcourses\b", r"\b\d+\s?(dh|dhs|mad|eur|euros?|usd)\b",
+    "مهمة", "مصروف", "موعد", "ملاحظة", "تذكير",
+)
+_REMEMBER_VERB = _rx(
+    r"\bremember\b", r"\bsouviens\b", r"\bretiens\b", r"\bn'oublie pas\b", r"\bdon'?t forget\b", r"\bt?fakar\b",
+    "تذكر", "عقل",
+)
+
+# General topics (a data word next to one goes to the LLM) and knowledge-question framings (a data
+# word next to one is data only when the owner speaks about themselves: "c'est quoi mon solde").
+_GENERAL_TOPIC = _rx(
     r"\bcode\b", r"\bcoding\b", r"\bpython\b", r"\bjavascript\b", r"\btypescript\b", r"\bsql\b", r"\bregex\b",
     r"\bfunction\b", r"\bfonction\b", r"\bbug\b", r"\bstack ?trace\b", r"\bcompil\w*", r"\bapi\b",
+    r"\breact\b", r"\bcomponent\b", r"\bcomposant\b", r"\bcss\b", r"\bhtml\b",
     r"\btranslat\w*", r"\btradui\w*", r"\btraduction\b", r"\btarjem\w*", "ترجم",
+    r"\bpoe?me?\b", r"\bstory\b", r"\bhistoire\b", r"\bjoke\b", r"\bblague\b", r"\brecipe\b", r"\brecette\b",
+    r"\bmath\w*", r"\bequation\b", r"\bwrite an? (email|letter|essay|poem)\b", r"\bredige\w*",
+    r"\bdifference between\b", r"\bdifference entre\b",
+)
+_GENERAL_ASK = _rx(
     r"\bexplain\b", r"\bexplique\w*", r"\bc'est quoi\b", r"\bwhat is an?\b", r"\bwhat are\b",
-    r"\bqu'est-ce qu\w*", r"\bwho (was|is)\b", r"\bqui (est|etait)\b", r"\bdefin\w*", r"\bpoe?me?\b",
-    r"\bstory\b", r"\bhistoire\b", r"\bjoke\b", r"\bblague\b", r"\brecipe\b", r"\brecette\b", r"\bmath\w*",
-    r"\bequation\b", r"\bsummari[sz]e this\b", r"\bresume ce\b", r"\bwrite an? (email|letter|essay|poem)\b",
-    r"\bredige\w*", r"\bdifference between\b", r"\bdifference entre\b",
+    r"\bqu'est-ce qu\w*", r"\bwho (was|is)\b", r"\bqui (est|etait)\b", r"\bdefin\w*",
+    r"\bsummari[sz]e this\b", r"\bresume ce\b",
 )
 _PERSONAL = _rx(
     r"\bmy\b", r"\bmine\b", r"\bi\b", r"\bi'm\b", r"\bme\b", r"\bmon\b", r"\bma\b", r"\bmes\b", r"\bmoi\b",
@@ -168,14 +210,21 @@ def classify(text: str) -> Decision:
     folded = fold(text)
     if not folded:
         return Decision("general", "empty")
-    domains = tuple(name for name, rx in _DOMAINS.items() if rx.search(folded))
-    general = bool(_GENERAL.search(folded))
+    topic = bool(_GENERAL_TOPIC.search(folded))
+    general = topic or bool(_GENERAL_ASK.search(folded))
+    found = [name for name, rx in _DOMAINS.items() if rx.search(folded)]
+    if "write" not in found and _WRITE_VERB.search(folded) and _WRITE_OBJECT.search(folded):
+        found.append("write")
+    if "memory" not in found and not general and _REMEMBER_VERB.search(folded):
+        found.append("memory")
+    domains = tuple(found)
     personal = bool(_PERSONAL.search(folded))
     question = bool(_QUESTION.search(folded))
     words = len(folded.split())
     if domains:
-        # "explain what a budget is" names a data word but is a knowledge question: let the LLM decide.
-        if general and not personal and not {"write", "memory"} & set(domains):
+        # "a bread recipe, I bought flour" or "explain what a budget is" name a data word inside a
+        # general request: let the LLM decide ("c'est quoi mon solde" stays data).
+        if topic or (general and not personal):
             return Decision("ambiguous", "keyword+general", domains)
         return Decision("data", "keyword:" + ",".join(domains), domains)
     if general:
@@ -185,6 +234,24 @@ def classify(text: str) -> Decision:
     if personal and (question or words >= 3):
         return Decision("ambiguous", "personal")
     return Decision("general", "default")
+
+
+FOLLOW_UP_WORDS = 8
+
+
+def classify_turn(text: str, previous: str | None = None, previous_route: str | None = None) -> Decision:
+    """:func:`classify` plus follow-ups: a short message after a data turn ("et le mois dernier ?",
+    "mark it done") that would default to general is ``ambiguous`` (the routing LLM sees both)."""
+    decision = classify(text)
+    if decision.route != "general" or decision.reason != "default":
+        return decision
+    if previous_route is not None:
+        after_data = previous_route == "data"
+    else:
+        after_data = bool(previous) and classify(previous or "").route == "data"
+    if after_data and len(fold(text).split()) <= FOLLOW_UP_WORDS:
+        return Decision("ambiguous", "follow-up")
+    return decision
 
 
 def parse_route_answer(answer: str | None) -> Route | None:
@@ -246,6 +313,33 @@ def keywords(text: str) -> set[str]:
             continue
         out.add(word[:6])
     return out
+
+
+# Only how to answer (language, tone, length) is a preference: it goes with general turns too, so
+# anything about the owner's life ("je préfère Marjane", a name) stays a plain fact.
+_LANG = r"(darija|francais|anglais|arabe|english|french|arabic|spanish|espagnol)"
+_PREFERENCE = _rx(
+    r"\b(je prefere|i prefer|i'd prefer)\b.{0,40}\b(reponses?|repondre|reponde|answers?|repl(y|ies)|langue|language)\b",
+    rf"\b(je prefere|i prefer|i'd prefer) (le |l'|en |in )?{_LANG}\b", rf"\b(en|in) {_LANG}\b",
+    r"\breponds?(-moi)? (toujours )?(en|in)\b", r"\b(answer|reply|respond|talk)( to me)? (always )?in\b",
+    r"\btutoie\w*", r"\bvouvoie\w*", r"\b(short|brief|concise|longer|detailed) (answers|replies)\b",
+    r"\breponses? (courtes?|breves?|detaillees?)\b", "بالدارجة", "جاوبني",
+)
+
+
+def memory_kind(fact: str) -> Literal["fact", "preference"]:
+    """``preference`` when the fact says how the owner wants answers (language, tone, length, name)."""
+    return "preference" if _PREFERENCE.search(fold(fact)) else "fact"
+
+
+def select_memories(query: str, memories: Sequence[dict[str, Any]], *, data: bool, limit: int = 10) -> list[dict[str, Any]]:
+    """What one turn may see: answer-style preferences always; other facts (pinned or not) only on
+    data turns, pinned first then by keyword overlap with ``query``."""
+    prefs = [m for m in memories if m.get("kind") == "preference"]
+    if not data:
+        return prefs[:limit]
+    others = rank_memories(query, [m for m in memories if m.get("kind") != "preference"], limit)
+    return [*prefs, *others][:limit]
 
 
 def rank_memories(query: str, memories: Sequence[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
@@ -381,6 +475,25 @@ def write_summary(name: str, args: dict[str, Any]) -> str:
     if name == REMEMBER_TOOL:
         return f"Remember: {str(a.get('fact') or '')[:120]}"
     return name
+
+
+def fallback_answer(used: Sequence[dict[str, Any]]) -> str:
+    """The reply when the final LLM call fails after tools ran: what was created, proposed, saved
+    and read, so the owner does not resend (and duplicate) a write that already happened."""
+    created = [u["summary"] for u in used if u.get("name") in WRITE_TOOLS and not u.get("pending") and u.get("ok")]
+    proposed = [u["summary"] for u in used if u.get("pending")]
+    saved = [u["summary"] for u in used if u.get("name") == REMEMBER_TOOL and u.get("ok") and not u.get("pending")]
+    read = [f"{u['name']} ({u['summary']})" for u in used if u.get("name") in READ_TOOLS]
+    lines = ["I ran out of time writing the full answer."]
+    if created:
+        lines.append("Created: " + "; ".join(created) + " (do not send it again).")
+    if proposed:
+        lines.append("Confirm to create: " + "; ".join(proposed) + ".")
+    if saved:
+        lines.append("; ".join(saved) + ".")
+    if read:
+        lines.append("Looked at: " + "; ".join(read) + ". Ask again for the details.")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- PDF text
