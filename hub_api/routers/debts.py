@@ -14,6 +14,13 @@ The same loan or repayment heard again from another recording within :data:`VOIC
 twice after a timeout) is reported as ``duplicate`` and not stored again; every outcome lists what it stored
 (``payment_ids``) so the PWA can undo it.
 
+Split-linked debts (``origin = 'split'``): rows derived from a split group (:mod:`hub_api.routers.splits`), one per
+group and person, carrying ``split_group_id``, ``split_member_id`` and ``split_detail`` (the group's name and the
+lines behind the amount). The group is their source of truth: their amount, person and direction cannot be edited or
+the row deleted here (409, change the group), but a repayment here records the matching settlement in the group and
+removing one deletes it, so both pages always agree. Only the note and the due date are the row's own. The listing
+first repairs the rows of any group whose last change was interrupted (:func:`hub_api.routers.splits.heal_split_debts`).
+
 Reminders (``POST /notify/run?kind=debts``, daily): one push per open loan whose due date is today or was in the last
 :data:`DUE_GRACE_DAYS` days (once per loan and due date) and, on Mondays, one push listing the money lent more than
 :data:`LENT_STALE_DAYS` days ago and still not returned (:func:`run_debts`).
@@ -21,6 +28,7 @@ Reminders (``POST /notify/run?kind=debts``, daily): one push per open loan whose
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
@@ -64,6 +72,9 @@ SCHEMA = (
     " origin TEXT, audio_key TEXT, created_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS app_debt_payments_debt ON app_debt_payments (debt_id)",
 )
+# Migration v2: the rows derived from a split group (see the module docstring).
+SPLIT_COLUMNS = (("split_group_id", "TEXT"), ("split_member_id", "TEXT"), ("split_detail", "TEXT"))
+SPLIT_INDEX = ("CREATE INDEX IF NOT EXISTS app_debts_split ON app_debts (split_group_id)",)
 
 
 async def ensure_schema(db: AppDB) -> AppDB:
@@ -71,6 +82,8 @@ async def ensure_schema(db: AppDB) -> AppDB:
 
     await ensure_money(db)
     await db.ensure("debts", SCHEMA)
+    await db.add_columns("debts_v2_split", "app_debts", SPLIT_COLUMNS)
+    await db.ensure("debts_v2_split_index", SPLIT_INDEX)
     return db
 
 
@@ -79,6 +92,24 @@ async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
 
 
 # --------------------------------------------------------------------------- rows
+
+
+def _split_out(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Where a split-linked debt comes from: the group (id and name), the member and the lines behind it."""
+    if row.get("origin") != "split" or not row.get("split_group_id"):
+        return None
+    try:
+        detail = json.loads(row.get("split_detail") or "{}")
+    except ValueError:
+        detail = {}
+    detail = detail if isinstance(detail, dict) else {}
+    items = detail.get("items")
+    return {"group_id": row["split_group_id"], "member_id": row.get("split_member_id"),
+            "group_name": str(detail.get("group_name") or ""), "items": items if isinstance(items, list) else []}
+
+
+def is_split(debt: dict[str, Any]) -> bool:
+    return debt.get("origin") == "split" and bool(debt.get("split_group_id"))
 
 
 def debt_out(row: dict[str, Any], payments: list[dict[str, Any]], today: date | None = None) -> dict[str, Any]:
@@ -103,6 +134,9 @@ def debt_out(row: dict[str, Any], payments: list[dict[str, Any]], today: date | 
         "settled": settled,
         "settled_at": row.get("settled_at"),
         "origin": row.get("origin"),
+        "split_group_id": row.get("split_group_id"),
+        "split_member_id": row.get("split_member_id"),
+        "split": _split_out(row),
         "paid": paid,
         "remaining": 0.0 if settled else max(round(amount - paid, 2), 0.0),
         "overdue": bool(due and not settled and due < today.isoformat()),
@@ -172,7 +206,12 @@ async def add_payment(
     db: AppDB, debt: dict[str, Any], amount: float, day: str, note: str | None, origin: str, *, audio_key: str | None = None
 ) -> dict[str, Any]:
     """Record a repayment (``amount`` <= what is left) and settle the loan when it is fully repaid; returns the loan
-    with ``payment_id`` set to the new repayment."""
+    with ``payment_id`` set to the new repayment. A split-linked debt is repaid by a settlement in its group."""
+    if is_split(debt):
+        from hub_api.routers.splits import settle_linked_debt  # splits imports this module
+
+        payment_id = await settle_linked_debt(db, debt, amount, day, note, origin, audio_key)
+        return {**await _get(db, debt["id"]), "payment_id": payment_id}
     payment_id = new_id()
     await db.execute(
         "INSERT INTO app_debt_payments (id, debt_id, amount, date, note, origin, audio_key, created_at)"
@@ -386,6 +425,9 @@ async def list_debts(
     person: str | None = Query(None, max_length=100),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
+    from hub_api.routers.splits import heal_split_debts  # splits imports this module
+
+    await heal_split_debts(db)
     where = {"open": "settled = 0", "settled": "settled = 1", "all": "1 = 1"}[status_]
     debts = await _load(db, where)
     if person:
@@ -417,6 +459,11 @@ async def patch_debt(debt_id: str, body: DebtPatch, db: AppDB = Depends(_db)) ->
         if value is None and field not in ("due_date", "note"):
             raise HTTPException(422, detail=f"{field} cannot be null")
         changes[field] = value
+    if is_split(current):
+        changes = {k: v for k, v in changes.items() if k in ("note", "due_date") or not _same(current[k], v)}
+        locked = sorted(set(changes) - {"note", "due_date"})
+        if locked:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=_split_locked(current, ", ".join(locked)))
     if "amount" in changes and changes["amount"] + EPS < current["paid"]:
         raise HTTPException(422, detail=f"amount cannot be less than what was already repaid ({current['paid']})")
     amount = changes.get("amount", current["amount"])
@@ -445,9 +492,25 @@ async def patch_debt(debt_id: str, body: DebtPatch, db: AppDB = Depends(_db)) ->
     return await _get(db, debt_id)
 
 
+def _same(current: Any, value: Any) -> bool:
+    if isinstance(current, (int, float)) and isinstance(value, (int, float)):
+        return abs(float(current) - float(value)) <= EPS
+    if isinstance(current, str) and isinstance(value, str):
+        return normalise_merchant(current) == normalise_merchant(value) if current and value else current == value
+    return current == value
+
+
+def _split_locked(debt: dict[str, Any], what: str) -> str:
+    group = (debt.get("split") or {}).get("group_name") or "its group"
+    return (f"This comes from the Split group {group!r}: change {what} there (edit or delete the shared expenses). "
+            "Repayments can be recorded here.")
+
+
 @router.delete("/{debt_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_debt(debt_id: str, db: AppDB = Depends(_db)) -> Response:
-    await _get(db, debt_id)
+    debt = await _get(db, debt_id)
+    if is_split(debt):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=_split_locked(debt, "it"))
     await db.execute("DELETE FROM app_debt_payments WHERE debt_id = ?", [debt_id])
     await db.execute("DELETE FROM app_debts WHERE id = ?", [debt_id])
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -472,6 +535,12 @@ async def delete_payment(debt_id: str, payment_id: str, db: AppDB = Depends(_db)
     """Remove a repayment (a mistake); a loan settled by its repayments opens again (one settled by hand, "forget the
     rest", stays settled)."""
     before = await _get(db, debt_id)
+    if is_split(before):
+        from hub_api.routers.splits import delete_linked_payment  # splits imports this module
+
+        if not await delete_linked_payment(db, before, payment_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="payment not found")
+        return await _get(db, debt_id)
     repaid_in_full = before["amount"] - before["paid"] <= EPS
     gone = await db.execute("DELETE FROM app_debt_payments WHERE id = ? AND debt_id = ?", [payment_id, debt_id])
     if not gone:

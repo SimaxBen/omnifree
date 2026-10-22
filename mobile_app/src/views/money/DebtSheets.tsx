@@ -8,6 +8,8 @@ import { errorText, useHub } from '../../lib/hub';
 import { parseAmount } from '../../lib/money';
 import { debtDetail, debtHeadline } from '../../lib/moneyTools';
 import type { Debt, DebtDirection, DebtListing } from '../../lib/moneyTypes';
+import { useNav } from '../../lib/nav';
+import { openSplitGroupNext } from './splitLink';
 
 const CURRENCIES = ['MAD', 'EUR', 'USD', 'GBP'];
 
@@ -45,8 +47,43 @@ function AmountInput({ amount, currency, onAmount, onCurrency, label = 'Amount',
 }
 
 /** New loan, or an existing one: repayments, edit, settle, delete. */
+/** Where a split-linked debt comes from, with its lines and a link to the group. */
+function SplitOrigin({ debt, onOpen }: { debt: Debt; onOpen: () => void }) {
+  const split = debt.split;
+  if (!split) return null;
+  return (
+    <section className="space-y-2 rounded-card bg-ink-900 p-3 ring-1 ring-inset ring-ink-800">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[13px] text-ink-300">
+          From Split: <span className="font-semibold text-ink-100">{split.group_name || 'a group'}</span>
+        </span>
+        <Button variant="ghost" icon="right" onClick={onOpen} className="shrink-0">
+          Open group
+        </Button>
+      </div>
+      {split.items.length > 0 && (
+        <ul className="space-y-1">
+          {split.items.map((it) => (
+            <li key={it.entry_id} className="flex items-baseline justify-between gap-2 text-[13px]">
+              <span className="min-w-0 truncate text-ink-400">
+                {it.date} · {it.kind === 'settlement' ? 'Repayment' : it.description || 'Expense'}
+              </span>
+              <span className={cx('shrink-0 tabular-nums', it.effect > 0 ? 'text-signal' : 'text-danger-400')}>
+                {it.effect > 0 ? '+' : '−'}
+                {formatMoney(Math.abs(it.effect), debt.currency)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-[12px] text-ink-500">The net of this group with {debt.person}. Edit the shared expenses in the group; repayments recorded here are recorded there too.</p>
+    </section>
+  );
+}
+
 export function DebtSheet({ open, onClose, debt: initial, direction: initialDirection }: { open: boolean; onClose: () => void; debt: Debt | null; direction?: DebtDirection }) {
   const { client, notify } = useHub();
+  const { go } = useNav();
   const confirm = useConfirm();
   const [debt, setDebt] = useState<Debt | null>(initial);
   const [direction, setDirection] = useState<DebtDirection>(initial?.direction ?? initialDirection ?? 'lent');
@@ -79,7 +116,19 @@ export function DebtSheet({ open, onClose, debt: initial, direction: initialDire
     }
   };
 
+  const linked = !!debt?.split;
+  const openGroup = () => {
+    if (!debt?.split) return;
+    openSplitGroupNext(debt.split.group_id);
+    onClose();
+    go('more', 'money-split');
+  };
+
   const save = () => {
+    if (debt && linked) {
+      void act(() => client.updateDebt(debt.id, { due_date: due || null, note: note.trim() || null }), 'Saved', true);
+      return;
+    }
     const value = parseAmount(amount);
     if (!person.trim()) return setError('Who is it with?');
     if (value === null || value <= 0) return setError('Enter the amount.');
@@ -106,7 +155,7 @@ export function DebtSheet({ open, onClose, debt: initial, direction: initialDire
       open={open}
       onClose={onClose}
       title={debt ? debtHeadline(debt) : 'New loan'}
-      headerAction={debt ? <IconButton icon="trash" label="Delete loan" onClick={() => void remove()} className="hover:text-danger-400" /> : undefined}
+      headerAction={debt && !linked ? <IconButton icon="trash" label="Delete loan" onClick={() => void remove()} className="hover:text-danger-400" /> : undefined}
       footer={
         <Button variant="primary" className="w-full" onClick={save} disabled={busy}>
           {busy ? 'Saving…' : debt ? 'Save changes' : 'Add loan'}
@@ -142,6 +191,7 @@ export function DebtSheet({ open, onClose, debt: initial, direction: initialDire
                     <span className="min-w-0 flex-1 text-ink-300">
                       {p.date}
                       {p.origin === 'voice' ? ' · voice' : ''}
+                      {linked ? ' · Split' : ''}
                     </span>
                     <span className="tabular-nums text-ink-100">{formatMoney(p.amount, debt.currency)}</span>
                     <IconButton icon="x" label="Remove repayment" disabled={busy} onClick={() => void act(() => client.deleteDebtPayment(debt.id, p.id), 'Repayment removed')} />
@@ -149,34 +199,46 @@ export function DebtSheet({ open, onClose, debt: initial, direction: initialDire
                 ))}
               </ul>
             )}
-            {/* A loan closed by its repayments has nothing left: it opens again by removing a repayment above. */}
-            {!(debt.settled && debt.paid >= debt.amount - 0.005) && (
+            {/* A loan closed by its repayments has nothing left: it opens again by removing a repayment above.
+                A split-linked one is settled by repayments only (it follows its group). */}
+            {!linked && !(debt.settled && debt.paid >= debt.amount - 0.005) && (
               <Button variant="ghost" className="w-full" onClick={() => void act(() => client.updateDebt(debt.id, { settled: !debt.settled }), debt.settled ? 'Opened again' : 'Marked as settled')} disabled={busy}>
                 {debt.settled ? 'Open it again' : 'Mark as settled (forget the rest)'}
               </Button>
             )}
           </section>
         )}
-        <Segmented
-          value={direction}
-          onChange={setDirection}
-          options={[
-            { value: 'lent', label: 'They owe me' },
-            { value: 'borrowed', label: 'I owe them' },
-          ]}
-        />
-        <Field label={direction === 'lent' ? 'Lent to' : 'Borrowed from'}>
-          <input value={person} onChange={(e) => setPerson(e.target.value)} placeholder="Ayoub, Karim…" className={inputClass} autoFocus={!debt} />
-        </Field>
-        <AmountInput amount={amount} currency={currency} onAmount={setAmount} onCurrency={setCurrency} />
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Date">
-            <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Due (optional)">
-            <input type="date" value={due} min={date} onChange={(e) => setDue(e.target.value)} className={inputClass} />
-          </Field>
-        </div>
+        {debt && linked ? (
+          <>
+            <SplitOrigin debt={debt} onOpen={openGroup} />
+            <Field label="Due (optional)">
+              <input type="date" value={due} min={date} onChange={(e) => setDue(e.target.value)} className={inputClass} />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Segmented
+              value={direction}
+              onChange={setDirection}
+              options={[
+                { value: 'lent', label: 'They owe me' },
+                { value: 'borrowed', label: 'I owe them' },
+              ]}
+            />
+            <Field label={direction === 'lent' ? 'Lent to' : 'Borrowed from'}>
+              <input value={person} onChange={(e) => setPerson(e.target.value)} placeholder="Ayoub, Karim…" className={inputClass} autoFocus={!debt} />
+            </Field>
+            <AmountInput amount={amount} currency={currency} onAmount={setAmount} onCurrency={setCurrency} />
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Date">
+                <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Due (optional)">
+                <input type="date" value={due} min={date} onChange={(e) => setDue(e.target.value)} className={inputClass} />
+              </Field>
+            </div>
+          </>
+        )}
         <Field label="Note">
           <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional" className={inputClass} />
         </Field>
@@ -197,8 +259,12 @@ export function DebtRow({ debt, onClick, i }: { debt: Debt; onClick: () => void;
         <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-[15px] text-ink-100">{debtHeadline(debt)}</span>
           {debt.overdue && <Badge tone="bad">late</Badge>}
+          {debt.split && <Badge tone="signal">Split</Badge>}
         </span>
-        <span className="block truncate text-[12px] text-ink-500">{debtDetail(debt, isoDay())}</span>
+        <span className="block truncate text-[12px] text-ink-500">
+          {debt.split ? `From Split: ${debt.split.group_name || 'a group'} · ` : ''}
+          {debtDetail(debt, isoDay())}
+        </span>
       </span>
       <span className={cx('shrink-0 font-display text-[16px] font-semibold tabular-nums', debt.settled ? 'text-ink-500 line-through' : lent ? 'text-signal' : 'text-danger-400')}>
         {formatMoney(debt.settled ? debt.amount : debt.remaining, debt.currency)}

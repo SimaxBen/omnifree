@@ -34,7 +34,10 @@ def app_hub(make_hub):
 
 
 def test_equal_shares_balances_and_settle_up() -> None:
-    assert equal_shares(100, ["a", "b", "c"]) == {"a": 33.34, "b": 33.33, "c": 33.33}
+    # The leftover cents go to the payer when they have a share, else to the last member.
+    assert equal_shares(100, ["a", "b", "c"]) == {"a": 33.33, "b": 33.33, "c": 33.34}
+    assert equal_shares(100, ["a", "b", "c"], "b") == {"a": 33.33, "b": 33.34, "c": 33.33}
+    assert equal_shares(100, ["a", "b", "c"], "z") == {"a": 33.33, "b": 33.33, "c": 33.34}
     assert sum(equal_shares(10.01, ["a", "b"]).values()) == pytest.approx(10.01)
     assert equal_shares(5, []) == {}
     entries = [
@@ -131,12 +134,14 @@ def test_split_flow_and_owner_share_rule(app_hub) -> None:
     assert r.json()["entry"]["expense_id"] is None
     assert app_hub.get(f"/expenses/{riad3['expense_id']}").status_code == 404
 
-    # Settle up: Sara pays me back.
-    s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 45})
+    # Settle up: I owe Sara my 45 of the dinner (she owes me nothing any more), so I pay her back.
+    assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 45}).status_code == 422
+    assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": me, "to": sara, "amount": 46}).status_code == 422
+    s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": me, "to": sara, "amount": 45})
     assert s.status_code == 201
     assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": me, "to": me, "amount": 1}).status_code == 422
     settlement = next(e for e in s.json()["entries"] if e["kind"] == "settlement")
-    assert settlement["description"] == "Sara → Me" and settlement["expense_id"] is None
+    assert settlement["description"] == "Me → Sara" and settlement["expense_id"] is None
     assert app_hub.patch(f"/money/splits/{g['id']}/expenses/{settlement['id']}", json={"amount": 1}).status_code == 409
 
     listing = app_hub.get("/money/splits").json()["groups"]
@@ -182,7 +187,7 @@ def test_amounts_are_rounded_once_and_bounded(app_hub) -> None:
         assert r.status_code == 422, (bad, r.status_code, r.text)
     many = {"description": "x", "amount": 5, "paid_by": me, "participants": [me] * 31}
     assert app_hub.post(url, json=many).status_code == 422
-    assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 0.001}).status_code == 422
-    s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": me, "amount": 1.115}).json()
+    assert app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": ayoub, "amount": 0.001}).status_code == 422
+    s = app_hub.post(f"/money/splits/{g['id']}/settle", json={"from": sara, "to": ayoub, "amount": 1.115}).json()
     assert next(e for e in s["entries"] if e["kind"] == "settlement")["amount"] in (1.11, 1.12)
     assert abs(sum(b["net"] for b in s["balances"])) < 0.001

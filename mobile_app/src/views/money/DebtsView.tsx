@@ -31,7 +31,7 @@ export default function DebtsView() {
           I borrowed
         </Button>
       </div>
-      <p className="px-1 text-[13px] text-ink-400">Or say it: “j’ai prêté 200 dh à Ayoub”, “Ayoub m’a rendu 100”.</p>
+      <p className="px-1 text-[13px] text-ink-400">Or say it: “j’ai prêté 200 dh à Ayoub”, “Ayoub m’a rendu 100”. Shared expenses from Split show here too.</p>
 
       {data.data && <OwedTotals data={data.data} />}
 

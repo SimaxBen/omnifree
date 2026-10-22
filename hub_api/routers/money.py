@@ -17,7 +17,9 @@ overview also carries an end-of-month ``forecast`` (see :func:`build_forecast`).
 Totals are in MAD; every item keeps its original amount and currency. ``POST /money/voice`` turns a
 recording ("j'ai payé 45 dh de taxi et 30 dh un café") into expenses (``source = 'voice'``) and incomes, and
 loans to or from people ("j'ai prêté 200 dh à Ayoub", "Ayoub m'a rendu 100") into debts (see
-:mod:`hub_api.routers.debts`).
+:mod:`hub_api.routers.debts`). A bill the speaker paid and shares equally with named people ("j'ai payé 300 dh le
+dîner avec Ayoub et Sara, chacun sa part") becomes a shared expense (``type = 'split'``, see
+:func:`hub_api.routers.splits.record_voice_split`): the speaker's share goes to the expenses, the others' to Debts.
 """
 
 from __future__ import annotations
@@ -774,7 +776,9 @@ def parse_money_entries(
     """Validated money entries from the LLM's ``{"entries": [...]}``; entries without a positive amount are dropped.
 
     Debt entries (``lend``, ``borrow``, ``repaid``, ``repay``) keep their type whatever ``kind`` says and need a
-    ``person``; the others become ``expense``/``income`` (forced by ``kind`` unless it is ``auto``).
+    ``person``; a ``split`` needs ``people`` (the others sharing it, at most :data:`MAX_SPLIT_PEOPLE`) and is a plain
+    expense without them (or when ``kind`` is ``income``); the others become ``expense``/``income`` (forced by
+    ``kind`` unless it is ``auto``).
     """
     from hub_api.routers.debts import DEBT_ENTRY_TYPES  # debts imports this module
 
@@ -787,6 +791,26 @@ def parse_money_entries(
         if amount is None or amount <= 0:
             continue
         typ = str(e.get("type") or "expense").strip().lower()
+        if typ == "split":
+            people = _split_people(e.get("people"))
+            if people and kind != "income":
+                merchant = e.get("merchant") if isinstance(e.get("merchant"), str) else ""
+                category = str(e.get("category") or "").strip().lower()
+                note = e.get("note")
+                out.append(
+                    {
+                        "type": "split",
+                        "amount": round(amount, 2),
+                        "currency": normalise_currency(e.get("currency")) or BASE,
+                        "merchant": merchant.strip()[:200],
+                        "people": people,
+                        "category": category if category in CATEGORIES else "other",
+                        "date": resolve_spent_date(e.get("date"), today),
+                        "note": note.strip()[:2000] if isinstance(note, str) and note.strip() else None,
+                    }
+                )
+                continue
+            typ = "expense"
         if typ in DEBT_ENTRY_TYPES:
             person = next((v.strip() for v in (e.get("person"), e.get("merchant")) if isinstance(v, str) and v.strip()), "")
             if not person:
@@ -824,6 +848,21 @@ def parse_money_entries(
     return out[:50]
 
 
+MAX_SPLIT_PEOPLE = 10
+_SPEAKER = {"moi", "me", "i", "ana", "je", "myself"}
+
+
+def _split_people(raw: Any) -> list[str]:
+    """The other people of a voice split: names, no duplicates, never the speaker ("moi", "me")."""
+    out: dict[str, str] = {}
+    for n in raw if isinstance(raw, list) else []:
+        if not isinstance(n, str) or not n.strip() or n.strip().lower() in _SPEAKER:
+            continue
+        out.setdefault(n.strip().lower(), n.strip()[:60])
+    people = list(out.values())
+    return people if len(people) <= MAX_SPLIT_PEOPLE else []
+
+
 async def create_entries(db: AppDB, entries: list[dict[str, Any]], *, audio_key: str | None) -> dict[str, list[dict[str, Any]]]:
     """Store parsed entries: expenses through the expenses insert path (``source = 'voice'``), incomes here, loans and
     repayments in :mod:`hub_api.routers.debts` (``debts`` lists one outcome per debt entry)."""
@@ -832,7 +871,11 @@ async def create_entries(db: AppDB, entries: list[dict[str, Any]], *, audio_key:
     await ensure_schema(db)
     created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": [], "debts": []}
     for e in entries:
-        if e["type"] in DEBT_ENTRY_TYPES:
+        if e["type"] == "split":
+            from hub_api.routers.splits import record_voice_split  # splits imports debts, which imports this module
+
+            created["debts"].append(await record_voice_split(db, e, audio_key=audio_key))
+        elif e["type"] in DEBT_ENTRY_TYPES:
             created["debts"].append(await record_voice_debt(db, e, audio_key=audio_key))
         elif e["type"] == "income":
             created["incomes"].append(
@@ -864,7 +907,7 @@ def _money_prompt(today: date, kind: str) -> str:
         f"Today is {today:%A} {today.isoformat()} (Africa/Casablanca). Past days: {past}.\n"
         f"{hint}"
         "Answer with ONE JSON object only, no prose, no code fences:\n"
-        '{"entries": [{"type": "expense|income|lend|borrow|repaid|repay", "amount": number, '
+        '{"entries": [{"type": "expense|income|lend|borrow|repaid|repay|split", "amount": number, '
         '"currency": "ISO 4217 code (dh, dhs, dirham, drahem = MAD; euro = EUR; dollar = USD) or null", '
         '"merchant": "for an expense who was paid (shop, café, person); for an income who paid (employer, client) or '
         'a label like Salaire", '
@@ -875,6 +918,10 @@ def _money_prompt(today: date, kind: str) -> str:
         "(j'ai prêté 200 dh à Ayoub, sl7t Ayoub 200); borrow = the speaker borrowed (j'ai emprunté 500 à Karim, "
         "tsellft men Karim); repaid = someone paid the speaker back (Ayoub m'a rendu 100, Ayoub rjje3 lia 100); "
         "repay = the speaker paid someone back (j'ai rendu 200 à Karim). A loan is never an expense or an income.\n"
+        "A bill the speaker paid alone and explicitly shares equally between themselves and named people (j'ai payé "
+        "300 dh le dîner avec Ayoub et Sara, chacun sa part; on a partagé) uses the type split with an extra "
+        '"people": ["Ayoub", "Sara"] (the others, never the speaker; merchant = what it was). Only when the speaker '
+        "paid and says the cost is shared; otherwise it is a plain expense.\n"
         "Rules: one entry per amount; only money actually spent or received, not plans or prices mentioned in passing; "
         "salary, payment received, refund or gift = income; convert relative dates (hier, yesterday, lbare7, lundi "
         "dernier) to absolute dates, never in the future; date null when no day is said; never invent amounts; "
