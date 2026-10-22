@@ -65,12 +65,15 @@ Route = Literal["data", "general", "ambiguous"]
 READ_TOOLS: tuple[str, ...] = (
     "expenses_month", "money_overview", "tasks_list", "notes_search", "notes_get", "ask_drive",
     "calendar_events", "budget_status", "drive_search",
+    "saved_search", "saved_ask",  # the Saved library (links, videos, posts the owner saved)
 )
-WRITE_TOOLS: tuple[str, ...] = ("tasks_add", "expense_add", "notes_create", "income_add", "calendar_add_event")
+WRITE_TOOLS: tuple[str, ...] = ("tasks_add", "expense_add", "notes_create", "income_add", "calendar_add_event",
+                                "saved_add")
 REMEMBER_TOOL = "remember"
 # Reads that return third-party text (notes and receipts from mail/SMS, Drive files, invites): once one
 # ran (or a file is attached) the turn is "untrusted" and every write, `remember` included, waits for a tap.
-CONTENT_TOOLS: frozenset[str] = frozenset({"notes_search", "notes_get", "ask_drive", "drive_search", "calendar_events"})
+CONTENT_TOOLS: frozenset[str] = frozenset({"notes_search", "notes_get", "ask_drive", "drive_search", "calendar_events",
+                                          "saved_search", "saved_ask"})  # saved items carry web page text
 
 REMEMBER_SPEC: dict[str, Any] = {
     "type": "function",
@@ -148,11 +151,19 @@ _DOMAINS: dict[str, re.Pattern[str]] = {
         r"\bmon (salaire|anniversaire|loyer)\b", r"\bmy (salary|birthday|rent)\b",
     ),
     "quota": _rx(r"\bquotas?\b", r"\bfree[- ]tier\b"),
+    # The Saved library: "the video I saved", "l'article que j'ai sauvegardé", "dakchi li savit".
+    "saved": _rx(
+        r"\b(i|i've|ive) (saved|bookmarked)\b", r"\bmy (saved|bookmarks?|library)\b",
+        r"\bsaved (items?|links?|videos?|posts?|articles?)\b", r"\bj'ai (sauvegarde|enregistre|garde|mis de cote)\b",
+        r"\bque j'ai (sauvegarde|enregistre|garde)\b", r"\bmes (favoris|signets|liens|enregistrements)\b",
+        r"\bbookmarks?\b", r"\bsavit\b", r"\bsauvegardit\b", "حفظت", "المحفوظات",
+    ),
 }
 
 # "add" / "create" count as data only next to a data object ("ajoute une tâche", "add an expense");
 # "remember" only when the message has no general keyword ("remember the difference between...").
 _WRITE_VERB = _rx(
+    r"\bsave\b", r"\bsauvegarde\w*",
     r"\bajout\w*", r"\badd\b", r"\bcree[rz]?\b", r"\bcreate\b", r"\bplanifie\w*", r"\benregistre\w*",
     r"\bzid\b", r"\bktb\b", r"\bsjl\b", "زيد", "سجل", "اكتب",
 )
@@ -161,6 +172,7 @@ _WRITE_OBJECT = _rx(
     r"\brdv\b", r"\brendez-?vous\b", r"\bevents?\b", r"\bevenements?\b", r"\brappels?\b", r"\breminders?\b",
     r"\bmeetings?\b", r"\breunions?\b", r"\brevenus?\b", r"\bincomes?\b", r"\bsalaire\b", r"\bagenda\b",
     r"\bcalendri?e?r\b", r"\bachats?\b", r"\bcourses\b", r"\b\d+\s?(dh|dhs|mad|eur|euros?|usd)\b",
+    r"\bliens?\b", r"\blinks?\b", r"\bbookmarks?\b", r"https?://",
     "مهمة", "مصروف", "موعد", "ملاحظة", "تذكير",
 )
 _REMEMBER_VERB = _rx(
@@ -420,7 +432,7 @@ def result_summary(name: str, result: Any) -> str:
     if isinstance(result, dict):
         if result.get("error"):
             return f"error: {str(result['error'])[:80]}"
-        if name == "ask_drive":
+        if name in ("ask_drive", "saved_ask"):
             sources = result.get("sources") or []
             return f"{len(sources)} source{'s' if len(sources) != 1 else ''}"
         parts = [f"{len(v)} {k}" for k, v in result.items() if isinstance(v, list)][:2]
@@ -472,6 +484,10 @@ def write_summary(name: str, args: dict[str, Any]) -> str:
     if name == "calendar_add_event":
         line = f'Event "{a.get("title") or "?"}"'
         return line + (f" · {a['start']}" if a.get("start") else "")
+    if name == "saved_add":
+        what = str(a.get("url") or a.get("text") or "?")
+        line = f"Save {what[:100]}{'…' if len(what) > 100 else ''}"
+        return line + (f" · {a['collection']}" if a.get("collection") else "")
     if name == REMEMBER_TOOL:
         return f"Remember: {str(a.get('fact') or '')[:120]}"
     return name

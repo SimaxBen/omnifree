@@ -1233,7 +1233,7 @@ export interface VoiceNoteResult {
 
 // ------------------------------------------------------------------ global search (GET /search)
 
-export type SearchResultType = 'notes' | 'tasks' | 'expenses' | 'incomes' | 'files' | 'chats' | 'links';
+export type SearchResultType = 'notes' | 'tasks' | 'expenses' | 'incomes' | 'files' | 'chats' | 'links' | 'saved';
 
 export interface SearchResult {
   type: SearchResultType;

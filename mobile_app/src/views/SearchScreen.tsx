@@ -33,6 +33,7 @@ function detailOf(r: SearchResult): string {
     const amount = Number(r.type === 'expenses' ? d.total : d.amount) || 0;
     return `${amount.toLocaleString('fr-FR', { maximumFractionDigits: 2 })} ${String(d.currency ?? 'MAD')} · ${r.date ?? ''}`;
   }
+  if (r.type === 'saved') return [String(d.site || (d.kind === 'text' ? 'Note' : 'Saved')), r.date ? r.date.slice(0, 10) : ''].filter(Boolean).join(' · ');
   if (r.type === 'tasks') return `${d.done ? 'Done' : 'Open'}${d.due ? ` · due ${String(d.due)}${d.due_time ? ` ${String(d.due_time)}` : ''}` : ''}`;
   return r.date ? r.date.slice(0, 10) : '';
 }
@@ -132,6 +133,10 @@ export default function SearchScreen({ onClose }: { onClose: (after?: () => void
       const drop = d.kind === 'drop';
       requestFocus({ kind: drop ? 'drop' : 'link', id: String(d.code ?? '') });
       onClose(() => go('more', 'links'));
+    }
+    else if (r.type === 'saved') {
+      requestFocus({ kind: 'saved', id: r.id });
+      onClose(() => go('more', 'saved'));
     }
     else if (r.type === 'chats') {
       writePref('chat.current', r.id);

@@ -95,11 +95,12 @@ describe('share helpers', () => {
     const pdf = { path: '/x', name: 'facture.pdf', type: 'application/pdf', size: 1 };
     const photo = { path: '/y', name: 'IMG.jpg', type: 'image/jpeg', size: 1 };
     const memo = { path: '/z', name: 'memo.m4a', type: '', size: 1 };
-    expect(shareActions(payload({ files: [pdf] }))).toEqual(['receipt', 'drive']);
+    expect(shareActions(payload({ files: [pdf] }))).toEqual(['save', 'receipt', 'drive']);
+    expect(shareActions(payload({ files: [photo] }))).toEqual(['save', 'receipt', 'drive']);
     expect(shareActions(payload({ files: [pdf, photo] }))).toEqual(['drive']);
     expect(shareActions(payload({ files: [memo] }))).toEqual(['voice', 'drive']);
-    expect(shareActions(payload({ text: 'https://example.org' }))).toEqual(['link', 'note', 'task', 'ai']);
-    expect(shareActions(payload({ text: 'acheter du pain' }))).toEqual(['note', 'task', 'ai']);
+    expect(shareActions(payload({ text: 'https://example.org' }))).toEqual(['save', 'link', 'note', 'task', 'ai']);
+    expect(shareActions(payload({ text: 'acheter du pain' }))).toEqual(['save', 'note', 'task', 'ai']);
     expect(isReceiptFile({ name: 'scan.PDF', type: '' })).toBe(true);
     expect(isAudioFile({ name: 'a.txt', type: 'text/plain' })).toBe(false);
   });

@@ -97,6 +97,20 @@ import { normalizeGoal, normalizeGoals, normalizeSuggestions } from './moneyInte
 import type { GoalContribution, GoalCreate, GoalPatch, GoalsListing, SavingsGoal, SubscriptionAccept, SubscriptionSuggestion, TrackedSubscription } from './types';
 import type { SearchResponse, SearchResultType } from './types';
 import type { FolderDrop, FolderDropCreate } from './types';
+import type {
+  CollectionBody,
+  SavedAnswer,
+  SavedCollection,
+  SavedCollections,
+  SavedItem,
+  SavedListing,
+  SavedPatch,
+  SavedPreviewResult,
+  SavedSearchResponse,
+  SavedType,
+  SaveRequest,
+  SaveResult,
+} from './saved';
 import { normalizeDebts } from './moneyTools';
 import type * as MT from './moneyTypes';
 
@@ -127,6 +141,8 @@ interface RequestOptions {
   form?: FormData;
   signal?: AbortSignal;
   accept?: string;
+  /** Let the request finish even if the page is hidden or closed (small bodies only: 64 KB in total). */
+  keepalive?: boolean;
 }
 
 function detailMessage(body: unknown, fallback: string): string {
@@ -286,7 +302,7 @@ export class HubClient {
     }
     let res: Response;
     try {
-      res = await fetch(this.url(path, opts.query), { method, headers, body, signal: opts.signal });
+      res = await fetch(this.url(path, opts.query), { method, headers, body, signal: opts.signal, ...(opts.keepalive ? { keepalive: true } : {}) });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err;
       throw new HubError(`Cannot reach hub at ${this.baseUrl} (${err instanceof Error ? err.message : String(err)})`, 0);
@@ -1196,6 +1212,68 @@ export class HubClient {
       items: listOf<BudgetItem>(body, 'items'),
       summary: { ok: n('ok'), warn: n('warn'), over: n('over'), unknown: n('unknown') },
     };
+  }
+
+  // ------------------------------------------------------------------ saved library (/saved)
+
+  /** `GET /saved`: newest first; `collection` is a collection id or 'none' (Uncategorised), `type` a smart collection. */
+  savedList(opts: { collection?: string; type?: SavedType; limit?: number; offset?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<SavedListing> {
+    return this.request<SavedListing>('GET', '/saved', { query: { ...opts }, signal });
+  }
+
+  savedCollections(signal?: AbortSignal): Promise<SavedCollections> {
+    return this.request<SavedCollections>('GET', '/saved/collections', { signal });
+  }
+
+  /**
+   * `POST /saved`: a link, text or Drive file; enrichment, summary, thumbnail and index run in the request (~20 s).
+   * `keepalive` lets the save finish when the share screen is hidden and the PWA goes to the background.
+   */
+  savedSave(req: SaveRequest, signal?: AbortSignal, opts: { keepalive?: boolean } = {}): Promise<SaveResult> {
+    return this.request<SaveResult>('POST', '/saved', { json: req, signal, keepalive: opts.keepalive });
+  }
+
+  /** `POST /saved/preview`: the link's title, image and site (no LLM, nothing stored), or the item already saved. */
+  savedPreview(url: string, signal?: AbortSignal): Promise<SavedPreviewResult> {
+    return this.request<SavedPreviewResult>('POST', '/saved/preview', { json: { url }, signal });
+  }
+
+  savedItem(id: string, signal?: AbortSignal): Promise<SavedItem> {
+    return this.request<SavedItem>('GET', `/saved/${encodeURIComponent(id)}`, { signal });
+  }
+
+  savedPatch(id: string, patch: SavedPatch): Promise<SavedItem> {
+    return this.request<SavedItem>('PATCH', `/saved/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  savedDelete(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/saved/${encodeURIComponent(id)}`);
+  }
+
+  async savedRefresh(id: string): Promise<SavedItem> {
+    return (await this.request<{ item: SavedItem }>('POST', `/saved/${encodeURIComponent(id)}/refresh`)).item;
+  }
+
+  /** `GET /saved/search?q=`: hybrid meaning + keyword search, each result with why it matched. */
+  savedSearch(q: string, limit = 20, signal?: AbortSignal): Promise<SavedSearchResponse> {
+    return this.request<SavedSearchResponse>('GET', '/saved/search', { query: { q, limit }, signal });
+  }
+
+  /** `POST /saved/ask`: an answer from the saved items with [n] citations to `sources`. */
+  savedAsk(question: string, signal?: AbortSignal): Promise<SavedAnswer> {
+    return this.request<SavedAnswer>('POST', '/saved/ask', { json: { question }, signal });
+  }
+
+  savedCreateCollection(body: CollectionBody): Promise<SavedCollection> {
+    return this.request<SavedCollection>('POST', '/saved/collections', { json: body });
+  }
+
+  savedPatchCollection(id: string, body: CollectionBody): Promise<SavedCollection> {
+    return this.request<SavedCollection>('PATCH', `/saved/collections/${encodeURIComponent(id)}`, { json: body });
+  }
+
+  savedDeleteCollection(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/saved/collections/${encodeURIComponent(id)}`);
   }
 
   // ------------------------------------------------------------------ global search

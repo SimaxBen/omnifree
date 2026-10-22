@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 // In-app change notifications: a screen that creates or changes data announces the topic, and
 // every mounted list showing that topic reloads (Home, Notes, Drive...).
 
-export type Topic = 'notes' | 'tasks' | 'drive' | 'expenses' | 'links' | 'drops' | 'rag' | 'budget' | 'money';
+export type Topic = 'notes' | 'tasks' | 'drive' | 'expenses' | 'links' | 'drops' | 'rag' | 'budget' | 'money' | 'saved';
 
 type Listener = (topic: Topic) => void;
 const listeners = new Set<Listener>();
