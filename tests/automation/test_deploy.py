@@ -470,6 +470,7 @@ def test_hub_secret_names_cover_enabled_plugins_and_skip_human_passwords(tmp_pat
     assert names[:3] == ["HUB_API_TOKEN", "INSTINCT_API_TOKEN", "MCP_API_TOKEN"]
     assert {"GROQ_API_KEY", "NEON_DATABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"} <= set(names)
     assert {"NTFY_TOPIC", "NTFY_SERVER", "NTFY_TOKEN", "CALENDAR_FEED_TOKEN"} <= set(names)  # push + calendar feed
+    assert {"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"} <= set(names)  # native web push
     assert "SMS_WEBHOOK_TOKEN" in names
     assert "MISTRAL_API_KEY" not in names and "SAMBANOVA_API_KEY" not in names  # disabled plugins
     assert not {"HF_TOKEN", "B2_ACCOUNT_PASSWORD", "OCI_CONSOLE_PASSWORD", "SUPABASE_DB_PASSWORD"} & set(names)

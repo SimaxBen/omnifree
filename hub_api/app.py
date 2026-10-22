@@ -27,6 +27,7 @@ from hub_api.routers import chats as chats_router
 from hub_api.routers import digest as digest_router
 from hub_api.routers import inbox as inbox_router
 from hub_api.routers import notify as notify_router
+from hub_api.routers import push as push_router
 from hub_api.routers import rag as rag_router
 from hub_api.routers import sms as sms_router
 from hub_api.routers.llm import ROUTED_VIA_HEADER
@@ -149,7 +150,7 @@ def create_app(
     protected = [Depends(require_token)]
     for module in (llm, agent, drive, dns, db, plugins, compute, cron, rag_router, budget_router):
         app.include_router(module.router, dependencies=protected)
-    for module in (notes, expenses, money, links, inbox_router, digest_router, chats_router, notify_router, calendar_router):  # personal apps (data in D1)
+    for module in (notes, expenses, money, links, inbox_router, digest_router, chats_router, notify_router, push_router, calendar_router):  # personal apps (data in D1)
         app.include_router(module.router, dependencies=protected)
     app.include_router(sms_router.router, dependencies=protected)  # /money/sms/log, /money/sms/setup
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)

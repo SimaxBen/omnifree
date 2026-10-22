@@ -1,9 +1,15 @@
-"""/notify: push notifications to the owner's phone through ntfy (see :mod:`hub_api.notifier`).
+"""/notify: push notifications to the owner's phone through ntfy (see :mod:`hub_api.notifier`) and native Web Push
+to the PWA (see :mod:`hub_api.webpush` and ``/push``).
+
+Every push goes to both channels: ntfy and every web push subscription. ``PUT /notify/prefs`` with
+``{"channels": {"ntfy": bool, "webpush": bool}}`` turns a channel off (both on by default; a channel without its
+vault keys is skipped). A push counts as sent when at least one channel succeeded; the per-channel outcome is
+stored in ``app_notify_log.channels`` (JSON) and returned as ``channels``.
 
 * ``GET /notify/status``: configured?, the topic (the PWA shows it behind a reveal toggle), per-kind
   switches and the last pushes;
-* ``PUT /notify/prefs``: turn kinds on or off (stored in D1, all on by default);
-* ``POST /notify/test``: one test push;
+* ``PUT /notify/prefs``: turn kinds (``prefs``) or channels (``channels``) on or off (stored in D1, all on by default);
+* ``POST /notify/test``: one test push (to every enabled channel);
 * ``POST /notify/run?kind=morning|evening|weekly|budget|month|reminders``: what the QStash schedules call (no
   body needed). Daily/weekly/monthly kinds are deduplicated in D1 (one push per kind and day, week or month;
   ``force=1`` bypasses it, ``preview=1`` composes without sending); ``budget`` only pushes items that
@@ -32,18 +38,20 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 
-from hub_api import notifier
+from hub_api import notifier, webpush
 from hub_api.appdata import AppDB, get_appdb, iso, local_now, local_today, local_tz, new_id, now_iso
 from hub_api.budget_report import build_budget
 from hub_api.recurring import monthly_equivalent, recurring_items
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
 from hub_api.routers.expenses import expense_out, summarise
 from hub_api.routers.notes import ensure_schema as ensure_notes
+from hub_api.routers.push import ensure_schema as ensure_push
+from hub_api.routers.push import fan_out, list_subs
 from hub_api.state import HubState, get_state
 
 __all__ = [
     "router", "public_router", "SCHEMA", "KINDS", "RUN_KINDS", "Push", "push_inbox_import", "fmt_money",
-    "ensure_schema", "done_sig", "reminder_window",
+    "ensure_schema", "done_sig", "reminder_window", "CHANNELS", "get_channels", "webpush_payload",
 ]
 
 log = logging.getLogger("omnifree.hub.notify")
@@ -54,6 +62,9 @@ public_router = APIRouter(tags=["public"])
 RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders"]
 RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders")
 KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox")
+CHANNELS: tuple[str, ...] = ("ntfy", "webpush")
+_CHANNEL_PREFIX = "channel:"  # channel switches live in app_notify_prefs as "channel:ntfy" / "channel:webpush"
+WEBPUSH_TTL_S = 12 * 3600
 BUDGET_TIMEOUT_S = 40.0  # the whole call must stay under the 60 s serverless limit
 INBOX_PUSH_TIMEOUT_S = 5.0
 LOG_KEEP_DAYS = 60
@@ -84,7 +95,9 @@ _MONTHS_FR = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", 
 async def ensure_schema(db: AppDB) -> AppDB:
     await ensure_expenses(db)
     await ensure_notes(db)
+    await ensure_push(db)
     await db.ensure("notify", SCHEMA)
+    await db.add_columns("notify_log_channels", "app_notify_log", [("channels", "TEXT")])
     return db
 
 
@@ -442,10 +455,19 @@ async def run_reminders(state: HubState, db: AppDB, *, preview: bool, force: boo
 # --------------------------------------------------------------------------- sending
 
 
-async def get_prefs(db: AppDB) -> dict[str, bool]:
+async def _saved_prefs(db: AppDB) -> dict[str, bool]:
     rows = await db.fetch("SELECT kind, enabled FROM app_notify_prefs", [])
-    saved = {r["kind"]: bool(r["enabled"]) for r in rows}
+    return {r["kind"]: bool(r["enabled"]) for r in rows}
+
+
+async def get_prefs(db: AppDB) -> dict[str, bool]:
+    saved = await _saved_prefs(db)
     return {k: saved.get(k, True) for k in KINDS}
+
+
+async def get_channels(db: AppDB) -> dict[str, bool]:
+    saved = await _saved_prefs(db)
+    return {c: saved.get(_CHANNEL_PREFIX + c, True) for c in CHANNELS}
 
 
 def _pwa(state: HubState, path: str) -> str | None:
@@ -453,12 +475,68 @@ def _pwa(state: HubState, path: str) -> str | None:
     return f"{base}/{path.lstrip('/')}" if base and path else (base or None)
 
 
+def webpush_payload(state: HubState, kind: str, push: Push) -> str:
+    """The web push JSON for ``push``: the "Fait ✓" link becomes the ``done`` action, then the PWA links (max 2)."""
+    actions: list[dict[str, str]] = [
+        {"action": "done", "title": str(a.get("label") or "Fait ✓"), "url": str(a["url"])}
+        for a in push.http_actions if a.get("url")
+    ]
+    actions += [{"action": "open", "title": label, "url": url}
+                for label, path in push.actions if (url := _pwa(state, path))]
+    tag = (push.dedupe or kind).replace(":", "-")
+    return webpush.build_payload(push.title, push.message, tag=f"omnifree-{tag}", url=_pwa(state, push.path or "#/"),
+                                 actions=actions[:2])
+
+
+@dataclass
+class _Channels:
+    """What a push can go to right now (prefs, vault keys, subscriptions) and why the others are skipped."""
+    ntfy: notifier.NtfyConfig | None
+    webpush: webpush.WebPushConfig | None
+    subs: list[dict[str, Any]]
+    reasons: list[str]
+
+    @property
+    def any(self) -> bool:
+        return self.ntfy is not None or self.webpush is not None
+
+
+async def _channels(state: HubState, db: AppDB) -> _Channels:
+    on = await get_channels(db)
+    reasons: list[str] = []
+    ntfy_cfg: notifier.NtfyConfig | None = notifier.load_config(state.settings.secret)
+    if not on["ntfy"]:
+        ntfy_cfg = None
+        reasons.append("ntfy turned off in the app")
+    elif ntfy_cfg is not None and not ntfy_cfg.configured:
+        ntfy_cfg = None
+        reasons.append(f"ntfy not configured (vault key {notifier.TOPIC_KEY})")
+    wp_cfg: webpush.WebPushConfig | None = webpush.load_config(state.settings.secret)
+    subs: list[dict[str, Any]] = []
+    if not on["webpush"]:
+        wp_cfg = None
+        reasons.append("app notifications turned off in the app")
+    elif wp_cfg is not None and not wp_cfg.configured:
+        reasons.append(f"app notifications not configured ({wp_cfg.error})")
+        wp_cfg = None
+    else:
+        subs = await list_subs(db)
+        if not subs:
+            wp_cfg = None
+            reasons.append("app notifications: no device subscribed")
+    return _Channels(ntfy=ntfy_cfg, webpush=wp_cfg, subs=subs, reasons=reasons)
+
+
 async def deliver(state: HubState, db: AppDB, kind: str, push: Push, *, force: bool = False) -> dict[str, Any]:
-    """Send ``push`` (claiming its dedupe key first); returns the outcome. Raises :class:`notifier.NotifyError`."""
-    cfg = notifier.load_config(state.settings.secret)
-    out: dict[str, Any] = {"kind": kind, "sent": False, "skipped": None, "title": push.title, "message": push.message}
-    if not cfg.configured:
-        out["skipped"] = f"ntfy not configured (vault key {notifier.TOPIC_KEY})"
+    """Send ``push`` to ntfy and every web push subscription (claiming its dedupe key first); returns the outcome.
+
+    Sent when at least one channel succeeded. Raises :class:`notifier.NotifyError` when every channel failed.
+    """
+    ch = await _channels(state, db)
+    out: dict[str, Any] = {"kind": kind, "sent": False, "skipped": None, "title": push.title, "message": push.message,
+                           "channels": {}}
+    if not ch.any:
+        out["skipped"] = "; ".join(ch.reasons)
         return out
     now = now_iso()
     key = push.dedupe if push.dedupe and not force else f"{kind}:{now}:{new_id()}"
@@ -471,20 +549,59 @@ async def deliver(state: HubState, db: AppDB, kind: str, push: Push, *, force: b
     if not claimed:
         out["skipped"] = "already sent"
         return out
-    actions = [*push.http_actions] + [
-        {"action": "view", "label": label, "url": url, "clear": True}
-        for label, path in push.actions if (url := _pwa(state, path))
-    ]
-    try:
-        answer = await notifier.publish(
-            cfg, push.message, title=push.title, priority=push.priority, tags=push.tags,
-            click=_pwa(state, push.path), actions=actions,
-        )
-    except notifier.NotifyError as exc:
-        await db.execute("UPDATE app_notify_log SET status = 'failed', error = ? WHERE key = ?", [str(exc)[:300], key])
-        raise
-    await db.execute("UPDATE app_notify_log SET status = 'sent', ntfy_id = ? WHERE key = ?",
-                     [str(answer.get("id") or "") or None, key])
+    results: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    ntfy_id: str | None = None
+
+    async def via_ntfy(cfg: notifier.NtfyConfig) -> None:
+        nonlocal ntfy_id
+        actions = [*push.http_actions] + [
+            {"action": "view", "label": label, "url": url, "clear": True}
+            for label, path in push.actions if (url := _pwa(state, path))
+        ]
+        try:
+            answer = await notifier.publish(
+                cfg, push.message, title=push.title, priority=push.priority, tags=push.tags,
+                click=_pwa(state, push.path), actions=actions,
+            )
+        except notifier.NotifyError as exc:
+            results["ntfy"] = {"ok": False, "error": str(exc)[:300]}
+            errors.append(str(exc))
+            return
+        ntfy_id = str(answer.get("id") or "") or None
+        results["ntfy"] = {"ok": True, "id": ntfy_id}
+
+    async def via_webpush(cfg: webpush.WebPushConfig) -> None:
+        urgent = kind == "reminders" or push.priority >= 4
+        try:
+            sent = await fan_out(cfg, db, ch.subs, webpush_payload(state, kind, push), ttl=WEBPUSH_TTL_S,
+                                 urgency="high" if urgent else "normal")
+        except Exception as exc:  # noqa: BLE001 - a D1 hiccup must not lose the ntfy result
+            log.warning("web push fan-out failed: %r", exc)
+            sent = [{"ok": False, "error": type(exc).__name__, "removed": False, "label": None}]
+        ok = sum(1 for r in sent if r["ok"])
+        fails = [f"{r.get('label') or r.get('browser') or 'device'}: {r.get('error')}" for r in sent if not r["ok"]]
+        results["webpush"] = {"ok": ok > 0, "sent": ok, "failed": len(fails),
+                              "removed": sum(1 for r in sent if r.get("removed")), "errors": [f[:150] for f in fails[:5]]}
+        if not ok:
+            errors.append("web push: " + ("; ".join(fails[:3]) or "no device"))
+
+    jobs = []
+    if ch.ntfy is not None:
+        jobs.append(via_ntfy(ch.ntfy))
+    if ch.webpush is not None:
+        jobs.append(via_webpush(ch.webpush))
+    await asyncio.gather(*jobs)
+    out["channels"] = results
+    channels_json = json.dumps(results, ensure_ascii=False)[:2000]
+    if not any(r.get("ok") for r in results.values()):
+        error = " | ".join(errors)[:300]
+        await db.execute("UPDATE app_notify_log SET status = 'failed', error = ?, channels = ? WHERE key = ?",
+                         [error, channels_json, key])
+        raise notifier.NotifyError(error)
+    partial = " | ".join(errors)[:300] or None
+    await db.execute("UPDATE app_notify_log SET status = 'sent', ntfy_id = ?, error = ?, channels = ? WHERE key = ?",
+                     [ntfy_id, partial, channels_json, key])
     await db.execute("DELETE FROM app_notify_log WHERE sent_at < ?",
                      [iso(datetime.now(timezone.utc) - timedelta(days=LOG_KEEP_DAYS))])
     out["sent"] = True
@@ -497,7 +614,8 @@ async def push_inbox_import(state: HubState, db: AppDB, result: dict[str, Any]) 
     if not created or result.get("dry_run"):
         return
     try:
-        if not notifier.load_config(state.settings.secret).configured:
+        if not (notifier.load_config(state.settings.secret).configured
+                or webpush.load_config(state.settings.secret).configured):
             return
 
         async def go() -> None:
@@ -522,14 +640,25 @@ async def push_inbox_import(state: HubState, db: AppDB, result: dict[str, Any]) 
 
 
 class PrefsBody(BaseModel):
-    prefs: dict[str, bool]
+    prefs: dict[str, bool] = {}
+    channels: dict[str, bool] = {}
+
+
+def _log_out(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        channels = json.loads(row.get("channels") or "null")
+    except ValueError:
+        channels = None
+    return {**row, "channels": channels if isinstance(channels, dict) else None}
 
 
 @router.get("/status")
 async def notify_status(state: HubState = Depends(get_state), db: AppDB = Depends(_db)) -> dict[str, Any]:
     cfg = notifier.load_config(state.settings.secret)
+    wp = webpush.load_config(state.settings.secret)
     recent = await db.fetch(
-        "SELECT kind, title, status, error, sent_at FROM app_notify_log ORDER BY sent_at DESC LIMIT 20", [], limit=20
+        "SELECT kind, title, status, error, channels, sent_at FROM app_notify_log ORDER BY sent_at DESC LIMIT 20", [],
+        limit=20,
     )
     return {
         "configured": cfg.configured,
@@ -539,7 +668,9 @@ async def notify_status(state: HubState = Depends(get_state), db: AppDB = Depend
         "token_set": bool(cfg.token),
         "prefs": await get_prefs(db),
         "kinds": list(KINDS),
-        "recent": recent,
+        "channels": await get_channels(db),
+        "webpush": {"configured": wp.configured, "error": wp.error, "devices": len(await list_subs(db))},
+        "recent": [_log_out(r) for r in recent],
     }
 
 
@@ -548,19 +679,26 @@ async def set_prefs(body: PrefsBody, db: AppDB = Depends(_db)) -> dict[str, Any]
     unknown = sorted(set(body.prefs) - set(KINDS))
     if unknown:
         raise HTTPException(422, detail=f"unknown kinds: {', '.join(unknown)}")
-    for kind, enabled in body.prefs.items():
+    unknown = sorted(set(body.channels) - set(CHANNELS))
+    if unknown:
+        raise HTTPException(422, detail=f"unknown channels: {', '.join(unknown)}")
+    rows = [*body.prefs.items(), *((_CHANNEL_PREFIX + c, v) for c, v in body.channels.items())]
+    for kind, enabled in rows:
         await db.execute(
             "INSERT INTO app_notify_prefs (kind, enabled, updated_at) VALUES (?, ?, ?)"
             " ON CONFLICT(kind) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
             [kind, 1 if enabled else 0, now_iso()],
         )
-    return {"prefs": await get_prefs(db)}
+    return {"prefs": await get_prefs(db), "channels": await get_channels(db)}
 
 
 @router.post("/test")
 async def notify_test(state: HubState = Depends(get_state), db: AppDB = Depends(_db)) -> dict[str, Any]:
-    if not notifier.load_config(state.settings.secret).configured:
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=f"ntfy is not configured: set the vault key {notifier.TOPIC_KEY}")
+    ch = await _channels(state, db)
+    if not ch.any:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail=f"no notification channel is ready ({'; '.join(ch.reasons)}): set the vault key "
+                                   f"{notifier.TOPIC_KEY} or enable app notifications on a device")
     push = Push(title="OmniFree : test réussi ✓", message="Les notifications arrivent bien sur ce téléphone. À bientôt !",
                 tags=["white_check_mark"], path="#/more/notifications")
     try:

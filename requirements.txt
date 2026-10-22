@@ -10,6 +10,7 @@ python-multipart>=0.0.9
 aiosqlite>=0.20
 pypdf>=4.0
 mcp==2.3.0
+pywebpush==2.3.0  # native Web Push (hub_api/webpush.py): pulls py-vapid, http-ece, requests, aiohttp
 tzdata>=2024.1  # Africa/Casablanca on hosts without a system tz database (Vercel)
 pytest>=8
 pytest-asyncio>=0.24
