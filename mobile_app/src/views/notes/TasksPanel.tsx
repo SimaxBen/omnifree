@@ -5,10 +5,12 @@ import { SwipeRow } from '../../components/SwipeRow';
 import { Button, Chip, EmptyState, ErrorNote, Field, IconButton, Segmented, SkeletonList, cx, haptic, inputClass, riseStyle } from '../../components/ui';
 import { eventWhen, groupEventsByDay } from '../../lib/agenda';
 import { addDays, dueInfo, isoDay, sortTasks, taskDue, validTime } from '../../lib/apps';
+import { cleanChecklist, recurrenceLabel, repeatDraft, ruleFromDraft } from '../../lib/tasks';
 import { announce, useTopic } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
-import type { Task, TaskPriority } from '../../lib/types';
+import type { ChecklistItem, Task, TaskPriority } from '../../lib/types';
+import { ChecklistEditor, RepeatPicker, TimeBlockPanel } from './TaskExtras';
 import { TaskRow } from './TaskRow';
 
 function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean; task: Task; onClose: () => void; onSaved: (t: Task) => void; onDeleted: (id: string) => void }) {
@@ -19,6 +21,10 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
   const [due, setDueRaw] = useState(task.due ?? '');
   const [time, setTimeRaw] = useState(validTime(task.due_time) ?? '');
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
+  const [repeat, setRepeat] = useState(() => repeatDraft(task.recurrence, task.due, isoDay()));
+  const [checklist, setChecklist] = useState<ChecklistItem[]>(task.checklist ?? []);
+  const [estimate, setEstimate] = useState<number | null>(task.estimate ?? null);
+  const [live, setLive] = useState<Task>(task); // time blocks are booked at once, outside "Save task"
   const [busy, setBusy] = useState(false);
   // A time needs a day: picking one with no date means today; clearing the date clears the time.
   const setDue = (d: string) => {
@@ -34,7 +40,18 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
     setBusy(true);
     try {
       const at = due ? validTime(time) : null;
-      const t = await client.updateTask(task.id, { title: title.trim() || task.title, details: details.trim() || null, due: due || null, due_time: at, priority });
+      const recurrence = ruleFromDraft(repeat, due || null, isoDay());
+      const t = await client.updateTask(task.id, {
+        title: title.trim() || task.title,
+        details: details.trim() || null,
+        // a repeating task with no date gets its first occurrence from the hub
+        due: due || null,
+        due_time: due || !recurrence ? at : validTime(time),
+        priority,
+        recurrence,
+        checklist: cleanChecklist(checklist),
+        estimate,
+      });
       onSaved(t);
       announce('tasks');
       onClose();
@@ -110,6 +127,26 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
           </div>
           <p className="px-1 text-[12px] text-ink-500">{time ? 'A reminder is pushed 15 min before.' : 'Optional: all day without a time.'}</p>
         </div>
+        <RepeatPicker value={repeat} onChange={setRepeat} label={recurrenceLabel(ruleFromDraft(repeat, due || null, today))} />
+        <ChecklistEditor
+          items={checklist}
+          onChange={setChecklist}
+          taskId={task.id}
+          onSaved={(t) => {
+            setLive(t);
+            onSaved(t);
+            announce('tasks');
+          }}
+        />
+        <TimeBlockPanel
+          task={live}
+          estimate={estimate}
+          onEstimate={setEstimate}
+          onTask={(t) => {
+            setLive(t);
+            onSaved(t);
+          }}
+        />
         <div className="space-y-1.5">
           <span className="block px-1 text-[13px] text-ink-300">Priority</span>
           <Segmented
@@ -271,6 +308,11 @@ export default function TasksPanel() {
   };
 
   const onChange = (t: Task) => {
+    if (t.done && t.next) {
+      const next = t.next; // a recurring task: its next occurrence shows up at once
+      setFresh(next.id);
+      open.setData((ts) => [...(ts ?? []).filter((x) => x.id !== next.id), next]);
+    }
     if (t.done) {
       open.setData((ts) => ts?.map((x) => (x.id === t.id ? t : x)));
       window.setTimeout(() => {
@@ -278,8 +320,9 @@ export default function TasksPanel() {
         if (showDone) done.setData((ts) => [t, ...(ts ?? []).filter((x) => x.id !== t.id)]);
       }, 900);
     } else {
+      const gone = t.removed_next; // reopened: the hub deleted the occurrence its completion had created
       done.setData((ts) => ts?.filter((x) => x.id !== t.id));
-      open.setData((ts) => [...(ts ?? []).filter((x) => x.id !== t.id), t]);
+      open.setData((ts) => [...(ts ?? []).filter((x) => x.id !== t.id && x.id !== gone), t]);
     }
   };
 

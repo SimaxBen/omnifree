@@ -49,6 +49,7 @@ from hub_api.recurring import monthly_equivalent, recurring_items
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
 from hub_api.routers.expenses import expense_out, summarise
 from hub_api.routers.notes import ensure_schema as ensure_notes
+from hub_api.routers.notes import roll_over
 from hub_api.routers.push import ensure_schema as ensure_push
 from hub_api.routers.push import fan_out, list_subs
 from hub_api.state import HubState, get_state
@@ -847,4 +848,6 @@ async def notify_done(
         await db.execute("UPDATE app_tasks SET done = 1, done_at = ? WHERE id = ? AND done = 0", [now_iso(), task_id])
         task = await db.fetch_one("SELECT * FROM app_tasks WHERE id = ?", [task_id])
         await gcal.push_task(state, db, task_id, task)  # "✓ " title, no reminder
+        if task is not None:
+            await roll_over(db, state, task)  # a recurring task: its next occurrence
     return {"ok": True, "id": task_id, "title": row["title"], "done": True}

@@ -1158,3 +1158,72 @@ export interface SmsLogEntry {
   received_at: string | null;
   created_at: string;
 }
+
+// ------------------------------------------------------------------ tasks: recurrence, checklist, time blocks
+// (merged into Task / TaskCreate / VoiceNoteResult above by interface declaration merging)
+
+/** 0 = Monday ... 6 = Sunday. `interval` = every N days from the due date; `until` = last possible day. */
+export interface Recurrence {
+  freq: 'daily' | 'weekly' | 'monthly' | 'interval' | 'yearly';
+  days?: number[];
+  day?: number;
+  interval?: number;
+  month?: number;
+  until?: string | null;
+}
+
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+/** A Google Calendar time block booked for a task (local YYYY-MM-DDTHH:MM bounds). */
+export interface TaskBlock {
+  event_id: string;
+  start: string | null;
+  end: string | null;
+}
+
+export interface Task {
+  recurrence?: Recurrence | null;
+  recurrence_label?: string | null;
+  series_id?: string | null;
+  /** The occurrence created when this one was completed. */
+  next_id?: string | null;
+  checklist?: ChecklistItem[];
+  /** Minutes. */
+  estimate?: number | null;
+  block?: TaskBlock | null;
+  /** Only in the PATCH answer that completed a recurring task: its new occurrence. */
+  next?: Task;
+  /** Only in the PATCH answer that reopened a recurring task: the untouched next occurrence it deleted. */
+  removed_next?: string;
+}
+
+export interface TaskCreate {
+  /** A rule, or a phrase the hub parses ("every monday", "le 1er de chaque mois"). */
+  recurrence?: Recurrence | string | null;
+  checklist?: { id?: string; text: string; done?: boolean }[];
+  estimate?: number | null;
+}
+
+/** `GET /tasks/{id}/slots`. */
+export interface TaskSlots {
+  /** Google Calendar can take a block (POST /tasks/{id}/block). */
+  writable: boolean;
+  minutes: number;
+  slots: { start: string; end: string }[];
+  errors: { calendar: string; error: string }[];
+  work_hours: [string, string];
+}
+
+export interface TaskBlockResult {
+  task: Task;
+  event: GCalEvent;
+}
+
+export interface VoiceNoteResult {
+  /** Appointments heard in the memo, booked in the OmniFree Google Calendar (undo: DELETE /gcal/events/{id}). */
+  events?: GCalEvent[];
+}

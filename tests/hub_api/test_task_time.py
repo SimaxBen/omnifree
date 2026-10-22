@@ -175,7 +175,8 @@ def test_due_time_column_added_to_an_existing_table(app_hub) -> None:
     alters = [s for s in fa.SQL_LOG if s.startswith("ALTER TABLE app_tasks ADD COLUMN due_time")]
     for _ in range(3):
         app_hub.get("/tasks")
-    assert len([s for s in fa.SQL_LOG if s.startswith("ALTER TABLE app_tasks")]) == len(alters) == 1  # once per process
+    assert len([s for s in fa.SQL_LOG if s.startswith("ALTER TABLE app_tasks ADD COLUMN due_time")]) == len(alters) == 1
+    assert len([s for s in fa.SQL_LOG if s.startswith("ALTER TABLE app_tasks")]) == 1 + len(notes_mod.TASK_COLUMNS_V3)  # once per process
     patched = app_hub.patch("/tasks/old1", json={"due_time": "09:30"}).json()
     assert patched["due_time"] == "09:30"
 

@@ -463,7 +463,9 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
             "Add a task. `due` accepts YYYY-MM-DD or a relative day ('today', 'tomorrow', 'friday', 'in 3 days', "
             "'demain' ...) resolved in Africa/Casablanca, optionally with a time ('demain à 15h', 'friday 10am'). "
             "`due_time` is HH:MM local time (Africa/Casablanca); a time without a day means today, or tomorrow "
-            "once that time has passed. Timed tasks get a reminder push and a timed calendar event."
+            "once that time has passed. Timed tasks get a reminder push and a timed calendar event. "
+            "`repeat` makes it recurring ('every monday', 'daily', 'every 3 days', 'le 1er de chaque mois'): "
+            "completing it creates the next occurrence."
         ),
         annotations=CREATES,
     )
@@ -474,12 +476,18 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
         priority: Literal["low", "normal", "high"] = "normal",
         details: Annotated[str | None, Field(max_length=20_000)] = None,
         due_time: Annotated[str | None, Field(description="Time of day, HH:MM (24 h, Africa/Casablanca).")] = None,
+        repeat: Annotated[str | None, Field(max_length=200, description="Recurrence phrase, e.g. 'every monday'.")] = None,
     ) -> dict[str, Any]:
-        day, at = _resolve_when(due, due_time)
-        body = notes.TaskCreate(title=title, due=day, due_time=at, priority=priority, details=details)
+        if repeat and not (due and due.strip()):  # the first occurrence comes from the rule ("every sunday")
+            day, at = None, notes.normalize_time(due_time) if due_time else None
+        else:
+            day, at = _resolve_when(due, due_time)
+        body = notes.TaskCreate(title=title, due=day, due_time=at, priority=priority, details=details,
+                                recurrence=repeat or None)
         return await notes.create_task(body, db=await notes_db(), state=state)
 
-    @tool(description="Mark a task as done (by id, from tasks_list).", annotations=UPDATES)
+    @tool(description="Mark a task as done (by id, from tasks_list); a recurring task returns its `next` occurrence.",
+          annotations=UPDATES)
     @_guard
     async def tasks_complete(id: Annotated[str, Field(min_length=1, description="Task id.")]) -> dict[str, Any]:
         return await notes.patch_task(id, notes.TaskPatch(done=True), db=await notes_db(), state=state)
