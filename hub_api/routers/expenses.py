@@ -14,9 +14,10 @@ import re
 from datetime import date
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
+from hub_api import idempotency
 from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso, read_upload
 from hub_api.receipts import CATEGORIES, read_receipt_file
 from hub_api.state import HubState, get_state
@@ -209,7 +210,7 @@ def summarise(expenses: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
     row = {
-        "id": new_id(),
+        "id": fields.get("id") or new_id(),
         "date": fields["date"],
         "merchant": fields.get("merchant") or "",
         "total": float(fields["total"]),
@@ -287,6 +288,7 @@ class _Fields(BaseModel):
 
 
 class ExpenseCreate(_Fields):
+    id: str | None = Field(None, description="client-generated id (offline queue); a replay answers the existing expense")
     date: str | None = None  # default: today (Africa/Casablanca)
     merchant: str = Field("", max_length=200)
     total: float = Field(ge=0)
@@ -326,10 +328,26 @@ async def list_expenses(
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_expense(body: ExpenseCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
+async def create_expense(
+    body: ExpenseCreate,
+    db: AppDB = Depends(_db),
+    request: Request = None,  # type: ignore[assignment]  # injected by FastAPI; None when called directly (MCP)
+    response: Response = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
     fields = body.model_dump()
     fields["date"] = fields["date"] or local_today().isoformat()
-    return await _insert(db, fields)
+
+    async def fetch(expense_id: str) -> dict[str, Any] | None:
+        row = await db.fetch_one("SELECT * FROM app_expenses WHERE id = ?", [expense_id])
+        return None if row is None else _expense_out(row)
+
+    async def insert(expense_id: str) -> dict[str, Any]:
+        return await _insert(db, {**fields, "id": expense_id})
+
+    key = idempotency.header_key(request) if request is not None else None
+    return await idempotency.create_once(
+        db, scope="expenses", client_id=body.id, key=key, fetch=fetch, insert=insert, response=response
+    )
 
 
 def _image_type(filename: str | None, content_type: str | None) -> tuple[str, str]:

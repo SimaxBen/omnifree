@@ -15,11 +15,11 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, TranscriptionRequest
-from hub_api import gcal, note_links, recurrence, taskplus
+from hub_api import gcal, idempotency, note_links, recurrence, taskplus
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
@@ -455,10 +455,11 @@ async def _insert_note(
     pinned: bool,
     source: str = "text",
     audio_key: str | None = None,
+    row_id: str | None = None,
 ) -> dict[str, Any]:
     now = now_iso()
     row = {
-        "id": new_id(),
+        "id": row_id or new_id(),
         "title": (title or "").strip() or derive_title(body),
         "body": body,
         "notebook": (notebook or "").strip() or "Inbox",
@@ -492,9 +493,10 @@ async def _insert_task(
     checklist: list[dict[str, Any]] | None = None,
     estimate: int | None = None,
     task_id: str | None = None,
+    row_id: str | None = None,
 ) -> dict[str, Any]:
     row = {
-        "id": task_id or new_id(),
+        "id": task_id or row_id or new_id(),
         "title": title.strip(),
         "details": details or None,
         "due": due,
@@ -544,6 +546,7 @@ def _time_param(value: str | None) -> str | None:
 
 
 class NoteCreate(BaseModel):
+    id: str | None = Field(None, description="client-generated id (offline queue); a replay answers the existing note")
     title: str | None = Field(None, max_length=300)
     body: str = Field("", max_length=1_000_000)
     notebook: str | None = Field(None, max_length=100)
@@ -606,11 +609,28 @@ async def list_notes(
 
 
 @router.post("/notes", status_code=status.HTTP_201_CREATED)
-async def create_note(body: NoteCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
+async def create_note(
+    body: NoteCreate,
+    db: AppDB = Depends(_db),
+    request: Request = None,  # type: ignore[assignment]  # injected by FastAPI; None when called directly (MCP)
+    response: Response = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
     if not body.body.strip() and not (body.title or "").strip():
         raise HTTPException(422, detail="a note needs a body or a title")
-    return await _insert_note(
-        db, body=body.body, title=body.title, notebook=body.notebook, tags=body.tags, pinned=body.pinned
+
+    async def fetch(note_id: str) -> dict[str, Any] | None:
+        row = await db.fetch_one("SELECT * FROM app_notes WHERE id = ?", [note_id])
+        return None if row is None else _note_out(row)
+
+    async def insert(note_id: str) -> dict[str, Any]:
+        return await _insert_note(
+            db, body=body.body, title=body.title, notebook=body.notebook, tags=body.tags, pinned=body.pinned,
+            row_id=note_id,
+        )
+
+    key = idempotency.header_key(request) if request is not None else None
+    return await idempotency.create_once(
+        db, scope="notes", client_id=body.id, key=key, fetch=fetch, insert=insert, response=response
     )
 
 
@@ -620,8 +640,22 @@ async def voice_note(
     notebook: str | None = Form(None),
     mode: Literal["note", "tasks", "both", "auto"] = Form("auto"),
     language: str | None = Form(None),
+    idempotency_key: str | None = Form(None),
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
+    request: Request = None,  # type: ignore[assignment]
+    response: Response = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """``Idempotency-Key`` (header or form field): a replayed upload answers the first result again."""
+    idem = idempotency_key or (request.headers.get("idempotency-key") if request is not None else None)
+    return await idempotency.run_once(
+        db, scope="notes.voice", key=idem, response=response,
+        run=lambda: _voice_note(file, notebook, mode, language, state, db),
+    )
+
+
+async def _voice_note(
+    file: UploadFile, notebook: str | None, mode: str, language: str | None, state: HubState, db: AppDB
 ) -> dict[str, Any]:
     today = local_today()
     key, transcript = await store_and_transcribe(state, file, today, language)
@@ -954,6 +988,7 @@ _RECURRENCE_DOC = ("A rule {freq: daily|weekly|monthly|interval|yearly, days?: [
 
 
 class TaskCreate(BaseModel):
+    id: str | None = Field(None, description="client-generated id (offline queue); a replay answers the existing task")
     title: str = Field(min_length=1, max_length=300)
     details: str | None = Field(None, max_length=20_000)
     due: str | None = None
@@ -1067,7 +1102,11 @@ async def list_tasks(
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED)
 async def create_task(
-    body: TaskCreate, db: AppDB = Depends(_db), state: HubState | None = Depends(get_state)
+    body: TaskCreate,
+    db: AppDB = Depends(_db),
+    state: HubState | None = Depends(get_state),
+    request: Request = None,  # type: ignore[assignment]  # injected by FastAPI; None when called directly (MCP)
+    response: Response = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if not body.title.strip():
         raise HTTPException(422, detail="title cannot be blank")
@@ -1080,20 +1119,32 @@ async def create_task(
             raise HTTPException(422, detail="the recurrence has already ended")
     if due_time and not due:
         raise HTTPException(422, detail="due_time needs a due date")
-    task = await _insert_task(
-        db,
-        title=body.title,
-        details=body.details,
-        due=due,
-        due_time=due_time,
-        priority=body.priority,
-        note_id=body.note_id,
-        rule=rule,
-        checklist=taskplus.normalize_checklist(_items(body.checklist)),
-        estimate=body.estimate,
+
+    async def fetch(task_id: str) -> dict[str, Any] | None:
+        row = await db.fetch_one("SELECT * FROM app_tasks WHERE id = ?", [task_id])
+        return None if row is None else _task_out(row)
+
+    async def insert(task_id: str) -> dict[str, Any]:
+        task = await _insert_task(
+            db,
+            title=body.title,
+            details=body.details,
+            due=due,
+            due_time=due_time,
+            priority=body.priority,
+            note_id=body.note_id,
+            rule=rule,
+            checklist=taskplus.normalize_checklist(_items(body.checklist)),
+            estimate=body.estimate,
+            row_id=task_id,
+        )
+        await gcal.push_task(state, db, task["id"], task, created=True)  # best effort, bounded (~4 s)
+        return task
+
+    key = idempotency.header_key(request) if request is not None else None
+    return await idempotency.create_once(
+        db, scope="tasks", client_id=body.id, key=key, fetch=fetch, insert=insert, response=response
     )
-    await gcal.push_task(state, db, task["id"], task, created=True)  # best effort, bounded (~4 s)
-    return task
 
 
 # Fields the Google Calendar event is built from: changing only these re-pushes the event.

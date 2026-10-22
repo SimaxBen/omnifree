@@ -4,6 +4,7 @@ import AppSheets from './AppSheets';
 import AppLock from './components/AppLock';
 import LaunchActions from './components/LaunchActions';
 import ErrorBoundary from './components/ErrorBoundary';
+import { OfflineBanner } from './components/OfflineBanner';
 import { Icon, type IconName } from './components/icons';
 import { ConfirmProvider } from './components/Sheet';
 import { StatusDot, cx, haptic } from './components/ui';
@@ -304,6 +305,8 @@ function Shell() {
               </button>
             </div>
           )}
+
+          <OfflineBanner />
 
           <div className="pb-nav px-4">
             {!showBack && (

@@ -11,7 +11,7 @@ import { formatBytes, formatDateTime } from '../../lib/format';
 import { flashRow, useFocusRequest } from '../../lib/focus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
-import type { Drop, StoredObject } from '../../lib/types';
+import type { Drop, FolderDrop, StoredObject } from '../../lib/types';
 import { DropResult } from './DriveSheets';
 
 function expired(d: Drop): boolean {
@@ -97,22 +97,30 @@ export default function DropsView() {
       </Button>
       {drops.error && <ErrorNote message={drops.error} onRetry={drops.reload} />}
       {drops.loading && !drops.data && <SkeletonList rows={3} />}
-      {drops.data && !list.length && <EmptyState icon="share" title="No drops" hint="A drop is a download link for one Drive file that expires on its own, with an optional password." />}
+      {drops.data && !list.length && <EmptyState icon="share" title="No drops" hint="A drop is a download link for one Drive file, or a whole folder (Share folder in the Drive), that expires on its own, with an optional password." />}
       <div className="space-y-2">
         {list.map((d, i) => {
           const dead = expired(d);
+          const isFolder = (d as FolderDrop).kind === 'folder';
           return (
             <div key={d.code} data-focus={`drop:${d.code}`} className="rise" style={riseStyle(i)}>
               <SwipeRow end={{ icon: 'trash', label: 'Remove', tone: 'danger', run: () => remove(d) }}>
                 <button type="button" onClick={() => setShowing({ id: ids.current++, open: true, drop: d })} className="flex min-h-[68px] w-full items-center gap-3 px-3 py-2 text-left">
-                  <FileTile kind={fileKind(d.filename)} size={44} className={dead ? 'opacity-40' : ''} />
+                  {isFolder ? (
+                    <span className={cx('grid h-11 w-11 shrink-0 place-items-center rounded-[14px] bg-signal/15 text-signal', dead && 'opacity-40')}>
+                      <Icon name="folder" size={24} />
+                    </span>
+                  ) : (
+                    <FileTile kind={fileKind(d.filename)} size={44} className={dead ? 'opacity-40' : ''} />
+                  )}
                   <span className="min-w-0 flex-1">
                     <FileName objKey={d.filename} />
                     <span className="flex flex-wrap items-center gap-x-2 text-[12px] text-ink-500">
+                      {isFolder && <span>Folder, {(d as FolderDrop).file_count ?? '?'} files</span>}
                       <span>{dead ? 'Expired' : `Until ${formatDateTime(d.expires_at)}`}</span>
                       <span>
                         {d.downloads}
-                        {d.max_downloads !== null ? ` of ${d.max_downloads}` : ''} downloads
+                        {d.max_downloads !== null ? ` of ${d.max_downloads}` : ''} {isFolder ? 'openings' : 'downloads'}
                       </span>
                     </span>
                   </span>

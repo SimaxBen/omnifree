@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Icon } from '../../components/icons';
+import { PendingBadge } from '../../components/OfflineBanner';
 import { SwipeRow } from '../../components/SwipeRow';
 import { Button, Chip, EmptyState, ErrorNote, Segmented, SkeletonList, cx, inputClass, riseStyle , Fab } from '../../components/ui';
 import { useActions } from '../../lib/actions';
@@ -20,6 +21,7 @@ function NoteRow({ note, onOpen }: { note: Note; onOpen: () => void }) {
           {note.pinned && <Icon name="pin" size={14} className="shrink-0 text-signal" />}
           {note.source === 'voice' && <Icon name="mic" size={14} className="shrink-0 text-danger-400" />}
           {note.source === 'meeting' && <Icon name="wave" size={14} className="shrink-0 text-signal" />}
+          <PendingBadge item={note} />
           <span className="truncate font-display text-[16px] font-semibold text-ink-100">{note.title || 'Untitled'}</span>
         </span>
         <span className="mt-0.5 line-clamp-2 block text-[14px] leading-snug text-ink-400">{plainText(note.body, 180) || 'Empty note'}</span>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileName, FileThumb } from '../../components/files';
 import { Icon } from '../../components/icons';
 import { Button, Chip, EmptyState, ErrorNote, IconButton, Meter, QuotaBar, SkeletonList, cx, inputClass, riseStyle , Fab } from '../../components/ui';
@@ -11,6 +11,7 @@ import { usePullRefresh } from '../../lib/nav';
 import { readPref, writePref } from '../../lib/settings';
 import { useUploads } from '../../lib/uploads';
 import type { StoredObject } from '../../lib/types';
+import { FolderDropSheet } from './FolderDropSheet';
 
 type Filter = 'all' | 'image' | 'doc' | 'media';
 const FILTERS: { id: Filter; label: string; kinds: FileKind[] }[] = [
@@ -55,13 +56,18 @@ export default function FilesView() {
   const [filter, setFilter] = useState<Filter>('all');
   const [grid, setGrid] = useState<boolean>(() => readPref('drive.grid', false));
   const [showPool, setShowPool] = useState(false);
+  const [sharing, setSharing] = useState<{ id: number; open: boolean } | null>(null);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(query.trim()), 300);
     return () => window.clearTimeout(t);
   }, [query]);
+  const crumbsRef = useRef<HTMLElement>(null);
   useEffect(() => {
     writePref('drive.folder', folder);
+    // Deep folders overflow the breadcrumb strip: keep the current folder (its end) in view.
+    const nav = crumbsRef.current;
+    if (nav) nav.scrollLeft = nav.scrollWidth;
   }, [folder]);
   useEffect(() => {
     writePref('drive.grid', grid);
@@ -98,6 +104,11 @@ export default function FilesView() {
   const limit = backends.reduce((s, b) => s + (capacity.data?.[b].limit ?? 0), 0);
   const errors = Object.entries(listing.data?.errors ?? {});
   const crumbs = breadcrumbs(folder);
+  const inFolder = useMemo(() => {
+    const prefix = `${folder}/`;
+    const objs = folder ? (listing.data?.objects ?? []).filter((o) => o.key.startsWith(prefix)) : [];
+    return { count: objs.length, size: objs.reduce((s, o) => s + (o.size ?? 0), 0) };
+  }, [listing.data, folder]);
 
   return (
     <div className="space-y-4">
@@ -138,21 +149,44 @@ export default function FilesView() {
       <UploadJobs />
 
       {!view.flat && (
-        <nav aria-label="Folder" className="no-scrollbar -mx-4 flex items-center gap-1 overflow-x-auto px-4">
-          {crumbs.map((c, i) => (
-            <span key={c.path} className="flex shrink-0 items-center gap-1">
-              {i > 0 && <Icon name="right" size={14} className="text-ink-600" />}
-              <button
-                type="button"
-                onClick={() => setFolder(c.path)}
-                aria-current={i === crumbs.length - 1 ? 'location' : undefined}
-                className={cx('press min-h-[40px] rounded-full px-2.5 text-[14px]', i === crumbs.length - 1 ? 'font-semibold text-ink-100' : 'text-ink-400')}
-              >
-                {c.name}
-              </button>
-            </span>
-          ))}
-        </nav>
+        <div className="-mx-4 flex items-center gap-2 pr-4">
+          <nav ref={crumbsRef} aria-label="Folder" className="no-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto pl-4">
+            {crumbs.map((c, i) => (
+              <span key={c.path} className="flex shrink-0 items-center gap-1">
+                {i > 0 && <Icon name="right" size={14} className="text-ink-600" />}
+                <button
+                  type="button"
+                  onClick={() => setFolder(c.path)}
+                  aria-current={i === crumbs.length - 1 ? 'location' : undefined}
+                  className={cx('press min-h-[40px] rounded-full px-2.5 text-[14px]', i === crumbs.length - 1 ? 'font-semibold text-ink-100' : 'text-ink-400')}
+                >
+                  {c.name}
+                </button>
+              </span>
+            ))}
+          </nav>
+          {/* Outside the scrolling strip, so it never ends up past the right edge in deep folders. */}
+          {folder && inFolder.count > 0 && (
+            <button
+              type="button"
+              onClick={() => setSharing((s) => ({ id: (s?.id ?? 0) + 1, open: true }))}
+              className="press flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-full bg-ink-850 px-3 text-[13px] text-ink-200 ring-1 ring-inset ring-ink-700"
+            >
+              <Icon name="share" size={14} />
+              Share folder
+            </button>
+          )}
+        </div>
+      )}
+      {sharing && (
+        <FolderDropSheet
+          key={sharing.id}
+          open={sharing.open}
+          folder={folder}
+          files={inFolder.count}
+          size={inFolder.size}
+          onClose={() => setSharing((s) => (s ? { ...s, open: false } : s))}
+        />
       )}
 
       {listing.error && <ErrorNote message={listing.error} onRetry={listing.reload} />}

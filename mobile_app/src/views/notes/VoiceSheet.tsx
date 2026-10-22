@@ -6,6 +6,7 @@ import { Badge, Button, Chip, ErrorNote, Segmented, cx, riseStyle } from '../../
 import { formatMoney, isoDay } from '../../lib/apps';
 import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
+import { isQueuedVoice } from '../../lib/offline/client';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { loadPendingMeeting } from '../../lib/meeting';
 import { voiceMoneySummary } from '../../lib/money';
@@ -107,9 +108,16 @@ export default function VoiceSheet({
       let res: VoiceNoteResult;
       if (mode === 'money') {
         const m = await client.voiceMoney(blob, { kind: moneyKind, filename }, ctrl.signal);
-        res = { transcript: m.transcript, audio_key: m.audio_key, note: null, tasks: [], expenses: m.expenses, incomes: m.incomes };
+        res = isQueuedVoice(m) ? (m as unknown as VoiceNoteResult) : { transcript: m.transcript, audio_key: m.audio_key, note: null, tasks: [], expenses: m.expenses, incomes: m.incomes };
       } else {
         res = await client.voiceNote(blob, { mode, notebook, filename }, ctrl.signal);
+      }
+      if (isQueuedVoice(res)) {
+        // Offline: the recording is kept on the phone and uploaded when the hub answers again.
+        notify('Saved offline. It will be transcribed when you are back online.', 'ok');
+        rec.reset();
+        onClose();
+        return;
       }
       setResult(res);
       setTasks(res.tasks);

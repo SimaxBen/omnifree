@@ -96,6 +96,7 @@ import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from '.
 import { normalizeGoal, normalizeGoals, normalizeSuggestions } from './moneyIntel';
 import type { GoalContribution, GoalCreate, GoalPatch, GoalsListing, SavingsGoal, SubscriptionAccept, SubscriptionSuggestion, TrackedSubscription } from './types';
 import type { SearchResponse, SearchResultType } from './types';
+import type { FolderDrop, FolderDropCreate } from './types';
 
 /**
  * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
@@ -960,6 +961,11 @@ export class HubClient {
 
   deleteDrop(code: string): Promise<void> {
     return this.request<void>('DELETE', `/drops/${encodeURIComponent(code)}`);
+  }
+
+  /** `POST /drops/folder`: a public page listing a Drive folder's files (per-file links, ZIP when small). */
+  createFolderDrop(drop: FolderDropCreate): Promise<FolderDrop> {
+    return this.request<FolderDrop>('POST', '/drops/folder', { json: drop });
   }
 
   // ------------------------------------------------------------------ ask my drive (RAG)
