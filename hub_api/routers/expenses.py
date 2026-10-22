@@ -7,6 +7,7 @@ safe defaults (currency MAD, today's date in Africa/Casablanca, category "other"
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -18,12 +19,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from pydantic import BaseModel, Field, field_validator
 
 from hub_api.appdata import AppDB, get_appdb, local_today, new_id, now_iso, read_upload
+from hub_api.merchant_rules import apply_rules
 from hub_api.receipts import CATEGORIES, read_receipt_file
 from hub_api.state import HubState, get_state
 
 __all__ = [
     "router", "CATEGORIES", "normalise_currency", "parse_receipt", "summarise", "SCHEMA",
-    "ensure_schema", "insert_expense", "expense_out",
+    "ensure_schema", "insert_expense", "expense_out", "clean_receipt_text", "search_terms",
 ]
 
 log = logging.getLogger("omnifree.hub.expenses")
@@ -48,6 +50,13 @@ SCHEMA = (
 # (the email's Message-ID), used to deduplicate imports. NULL for manual and scanned expenses.
 SOURCE_COLUMNS = (("source", "TEXT"), ("source_ref", "TEXT"))
 SOURCE_INDEX = ("CREATE INDEX IF NOT EXISTS app_expenses_source_ref ON app_expenses (source_ref)",)
+# Migration v3: the receipt's readable text (vision read, email body or PDF text) for GET /expenses/search,
+# and the storage backend holding ``receipt_key`` (saves a lookup on every backend before presigning).
+RECEIPT_COLUMNS = (("receipt_text", "TEXT"), ("receipt_provider", "TEXT"))
+RECEIPT_TEXT_LIMIT = 4000
+SEARCH_LIMIT = 50
+PRESIGN_TTL_S = 3600
+PRESIGN_TIMEOUT_S = 5.0
 
 _IMAGE_TYPES = {
     "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp",
@@ -66,6 +75,7 @@ async def ensure_schema(db: AppDB) -> AppDB:
     await db.ensure("expenses", SCHEMA)
     await db.add_columns("expenses_v2_source", "app_expenses", SOURCE_COLUMNS)
     await db.ensure("expenses_v2_index", SOURCE_INDEX)
+    await db.add_columns("expenses_v3_receipt", "app_expenses", RECEIPT_COLUMNS)
     return db
 
 
@@ -128,6 +138,15 @@ def _clean_items(raw: Any) -> list[dict[str, Any]]:
     return out[:200]
 
 
+def clean_receipt_text(value: Any) -> str | None:
+    """The receipt's readable text, whitespace collapsed per line, at most RECEIPT_TEXT_LIMIT characters."""
+    if not isinstance(value, str):
+        return None
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in value.splitlines()]
+    text = "\n".join(line for line in lines if line)
+    return text[:RECEIPT_TEXT_LIMIT] or None
+
+
 def parse_receipt(data: dict[str, Any] | None, today: date) -> tuple[dict[str, Any], Literal["high", "medium", "low"]]:
     """Validated expense fields + confidence from the vision model's JSON (``None`` = unreadable)."""
     data = data or {}
@@ -156,6 +175,9 @@ def parse_receipt(data: dict[str, Any] | None, today: date) -> tuple[dict[str, A
         "category": category,
         "items": _clean_items(data.get("items")),
     }
+    text = clean_receipt_text(data.get("text"))
+    if text:
+        fields["receipt_text"] = text
     reported = str(data.get("confidence") or "").strip().lower()
     confidence: Literal["high", "medium", "low"]
     if not data or defaulted >= 2:
@@ -182,6 +204,7 @@ def _expense_out(row: dict[str, Any]) -> dict[str, Any]:
         "items": items if isinstance(items, list) else [],
         "note": row.get("note"),
         "receipt_key": row.get("receipt_key"),
+        "receipt_provider": row.get("receipt_provider"),
         "source": row.get("source"),
         "source_ref": row.get("source_ref"),
         "created_at": row["created_at"],
@@ -206,7 +229,11 @@ def summarise(expenses: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
+async def _insert(db: AppDB, fields: dict[str, Any], *, keep_category: bool = False) -> dict[str, Any]:
+    """Every expense goes through here (manual, receipt, email, SMS, voice, split share): merchant rules
+    (:mod:`hub_api.merchant_rules`) are applied first; ``keep_category`` keeps a category the user chose."""
+    await ensure_schema(db)
+    fields = await apply_rules(db, fields, keep_category=keep_category)
     row = {
         "id": new_id(),
         "date": fields["date"],
@@ -214,9 +241,11 @@ async def _insert(db: AppDB, fields: dict[str, Any]) -> dict[str, Any]:
         "total": float(fields["total"]),
         "currency": fields.get("currency") or DEFAULT_CURRENCY,
         "category": fields.get("category") or "other",
-        "items": json.dumps(fields.get("items") or []),
+        "items": json.dumps(fields.get("items") or [], ensure_ascii=False),
         "note": fields.get("note"),
         "receipt_key": fields.get("receipt_key"),
+        "receipt_text": clean_receipt_text(fields.get("receipt_text")),
+        "receipt_provider": fields.get("receipt_provider"),
         "source": fields.get("source"),
         "source_ref": fields.get("source_ref"),
         "created_at": now_iso(),
@@ -313,7 +342,9 @@ async def list_expenses(
 async def create_expense(body: ExpenseCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
     fields = body.model_dump()
     fields["date"] = fields["date"] or local_today().isoformat()
-    return await _insert(db, fields)
+    # A category picked by hand wins over a merchant rule; "other" (or none sent) lets the rule decide.
+    keep = "category" in body.model_fields_set and body.category != "other"
+    return await _insert(db, fields, keep_category=keep)
 
 
 def _image_type(filename: str | None, content_type: str | None) -> tuple[str, str]:
@@ -340,14 +371,112 @@ async def scan_receipt(
     today = local_today()
     key = f"receipts/{today:%Y}/{today:%m}/{new_id()}.{ext}"
     meta = {"original-filename": file.filename} if file.filename else None
-    await state.router.storage_put(key, image, content_type, meta)
+    stored = await state.router.storage_put(key, image, content_type, meta)
 
     data = await read_receipt_file(state, image, content_type, today)
     fields, confidence = parse_receipt(data, today)
     fields["note"] = note.strip() if note and note.strip() else None
     fields["receipt_key"] = key
+    fields["receipt_provider"] = stored.backend
     expense = await _insert(db, fields)
     return {"expense": expense, "confidence": confidence}
+
+
+def search_terms(q: str) -> list[str]:
+    """Up to 6 distinct words of at least 2 characters (LIKE wildcards are escaped by _like)."""
+    out: list[str] = []
+    for word in re.split(r"\s+", q.strip().lower()):
+        word = word.strip(".,;:!?\"'()")
+        if len(word) >= 2 and word not in out:
+            out.append(word)
+    return out[:6]
+
+
+def _like(term: str) -> str:
+    return "%" + term.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+
+
+def _snippet(row: dict[str, Any], terms: list[str], width: int = 80) -> str | None:
+    """A short excerpt of the receipt text (or the items) around the first matching word."""
+    try:
+        items = json.loads(row.get("items") or "[]")
+    except ValueError:
+        items = []
+    names = ", ".join(str(i.get("name")) for i in items if isinstance(i, dict) and i.get("name")) if isinstance(items, list) else ""
+    for source in (row.get("receipt_text"), names):
+        text = re.sub(r"\s+", " ", str(source or ""))
+        low = text.lower()
+        for term in terms:
+            at = low.find(term)
+            if at >= 0:
+                start = max(0, at - width // 2)
+                piece = text[start : start + width].strip()
+                return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
+    return None
+
+
+def receipt_kind(key: str | None) -> Literal["image", "pdf"] | None:
+    if not key:
+        return None
+    return "pdf" if key.lower().endswith(".pdf") else "image"
+
+
+async def _receipt_url(state: HubState, db: AppDB, expense: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(presigned GET URL, backend) for the expense's receipt; (None, backend) when it cannot be presigned."""
+    key = expense.get("receipt_key")
+    if not key:
+        return None, None
+    provider = expense.get("receipt_provider")
+    try:
+        if not provider:
+            obj = await asyncio.wait_for(state.router.storage_locate(key), PRESIGN_TIMEOUT_S)
+            if obj is None:
+                return None, None
+            provider = obj.backend
+            await db.execute("UPDATE app_expenses SET receipt_provider = ? WHERE id = ?", [provider, expense["id"]])
+        url = await asyncio.wait_for(state.router.storage_presign(key, provider, PRESIGN_TTL_S), PRESIGN_TIMEOUT_S)
+        return url, provider
+    except Exception as exc:  # noqa: BLE001 - the result still lists the expense; the PWA falls back to a download
+        log.info("receipt %s not presigned: %r", key, exc)
+        return None, provider
+
+
+@router.get("/search")
+async def search_expenses(
+    q: str = Query("", max_length=200),
+    receipts_only: bool = Query(False, description="Only expenses with a receipt image or PDF"),
+    limit: int = Query(30, ge=1, le=SEARCH_LIMIT),
+    state: HubState = Depends(get_state),
+    db: AppDB = Depends(_db),
+) -> dict[str, Any]:
+    """Every word of ``q`` must appear in the merchant, the note, the items or the receipt's text (any order,
+    case-insensitive); newest first. Results carry a presigned ``receipt_url`` (1 h) when there is a receipt."""
+    terms = search_terms(q)
+    if not terms and not receipts_only:
+        raise HTTPException(422, detail="type at least one word of 2 characters")
+    where: list[str] = []
+    params: list[Any] = []
+    for term in terms:
+        where.append(
+            "(lower(merchant) LIKE ? ESCAPE '!' OR lower(coalesce(note, '')) LIKE ? ESCAPE '!'"
+            " OR lower(items) LIKE ? ESCAPE '!' OR lower(coalesce(receipt_text, '')) LIKE ? ESCAPE '!')"
+        )
+        params += [_like(term)] * 4
+    if receipts_only:
+        where.append("receipt_key IS NOT NULL AND receipt_key != ''")
+    rows = await db.fetch(
+        f"SELECT * FROM app_expenses WHERE {' AND '.join(where)} ORDER BY date DESC, created_at DESC LIMIT ?",
+        [*params, limit],
+        limit=limit,
+    )
+    expenses = [_expense_out(r) for r in rows]
+    urls = await asyncio.gather(*(_receipt_url(state, db, e) for e in expenses))
+    results = [
+        {**e, "receipt_url": url, "receipt_provider": provider or e["receipt_provider"],
+         "receipt_kind": receipt_kind(e["receipt_key"]), "snippet": _snippet(row, terms)}
+        for e, row, (url, provider) in zip(expenses, rows, urls, strict=True)
+    ]
+    return {"q": q, "terms": terms, "results": results, "count": len(results)}
 
 
 @router.get("/{expense_id}")
@@ -364,7 +493,7 @@ async def patch_expense(expense_id: str, body: ExpensePatch, db: AppDB = Depends
         if value is None and field not in ("note", "receipt_key"):
             raise HTTPException(422, detail=f"{field} cannot be null")
         if field == "items":
-            value = json.dumps([i.model_dump() for i in value])
+            value = json.dumps([i.model_dump() for i in value], ensure_ascii=False)
         changes[field] = value
     if changes:
         sets = ", ".join(f"{k} = ?" for k in changes)

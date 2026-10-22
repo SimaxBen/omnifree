@@ -7,6 +7,7 @@ import { announce } from '../../lib/bus';
 import { emailMailbox } from '../../lib/digest';
 import { errorText, useHub } from '../../lib/hub';
 import { EXPENSE_CATEGORIES, type Expense, type ExpenseCategory, type ExpenseCreate, type ExpenseItem } from '../../lib/types';
+import { useRuleOffer } from './ruleOffer';
 
 export type ExpenseMode = { kind: 'receipt'; file: File } | { kind: 'new' } | { kind: 'edit'; expense: Expense };
 
@@ -70,6 +71,7 @@ const CONFIDENCE = {
 export default function ExpenseEditor({ open, mode, onClose }: { open: boolean; mode: ExpenseMode; onClose: () => void }) {
   const { client, notify } = useHub();
   const confirm = useConfirm();
+  const offerRule = useRuleOffer();
   const [expense, setExpense] = useState<Expense | null>(mode.kind === 'edit' ? mode.expense : null);
   const [form, setForm] = useState<Form>(() => formOf(mode.kind === 'edit' ? mode.expense : null));
   const [scanning, setScanning] = useState(mode.kind === 'receipt');
@@ -126,6 +128,8 @@ export default function ExpenseEditor({ open, mode, onClose }: { open: boolean; 
       announce('expenses');
       notify(expense ? 'Expense updated' : 'Expense added', 'ok');
       onClose();
+      // A new category or name for a known merchant: offer to make it a rule (and to fix the past ones).
+      if (expense) void offerRule({ merchant: expense.merchant, category: expense.category }, { merchant: fields.merchant, category: fields.category });
     } catch (err) {
       setError(errorText(err));
     } finally {

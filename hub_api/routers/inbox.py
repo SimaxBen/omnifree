@@ -473,11 +473,14 @@ async def _extract(state: HubState, msg: EmailMessage, meta: dict[str, Any], tod
             if pdf_text.strip():
                 data = await clock.bound(read_receipt_text(state, pdf_text, today, context))
                 if _usable(data):
+                    data.setdefault("text", pdf_text)  # kept as receipt_text for GET /expenses/search
                     return data, attachment, "pdf-text"
     text = body_text(msg)
     if not text:
         return data, None, "empty"
     data = await clock.bound(read_receipt_text(state, text, today, context))
+    if isinstance(data, dict):
+        data.setdefault("text", text)  # kept as receipt_text for GET /expenses/search
     return data, None, "body"
 
 
@@ -514,13 +517,15 @@ async def _process(
     if same:
         return None, f"same purchase as expense {same[0]['id']}"
     if dry_run:
-        return {**fields, "id": None, "receipt_key": None, "created_at": None}, None
+        preview = {k: v for k, v in fields.items() if k != "receipt_text"}
+        return {**preview, "id": None, "receipt_key": None, "created_at": None}, None
     if attachment is not None:
         blob, ctype, name = attachment
         ext = "pdf" if ctype == "application/pdf" else _IMAGE_EXT.get(ctype, "bin")
         key = f"receipts/email/{today:%Y}/{today:%m}/{new_id()}.{ext}"
-        await clock.bound(state.router.storage_put(key, blob, ctype, {"original-filename": name[:200], "source": "email", "mailbox": meta["mailbox"]}))
+        stored = await clock.bound(state.router.storage_put(key, blob, ctype, {"original-filename": name[:200], "source": "email", "mailbox": meta["mailbox"]}))
         fields["receipt_key"] = key
+        fields["receipt_provider"] = stored.backend
     return await insert_expense(db, fields), None
 
 

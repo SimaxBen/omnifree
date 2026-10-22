@@ -93,6 +93,8 @@ import type {
   PushTestResponse,
 } from './types';
 import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from './types';
+import { normalizeDebts } from './moneyTools';
+import type * as MT from './moneyTypes';
 
 /**
  * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
@@ -794,6 +796,102 @@ export class HubClient {
 
   deleteBudget(category: ExpenseCategory): Promise<void> {
     return this.request<void>('DELETE', `/money/budgets/${encodeURIComponent(category)}`);
+  }
+
+  // ------------------------------------------------------------------ money tools (rules, debts, splits, search, export)
+
+  async merchantRules(signal?: AbortSignal): Promise<MT.MerchantRule[]> {
+    return listOf<MT.MerchantRule>(await this.request<unknown>('GET', '/money/rules', { signal }), 'rules');
+  }
+
+  /** `POST /money/rules`: creates the rule, or updates the one with the same pattern and match mode. */
+  saveMerchantRule(rule: MT.RuleCreate): Promise<MT.MerchantRule> {
+    return this.request<MT.MerchantRule>('POST', '/money/rules', { json: rule });
+  }
+
+  updateMerchantRule(id: string, patch: MT.RulePatch): Promise<MT.MerchantRule> {
+    return this.request<MT.MerchantRule>('PATCH', `/money/rules/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteMerchantRule(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/rules/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /money/rules/{id}/apply`: re-file past expenses (`dryRun` only counts them). */
+  applyMerchantRule(id: string, dryRun = false): Promise<MT.RuleApplyResult> {
+    return this.request<MT.RuleApplyResult>('POST', `/money/rules/${encodeURIComponent(id)}/apply`, { query: { dry_run: dryRun ? 1 : undefined } });
+  }
+
+  async debts(status: 'open' | 'settled' | 'all' = 'open', signal?: AbortSignal): Promise<MT.DebtListing> {
+    return normalizeDebts(await this.request<unknown>('GET', '/money/debts', { query: { status }, signal }));
+  }
+
+  createDebt(debt: MT.DebtCreate): Promise<MT.Debt> {
+    return this.request<MT.Debt>('POST', '/money/debts', { json: debt });
+  }
+
+  updateDebt(id: string, patch: MT.DebtPatch): Promise<MT.Debt> {
+    return this.request<MT.Debt>('PATCH', `/money/debts/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteDebt(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/debts/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /money/debts/{id}/repay`: without `amount`, everything that is left. */
+  repayDebt(id: string, body: { amount?: number; date?: string; note?: string | null } = {}): Promise<MT.Debt> {
+    return this.request<MT.Debt>('POST', `/money/debts/${encodeURIComponent(id)}/repay`, { json: body });
+  }
+
+  deleteDebtPayment(id: string, paymentId: string): Promise<MT.Debt> {
+    return this.request<MT.Debt>('DELETE', `/money/debts/${encodeURIComponent(id)}/payments/${encodeURIComponent(paymentId)}`);
+  }
+
+  async splitGroups(signal?: AbortSignal): Promise<MT.SplitGroupSummary[]> {
+    return listOf<MT.SplitGroupSummary>(await this.request<unknown>('GET', '/money/splits', { signal }), 'groups');
+  }
+
+  splitGroup(id: string, signal?: AbortSignal): Promise<MT.SplitGroup> {
+    return this.request<MT.SplitGroup>('GET', `/money/splits/${encodeURIComponent(id)}`, { signal });
+  }
+
+  createSplitGroup(group: MT.SplitGroupCreate): Promise<MT.SplitGroup> {
+    return this.request<MT.SplitGroup>('POST', '/money/splits', { json: group });
+  }
+
+  updateSplitGroup(id: string, patch: MT.SplitGroupPatch): Promise<MT.SplitGroup> {
+    return this.request<MT.SplitGroup>('PATCH', `/money/splits/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteSplitGroup(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/money/splits/${encodeURIComponent(id)}`);
+  }
+
+  addSplitEntry(groupId: string, entry: MT.SplitEntryCreate): Promise<{ entry: MT.SplitEntry; group: MT.SplitGroup }> {
+    return this.request('POST', `/money/splits/${encodeURIComponent(groupId)}/expenses`, { json: entry });
+  }
+
+  updateSplitEntry(groupId: string, id: string, patch: MT.SplitEntryPatch): Promise<{ entry: MT.SplitEntry; group: MT.SplitGroup }> {
+    return this.request('PATCH', `/money/splits/${encodeURIComponent(groupId)}/expenses/${encodeURIComponent(id)}`, { json: patch });
+  }
+
+  deleteSplitEntry(groupId: string, id: string): Promise<MT.SplitGroup> {
+    return this.request<MT.SplitGroup>('DELETE', `/money/splits/${encodeURIComponent(groupId)}/expenses/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /money/splits/{id}/settle`: `from` paid `to` back. */
+  settleSplit(groupId: string, body: { from: string; to: string; amount: number; date?: string }): Promise<MT.SplitGroup> {
+    return this.request<MT.SplitGroup>('POST', `/money/splits/${encodeURIComponent(groupId)}/settle`, { json: body });
+  }
+
+  /** `GET /expenses/search?q=`: merchant, note, items and receipt text; hits carry a presigned receipt URL. */
+  async searchExpenses(q: string, opts: { receiptsOnly?: boolean; limit?: number } = {}, signal?: AbortSignal): Promise<MT.ExpenseSearchResult> {
+    const body = await this.request<Partial<MT.ExpenseSearchResult>>('GET', '/expenses/search', {
+      query: { q, receipts_only: opts.receiptsOnly ? 1 : undefined, limit: opts.limit },
+      signal,
+    });
+    const results = Array.isArray(body?.results) ? body.results : [];
+    return { q: body?.q ?? q, terms: Array.isArray(body?.terms) ? body.terms : [], results, count: results.length };
   }
 
   /** `GET /money/sms/setup`: what a phone SMS-forwarder app needs (webhook path, token, header name). */

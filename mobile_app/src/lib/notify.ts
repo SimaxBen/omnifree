@@ -10,6 +10,7 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
   { kind: 'budget', label: 'Free-tier budget', detail: 'Plugins that newly reach 80 % or 100 % of a limit' },
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
   { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task (with a “Fait ✓” button) or a Google Calendar event' },
+  { kind: 'debts', label: 'Debts', detail: 'A loan’s due date, and on Mondays the money lent more than 14 days ago' },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
 ];
 
@@ -57,6 +58,10 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
     id: 'reminders', name: 'push-reminders', label: 'Task reminders: every 15 min', schedule: '*/15 * * * *', path: '/notify/run?kind=reminders',
     description:
       'Pushes each timed task up to 15 min before it is due. 96 calls a day: with the 10-min keep-warm job (144/day) that is 240 of the 1,000 free QStash messages a day',
+  },
+  {
+    id: 'debts', name: 'push-debts', label: 'Debts reminder', schedule: '15 9 * * *', path: '/notify/run?kind=debts',
+    description: 'Daily 09:15 Morocco: loans due today; on Mondays also the money lent more than 14 days ago',
   },
 ];
 

@@ -83,7 +83,8 @@ export function NavProvider({ children }: { children: ReactNode }) {
 
   const back = useCallback(() => {
     const cur = routeRef.current;
-    if (cur.tab === 'more' && cur.sub) go('more', '');
+    if (cur.tab === 'more' && cur.sub.startsWith('money-')) go('more', 'money'); // Money sub-pages go back to Money
+    else if (cur.tab === 'more' && cur.sub) go('more', '');
     else go('home');
   }, [go]);
 

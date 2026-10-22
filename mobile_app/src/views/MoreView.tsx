@@ -8,6 +8,7 @@ import ConnectClaudeView from './ConnectClaudeView';
 import DatabaseView from './DatabaseView';
 import ExpensesView from './money/ExpensesView';
 import MoneyView from './money/MoneyView';
+import MoneyToolsView, { MONEY_TOOL_PAGES } from './money/MoneyToolsView';
 import LinksView from './LinksView';
 import NetworkView from './NetworkView';
 import NotificationsView from './NotificationsView';
@@ -22,7 +23,8 @@ export interface MorePage {
   short: string;
   subtitle: string;
   icon: IconName;
-  group: 'life' | 'cloud' | 'app';
+  /** 'money': a Money sub-page, opened from the Money page and not listed in this menu. */
+  group: 'life' | 'cloud' | 'app' | 'money';
 }
 
 export const MORE_PAGES: MorePage[] = [
@@ -38,6 +40,7 @@ export const MORE_PAGES: MorePage[] = [
   { id: 'claude', title: 'Connect Claude', short: 'Claude', subtitle: 'Use OmniFree from Claude Code, Desktop or Cursor', icon: 'agent', group: 'app' },
   { id: 'notifications', title: 'Notifications', short: 'Notify', subtitle: 'Phone pushes (ntfy) and the Google Calendar feed', icon: 'bell', group: 'app' },
   { id: 'settings', title: 'Settings', short: 'Settings', subtitle: 'Hub address and access token', icon: 'settings', group: 'app' },
+  ...MONEY_TOOL_PAGES,
 ];
 
 function Page({ id }: { id: string }): ReactNode {
@@ -68,7 +71,7 @@ function Page({ id }: { id: string }): ReactNode {
     case 'settings':
       return <SettingsView onDone={() => go('home')} />;
     default:
-      return null;
+      return <MoneyToolsView id={id} />;
   }
 }
 

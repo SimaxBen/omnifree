@@ -8,10 +8,13 @@ import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { voiceMoneySummary } from '../../lib/money';
+import { voiceDebtsOf } from '../../lib/moneyTools';
+import type { VoiceDebtOutcome } from '../../lib/moneyTypes';
 import { readPref, writePref } from '../../lib/settings';
 import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
 import { CATEGORY_COLOR } from '../money/ExpenseEditor';
 import { INCOME_LABEL } from '../money/MoneySheets';
+import { VoiceDebts } from '../money/VoiceDebts';
 import { TaskRow } from './TaskRow';
 
 // 'both' behaves like 'auto' on the hub (a note plus any task), so the phone shows four clear choices.
@@ -27,7 +30,7 @@ const MODE_HINT: Record<VoiceMode, string> = {
   note: 'A cleaned-up note only.',
   tasks: 'Tasks only (a note is kept if no task is heard).',
   both: 'A note and every task in it.',
-  money: 'Say what you spent or received: "45 dh taxi, 30 dh coffee".',
+  money: 'Say what you spent, received or lent: "45 dh taxi", "j’ai prêté 200 dh à Ayoub".',
 };
 
 const MONEY_KINDS: { value: VoiceMoneyKind; label: string }[] = [
@@ -67,6 +70,7 @@ export default function VoiceSheet({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VoiceNoteResult | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [debts, setDebts] = useState<VoiceDebtOutcome[]>([]);
   const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const abort = useRef<AbortController | null>(null);
@@ -95,16 +99,20 @@ export default function VoiceSheet({
     abort.current = ctrl;
     try {
       let res: VoiceNoteResult;
+      let found: VoiceDebtOutcome[];
       if (mode === 'money') {
         const m = await client.voiceMoney(blob, { kind: moneyKind, filename }, ctrl.signal);
         res = { transcript: m.transcript, audio_key: m.audio_key, note: null, tasks: [], expenses: m.expenses, incomes: m.incomes };
+        found = voiceDebtsOf(m);
       } else {
         res = await client.voiceNote(blob, { mode, notebook, filename }, ctrl.signal);
+        found = voiceDebtsOf(res);
       }
       setResult(res);
+      setDebts(found);
       setTasks(res.tasks);
       announce('notes', 'tasks');
-      if (res.expenses?.length || res.incomes?.length) announce('expenses', 'money');
+      if (res.expenses?.length || res.incomes?.length || found.length) announce('expenses', 'money');
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const msg = errorText(err);
@@ -135,6 +143,7 @@ export default function VoiceSheet({
   const again = () => {
     setResult(null);
     setTasks([]);
+    setDebts([]);
     setError(null);
     rec.reset();
   };
@@ -323,7 +332,9 @@ export default function VoiceSheet({
             </div>
           )}
 
-          {mode === 'money' && !expenses.length && !incomes.length && (
+          <VoiceDebts debts={debts} />
+
+          {mode === 'money' && !expenses.length && !incomes.length && !debts.length && (
             <div className="rise rounded-card bg-ink-850 p-4 ring-1 ring-inset ring-ink-700">
               <Badge tone="warn">No amount heard</Badge>
               <p className="pt-2 text-[14px] text-ink-300">Say the amount and what it was for, for example "45 dirhams taxi".</p>

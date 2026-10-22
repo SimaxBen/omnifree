@@ -10,6 +10,7 @@ import { useNav, usePullRefresh } from '../../lib/nav';
 import type { ExpenseCategory, MoneyAccount, MoneyOverview, RecurringExpense } from '../../lib/types';
 import { CATEGORY_COLOR } from './ExpenseEditor';
 import { BankSmsSheet } from './BankSmsSheet';
+import { MoneyToolTiles, OwedSection } from './MoneyExtras';
 import { AccountSheet, BudgetSheet, INCOME_LABEL, RecurringSheet } from './MoneySheets';
 
 type LocalSheet =
@@ -349,6 +350,10 @@ export default function MoneyView() {
               </button>
             )}
           </section>
+
+          <OwedSection i={7} />
+
+          <MoneyToolTiles i={8} />
 
           <button
             type="button"
