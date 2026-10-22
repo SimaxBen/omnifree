@@ -8,6 +8,7 @@ import { StatusDot, cx, haptic } from './components/ui';
 import { greeting, isoDay } from './lib/apps';
 import { useHub } from './lib/hub';
 import { NavProvider, hasRefreshers, runRefreshers, useNav, type Tab } from './lib/nav';
+import { syncPush } from './lib/pushClient';
 import { ScreenActionSlot } from './lib/screenAction';
 import { UploadsProvider, useUploads } from './lib/uploads';
 import AiView from './views/AiView';
@@ -128,7 +129,7 @@ function Screen({ children }: { children: ReactNode }) {
 }
 
 function Shell() {
-  const { connection, settings } = useHub();
+  const { connection, settings, client } = useHub();
   const { route, go, back } = useNav();
   const [captureOpen, setCaptureOpen] = useState(false);
   const [updateReady, setUpdateReady] = useState<null | (() => void)>(null);
@@ -143,6 +144,11 @@ function Shell() {
       onNeedRefresh: () => setUpdateReady(() => () => void update(true)),
     });
   }, []);
+
+  useEffect(() => {
+    // Native web push: keep this device's subscription registered on the hub (no-op unless permission is granted).
+    void syncPush(client, settings);
+  }, [client, settings]);
 
   useEffect(() => {
     if (!settings.token) go('more', 'settings');

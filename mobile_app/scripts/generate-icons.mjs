@@ -49,6 +49,17 @@ function over(dst, src, alpha) {
 function sample(x, y, opts) {
   const g = shapes(opts.inset);
   let px = [0, 0, 0, 0];
+  if (opts.badge) {
+    // Notification badge (Android status bar): white artwork on transparent, only the alpha is used.
+    const WHITE = [255, 255, 255];
+    const ringB = Math.abs(Math.hypot(x - g.ring.cx, y - g.ring.cy) - g.ring.r) - g.ring.w;
+    if (ringB <= 0) px = over(px, WHITE, 1);
+    for (const n of g.nodes) {
+      if (Math.hypot(x - n.cx, y - n.cy) <= n.r * 1.3) px = over(px, WHITE, 1);
+    }
+    if (Math.hypot(x - g.core.cx, y - g.core.cy) <= g.core.r * 1.3) px = over(px, WHITE, 1);
+    return px;
+  }
   const bgInside = opts.fullBleed ? -1 : roundedRectSdf(x, y, 0.22);
   if (bgInside <= 0) px = [...mix(BG_TOP, BG_BOTTOM, y), 1];
   else return px;
@@ -152,4 +163,5 @@ writeFileSync(join(OUT, 'icon-192.png'), render(192, standard));
 writeFileSync(join(OUT, 'icon-512.png'), render(512, standard));
 writeFileSync(join(OUT, 'maskable-512.png'), render(512, maskable));
 writeFileSync(join(OUT, 'apple-touch-icon.png'), render(180, { inset: 0.04, fullBleed: true }));
+writeFileSync(join(OUT, 'badge-96.png'), render(96, { inset: 0, fullBleed: false, badge: true }));
 console.log(`icons written to ${OUT}`);

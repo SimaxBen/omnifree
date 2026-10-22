@@ -28,9 +28,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // Web Push handlers (push, notificationclick, pushsubscriptionchange): a static script from public/,
+        // pulled into the generated service worker next to the Workbox precache.
+        importScripts: ['push-sw.js'],
         navigateFallback: '/index.html',
         // The hub API is always live data: never serve it from the service worker cache.
-        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|s|d)\b/],
+        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|notify|push|s|d)\b/],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',

@@ -6,7 +6,10 @@ import { copyText } from '../lib/dom';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import { useNav } from '../lib/nav';
 import { NOTIFY_KINDS, maskFeedUrl, maskSecret, ntfySubscribeLink } from '../lib/notify';
-import type { NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
+import { currentBrowser } from '../lib/pushClient';
+import type { NotifyChannel, NotifyChannelResults, NotifyKind, NotifyResult, NotifyRunKind } from '../lib/types';
+import { notReceivedChecks } from '../lib/webpush';
+import AppPushCard, { Checklist, Help } from './AppPushCard';
 
 const PLAY_URL = 'https://play.google.com/store/apps/details?id=io.heckel.ntfy';
 const APPSTORE_URL = 'https://apps.apple.com/app/ntfy/id1625396347';
@@ -38,6 +41,15 @@ function Steps({ items }: { items: ReactNode[] }) {
       ))}
     </ol>
   );
+}
+
+/** "ntfy ✓ · app 1/2" for a log entry. */
+function channelSummary(c: NotifyChannelResults | null | undefined): string {
+  if (!c) return '';
+  const parts: string[] = [];
+  if (c.ntfy) parts.push(`ntfy ${c.ntfy.ok ? '✓' : '✗'}`);
+  if (c.webpush) parts.push(`app ${c.webpush.sent}/${c.webpush.sent + c.webpush.failed}`);
+  return parts.join(' · ');
 }
 
 function CalendarCard({ copy }: { copy: (text: string, what: string) => void }) {
@@ -85,6 +97,8 @@ export default function NotificationsView() {
   const status = useHubData((c, s) => c.notifyStatus(s), []);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState<NotifyKind | null>(null);
+  const [savingChannel, setSavingChannel] = useState<NotifyChannel | null>(null);
+  const [ntfyTested, setNtfyTested] = useState(false);
   const [previewing, setPreviewing] = useState<NotifyKind | null>(null);
   const [preview, setPreview] = useState<NotifyResult | null>(null);
 
@@ -96,8 +110,11 @@ export default function NotificationsView() {
   const sendTest = async () => {
     setTesting(true);
     try {
-      await client.notifyTest();
-      notify('Test push sent: check your phone', 'ok');
+      const res = await client.notifyTest();
+      const parts = [res.channels?.ntfy && (res.channels.ntfy.ok ? 'ntfy ✓' : 'ntfy failed'),
+        res.channels?.webpush && `app ${res.channels.webpush.sent}/${res.channels.webpush.sent + res.channels.webpush.failed}`].filter(Boolean);
+      notify(`Test push sent${parts.length ? ` (${parts.join(', ')})` : ''}: check your phone`, 'ok');
+      setNtfyTested(true);
       status.reload();
     } catch (err) {
       notify(errorText(err), 'error');
@@ -120,6 +137,20 @@ export default function NotificationsView() {
     }
   };
 
+  const toggleChannel = async (channel: NotifyChannel, enabled: boolean) => {
+    setSavingChannel(channel);
+    status.setData((prev) => prev && { ...prev, channels: { ...prev.channels, [channel]: enabled } });
+    try {
+      const channels = await client.setNotifyChannels({ [channel]: enabled });
+      status.setData((prev) => prev && { ...prev, channels });
+    } catch (err) {
+      notify(errorText(err), 'error');
+      status.reload();
+    } finally {
+      setSavingChannel(null);
+    }
+  };
+
   const showPreview = async (kind: NotifyRunKind) => {
     setPreviewing(kind);
     try {
@@ -136,6 +167,13 @@ export default function NotificationsView() {
 
   return (
     <div className="space-y-5">
+      <AppPushCard
+        channels={st?.channels ?? null}
+        ntfyConfigured={st ? st.configured : null}
+        onChannel={(c, on) => void toggleChannel(c, on)}
+        savingChannel={savingChannel}
+      />
+
       <div>
         <SectionTitle action={status.loading ? <Spinner /> : <IconButton icon="refresh" label="Refresh" onClick={status.reload} />}>Push notifications</SectionTitle>
         {status.error && <ErrorNote message={status.error} onRetry={status.reload} />}
@@ -144,7 +182,7 @@ export default function NotificationsView() {
           <Card className="space-y-3 p-3">
             <p className="flex items-center gap-2 text-sm text-ink-200">
               <StatusDot tone={st.configured ? 'ok' : 'warn'} />
-              {st.configured ? 'Ready: pushes go through ntfy' : 'Not set up yet'}
+              {st.configured ? (st.channels.ntfy ? 'Ready: pushes go through ntfy' : 'Set up, but the ntfy channel is off') : 'Not set up yet'}
               <Badge className="ml-auto font-mono">{st.server.replace(/^https?:\/\//, '')}</Badge>
             </p>
             {st.configured && st.topic ? (
@@ -165,6 +203,11 @@ export default function NotificationsView() {
                 </a>
               )}
             </div>
+            {st.configured && (
+              <Help summary="I didn’t receive it" open={ntfyTested}>
+                <Checklist items={notReceivedChecks(currentBrowser(), 'ntfy')} />
+              </Help>
+            )}
           </Card>
         )}
       </div>
@@ -244,6 +287,7 @@ export default function NotificationsView() {
                   <p className="truncate text-[13px] text-ink-100">{r.title || r.kind}</p>
                   <p className="text-[11px] text-ink-500">
                     {r.kind} · {ago(r.sent_at)}
+                    {channelSummary(r.channels) && <> · {channelSummary(r.channels)}</>}
                     {r.error && <span className="text-danger-400"> · {r.error}</span>}
                   </p>
                 </div>

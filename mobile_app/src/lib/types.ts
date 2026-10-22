@@ -821,6 +821,13 @@ export interface VoiceMoneyResult {
 
 export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'inbox';
 export type NotifyRunKind = Exclude<NotifyKind, 'inbox'>;
+export type NotifyChannel = 'ntfy' | 'webpush';
+
+/** Per-channel outcome of one push (`app_notify_log.channels`). */
+export interface NotifyChannelResults {
+  ntfy?: { ok: boolean; id?: string | null; error?: string };
+  webpush?: { ok: boolean; sent: number; failed: number; removed: number; errors: string[] };
+}
 
 export interface NotifyLogEntry {
   kind: string;
@@ -828,6 +835,7 @@ export interface NotifyLogEntry {
   /** 'sent' | 'failed' | 'sending' */
   status: string;
   error: string | null;
+  channels?: NotifyChannelResults | null;
   sent_at: string;
 }
 
@@ -839,7 +847,48 @@ export interface NotifyStatus {
   subscribe_url: string | null;
   token_set: boolean;
   prefs: Record<NotifyKind, boolean>;
+  channels: Record<NotifyChannel, boolean>;
+  webpush: { configured: boolean; error: string | null; devices: number };
   recent: NotifyLogEntry[];
+}
+
+// ------------------------------------------------------------------ native web push (/push)
+
+export interface PushConfig {
+  configured: boolean;
+  /** base64url VAPID public key (applicationServerKey); null when not configured. */
+  public_key: string | null;
+  error: string | null;
+}
+
+/** One subscribed browser, as the hub lists it (never the keys). */
+export interface PushDevice {
+  /** SHA-256 hex of the endpoint. */
+  id: string;
+  label: string | null;
+  browser: string | null;
+  push_service: string | null;
+  created_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+}
+
+export interface PushTestResult {
+  id: string;
+  label: string | null;
+  browser: string | null;
+  ok: boolean;
+  status: number | null;
+  error: string | null;
+  removed: boolean;
+}
+
+export interface PushTestResponse {
+  sent: number;
+  failed: number;
+  removed: number;
+  results: PushTestResult[];
 }
 
 export interface NotifyResult {
@@ -848,6 +897,7 @@ export interface NotifyResult {
   skipped: string | null;
   title: string | null;
   message: string | null;
+  channels?: NotifyChannelResults;
 }
 
 export interface CalendarInfo {

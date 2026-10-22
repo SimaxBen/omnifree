@@ -80,10 +80,14 @@ import type {
   TranscriptionResult,
   UploadUrlRequest,
   VMInstance,
+  NotifyChannel,
   NotifyKind,
   NotifyResult,
   NotifyRunKind,
   NotifyStatus,
+  PushConfig,
+  PushDevice,
+  PushTestResponse,
 } from './types';
 import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from './types';
 
@@ -903,6 +907,12 @@ export class HubClient {
       subscribe_url: body?.subscribe_url ?? null,
       token_set: !!body?.token_set,
       prefs: (body?.prefs ?? {}) as NotifyStatus['prefs'],
+      channels: { ntfy: body?.channels?.ntfy ?? true, webpush: body?.channels?.webpush ?? true },
+      webpush: {
+        configured: !!body?.webpush?.configured,
+        error: body?.webpush?.error ?? null,
+        devices: body?.webpush?.devices ?? 0,
+      },
       recent: Array.isArray(body?.recent) ? body.recent : [],
     };
   }
@@ -911,6 +921,12 @@ export class HubClient {
   async setNotifyPrefs(prefs: Partial<Record<NotifyKind, boolean>>): Promise<NotifyStatus['prefs']> {
     const body = await this.request<{ prefs: NotifyStatus['prefs'] }>('PUT', '/notify/prefs', { json: { prefs } });
     return body.prefs;
+  }
+
+  /** `PUT /notify/prefs` with `channels`: turn ntfy or app notifications (web push) on or off. */
+  async setNotifyChannels(channels: Partial<Record<NotifyChannel, boolean>>): Promise<NotifyStatus['channels']> {
+    const body = await this.request<{ channels: NotifyStatus['channels'] }>('PUT', '/notify/prefs', { json: { channels } });
+    return body.channels;
   }
 
   notifyTest(): Promise<NotifyResult> {
@@ -922,6 +938,31 @@ export class HubClient {
     return this.request<NotifyResult>('POST', '/notify/run', {
       query: { kind, force: opts.force ? 1 : undefined, preview: opts.preview ? 1 : undefined },
     });
+  }
+
+  // ------------------------------------------------------------------ native web push (/push)
+
+  pushConfig(signal?: AbortSignal): Promise<PushConfig> {
+    return this.request<PushConfig>('GET', '/push/config', { signal });
+  }
+
+  /** `POST /push/subscribe`: idempotent (keyed by the endpoint), so the app calls it on every start. */
+  pushSubscribe(sub: PushSubscriptionJSON, label: string | null, browser: string | null): Promise<{ subscription: PushDevice; created: boolean }> {
+    return this.request('POST', '/push/subscribe', { json: { ...sub, label, browser } });
+  }
+
+  pushUnsubscribe(target: { endpoint: string } | { id: string }): Promise<{ removed: boolean; id: string }> {
+    return this.request('DELETE', '/push/subscribe', { json: target });
+  }
+
+  async pushSubscriptions(signal?: AbortSignal): Promise<{ configured: boolean; subscriptions: PushDevice[] }> {
+    const body = await this.request<{ configured?: boolean; subscriptions?: PushDevice[] }>('GET', '/push/subscriptions', { signal });
+    return { configured: !!body?.configured, subscriptions: Array.isArray(body?.subscriptions) ? body.subscriptions : [] };
+  }
+
+  /** `POST /push/test`: to every device, or only to `endpoint`. */
+  pushTest(endpoint?: string): Promise<PushTestResponse> {
+    return this.request<PushTestResponse>('POST', '/push/test', endpoint ? { json: { endpoint } } : {});
   }
 
   calendarInfo(signal?: AbortSignal): Promise<CalendarInfo> {
