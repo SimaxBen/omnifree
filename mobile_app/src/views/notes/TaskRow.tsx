@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { Icon } from '../../components/icons';
 import { cx, haptic } from '../../components/ui';
-import { taskDue } from '../../lib/apps';
+import { clockTime, isoDay, taskDue } from '../../lib/apps';
 import { announce } from '../../lib/bus';
 import { errorText, useHub } from '../../lib/hub';
+import { activeBlock, checklistProgress, recurrenceLabel, slotLabel } from '../../lib/tasks';
 import type { Task } from '../../lib/types';
 
 const DUE_TONE = {
@@ -50,6 +51,10 @@ export function CheckButton({ done, onToggle, label }: { done: boolean; onToggle
 export function TaskRow({ task, onChange, onOpen, compact }: { task: Task; onChange: (t: Task) => void; onOpen?: (t: Task) => void; compact?: boolean }) {
   const { client, notify } = useHub();
   const due = taskDue(task);
+  const repeat = task.recurrence ? task.recurrence_label || recurrenceLabel(task.recurrence) : '';
+  const progress = checklistProgress(task.checklist);
+  const today = isoDay();
+  const block = activeBlock(task, `${today}T${clockTime()}`);
 
   const toggle = async () => {
     const next = { ...task, done: !task.done, done_at: task.done ? null : new Date().toISOString() };
@@ -70,12 +75,29 @@ export function TaskRow({ task, onChange, onOpen, compact }: { task: Task; onCha
         <span data-done={task.done} className={cx('strike block w-fit max-w-full truncate text-[15px]', task.done ? 'text-ink-500' : 'text-ink-100')}>
           {task.title}
         </span>
-        {(task.due || task.priority !== 'normal' || task.details) && !task.done && (
+        {(task.due || task.priority !== 'normal' || task.details || progress.total > 0 || block) && !task.done && (
           <span className="flex items-center gap-2 text-[13px]">
             {task.due && (
-              <span className={cx('inline-flex items-center gap-1', DUE_TONE[due.tone])}>
+              <span className={cx('inline-flex shrink-0 items-center gap-1', DUE_TONE[due.tone])}>
                 <Icon name="calendar" size={13} />
                 {due.label}
+              </span>
+            )}
+            {repeat && (
+              <span className="inline-flex shrink-0 items-center text-ink-400" title={repeat} aria-label={`Repeats: ${repeat}`}>
+                <Icon name="repeat" size={13} />
+              </span>
+            )}
+            {progress.total > 0 && (
+              <span className={cx('inline-flex shrink-0 items-center gap-1 tabular-nums', progress.done === progress.total ? 'text-mint-400' : 'text-ink-400')} aria-label={`Checklist ${progress.label}`}>
+                <Icon name="check" size={13} />
+                {progress.label}
+              </span>
+            )}
+            {block && (
+              <span className="inline-flex shrink-0 items-center gap-1 text-signal" aria-label={`Time blocked ${slotLabel(block, today)}`}>
+                <Icon name="clock" size={13} />
+                {slotLabel({ start: block.start, end: null }, today)}
               </span>
             )}
             {task.priority === 'high' && (

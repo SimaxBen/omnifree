@@ -8,16 +8,18 @@
   default 45) bounds the run so it fits the 60 s serverless limit; ``remaining`` says how many tasks were left;
 * ``GET /gcal/events?days=7``: the agenda from the read calendars, OmniFree's own task events left out,
   cached 5 minutes;
-* ``POST /gcal/events``: add an event to the OmniFree calendar (what the MCP tool ``calendar_add_event`` uses).
+* ``POST /gcal/events``: add an event to the OmniFree calendar (what the MCP tool ``calendar_add_event`` uses);
+* ``DELETE /gcal/events/{id}``: undo an event OmniFree created (voice-note appointments, time blocks, agent events).
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from hub_api import gcal
@@ -132,3 +134,22 @@ async def gcal_add_event(body: EventCreate, state: HubState = Depends(get_state)
     except gcal.GCalError as exc:
         code = status.HTTP_409_CONFLICT if exc.status_code is None else status.HTTP_502_BAD_GATEWAY
         raise HTTPException(code, detail=str(exc)) from exc
+
+
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def gcal_delete_event(event_id: str, state: HubState = Depends(get_state)) -> Response:
+    """Undo an event OmniFree created (a voice-note appointment, an agent event or a time block); 404 when it is
+    already gone, 403 for any other event of the calendar."""
+    if len(event_id) > 1024:
+        raise HTTPException(422, detail="invalid event id")
+    try:
+        deleted = await asyncio.wait_for(gcal.delete_event(state, event_id, kinds=gcal.OWN_KINDS), 10.0)
+    except TimeoutError as exc:
+        raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Google Calendar did not answer in time") from exc
+    except gcal.GCalError as exc:
+        code = {None: status.HTTP_409_CONFLICT, 403: status.HTTP_403_FORBIDDEN}.get(exc.status_code,
+                                                                                   status.HTTP_502_BAD_GATEWAY)
+        raise HTTPException(code, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="event not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

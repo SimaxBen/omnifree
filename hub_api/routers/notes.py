@@ -7,6 +7,7 @@ the Drive under ``voice/<yyyy>/<mm>/<id>.<ext>``; relative due dates ("tomorrow"
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -18,13 +19,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from pydantic import BaseModel, Field
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, TranscriptionRequest
-from hub_api import gcal
+from hub_api import gcal, recurrence, taskplus
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
 __all__ = [
     "router", "resolve_due", "resolve_when", "split_time", "normalize_time", "derive_title", "SCHEMA",
-    "TASK_COLUMNS", "ensure_schema", "store_and_transcribe",
+    "TASK_COLUMNS", "TASK_COLUMNS_V3", "ensure_schema", "store_and_transcribe", "roll_over", "task_out", "get_task",
 ]
 
 log = logging.getLogger("omnifree.hub.notes")
@@ -46,6 +47,16 @@ SCHEMA = (
 )
 # Added after the first release: ALTER TABLE ... ADD COLUMN when missing (see AppDB.add_columns).
 TASK_COLUMNS = (("due_time", "TEXT"),)  # HH:MM, Africa/Casablanca; only set together with ``due``
+TASK_COLUMNS_V3 = (
+    ("recurrence", "TEXT"),  # JSON rule (see hub_api.recurrence); completing the task creates the next occurrence
+    ("series_id", "TEXT"),  # id of the first task of a recurring series
+    ("next_id", "TEXT"),  # the occurrence created when this one was completed (makes the roll-over idempotent)
+    ("checklist", "TEXT"),  # JSON [{id, text, done}]
+    ("estimate", "INTEGER"),  # minutes, for time blocking
+    ("block_event_id", "TEXT"),  # the Google Calendar time block booked for this task...
+    ("block_start", "TEXT"),  # ...from (YYYY-MM-DDTHH:MM, Africa/Casablanca)
+    ("block_end", "TEXT"),  # ...to
+)
 
 Priority = Literal["low", "normal", "high"]
 _PRIORITIES = ("low", "normal", "high")
@@ -53,9 +64,10 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 async def ensure_schema(db: AppDB) -> AppDB:
-    """The notes/tasks tables, plus the columns added later (``due_time``)."""
+    """The notes/tasks tables, plus the columns added later (``due_time``, then recurrence/checklist/blocks)."""
     await db.ensure("notes", SCHEMA)
     await db.add_columns("notes_v2_due_time", "app_tasks", TASK_COLUMNS)
+    await db.add_columns("notes_v3_tasks_plus", "app_tasks", TASK_COLUMNS_V3)
     return db
 
 
@@ -372,7 +384,26 @@ def _note_out(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rule_of(row: dict[str, Any]) -> dict[str, Any] | None:
+    raw = row.get("recurrence")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw else None
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return recurrence.normalize_rule(raw, local_today())
+    except ValueError:
+        return None
+
+
 def _task_out(row: dict[str, Any]) -> dict[str, Any]:
+    rule = _rule_of(row)
+    block = None
+    if row.get("block_event_id"):
+        block = {"event_id": row["block_event_id"], "start": row.get("block_start"), "end": row.get("block_end")}
     return {
         "id": row["id"],
         "title": row["title"],
@@ -384,7 +415,17 @@ def _task_out(row: dict[str, Any]) -> dict[str, Any]:
         "note_id": row.get("note_id"),
         "created_at": row["created_at"],
         "done_at": row.get("done_at"),
+        "recurrence": rule,
+        "recurrence_label": recurrence.describe(rule) or None,
+        "series_id": row.get("series_id"),
+        "next_id": row.get("next_id"),
+        "checklist": taskplus.checklist_of(row.get("checklist")),
+        "estimate": int(row["estimate"]) if row.get("estimate") else None,
+        "block": block,
     }
+
+
+task_out = _task_out
 
 
 async def _get_note(db: AppDB, note_id: str) -> dict[str, Any]:
@@ -399,6 +440,9 @@ async def _get_task(db: AppDB, task_id: str) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="task not found")
     return row
+
+
+get_task = _get_task
 
 
 async def _insert_note(
@@ -441,9 +485,14 @@ async def _insert_task(
     due_time: str | None = None,
     priority: str = "normal",
     note_id: str | None = None,
+    rule: dict[str, Any] | None = None,
+    series_id: str | None = None,
+    checklist: list[dict[str, Any]] | None = None,
+    estimate: int | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     row = {
-        "id": new_id(),
+        "id": task_id or new_id(),
         "title": title.strip(),
         "details": details or None,
         "due": due,
@@ -454,6 +503,10 @@ async def _insert_task(
         "created_at": now_iso(),
         "done_at": None,
     }
+    # the later columns only when used, so a plain task is the same INSERT as before
+    extra = {"recurrence": json.dumps(rule) if rule else None, "series_id": series_id,
+             "checklist": json.dumps(checklist, ensure_ascii=False) if checklist else None, "estimate": estimate}
+    row.update({k: v for k, v in extra.items() if v is not None})
     cols = list(row)
     await db.execute(
         f"INSERT INTO app_tasks ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})", [row[c] for c in cols]
@@ -560,11 +613,14 @@ async def voice_note(
     now = local_now()
     structured = await _structure(state, transcript, today, language, now if now.date() == today else None)
     tasks_in = structured["tasks"] if mode != "note" else []
+    events_in = structured["events"] if mode != "note" else []
     # "auto" also records money the speaker spent or received; a memo that is only about money
     # ("j'ai payé 45 dh de taxi") then makes no note.
     money_in = structured["money"] if mode == "auto" else []
-    money_only = bool(money_in) and structured["money_only"] and not tasks_in
-    save_note = (mode in ("note", "both", "auto") and not money_only) or (mode == "tasks" and not tasks_in)
+    money_only = bool(money_in) and structured["money_only"] and not tasks_in and not events_in
+    save_note = (mode in ("note", "both", "auto") and not money_only) or (
+        mode == "tasks" and not tasks_in and not events_in
+    )
 
     note: dict[str, Any] | None = None
     if save_note:
@@ -587,9 +643,21 @@ async def voice_note(
             due_time=t["due_time"],
             priority=t["priority"],
             note_id=note["id"] if note else None,
+            rule=t.get("rule"),
         )
         for t in tasks_in
     ]
+    # Appointments go to Google Calendar; when it is not set up (or refuses) they become timed tasks instead.
+    events: list[dict[str, Any]] = []
+    for ev in events_in:
+        made = await _calendar_event(state, ev) if ev["due"] and ev["due_time"] else None
+        if made is not None:
+            events.append(made)
+            continue
+        tasks.append(await _insert_task(
+            db, title=ev["title"], details=f"At {ev['location']}" if ev["location"] else None, due=ev["due"],
+            due_time=ev["due_time"], note_id=note["id"] if note else None,
+        ))
     for task in tasks:  # same instant Google Calendar push as POST /tasks
         await gcal.push_task(state, db, task["id"], task, created=True)
     created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": []}
@@ -597,7 +665,28 @@ async def voice_note(
         from hub_api.routers import money  # money imports this module
 
         created = await money.create_entries(db, money_in, audio_key=key)
-    return {"transcript": transcript, "note": note, "tasks": tasks, "audio_key": key, **created}
+    return {"transcript": transcript, "note": note, "tasks": tasks, "events": events, "audio_key": key, **created}
+
+
+VOICE_EVENT_TIMEOUT_S = 6.0
+VOICE_EVENTS_MAX = 5
+
+
+async def _calendar_event(state: Any, ev: dict[str, Any]) -> dict[str, Any] | None:
+    """Book one voice-note appointment in the OmniFree calendar; None when that is not possible (the caller then
+    makes a timed task of it)."""
+    if not gcal.writable(state):
+        return None
+    h, m = (int(x) for x in ev["due_time"].split(":"))
+    start = datetime.combine(date.fromisoformat(ev["due"]), datetime.min.time(), local_now().tzinfo).replace(
+        hour=h, minute=m)
+    body = taskplus.appointment_event(ev["title"], start, ev["minutes"], location=ev["location"],
+                                      description="Added from an OmniFree voice note.")
+    try:
+        return await asyncio.wait_for(gcal.insert_event(state, body), VOICE_EVENT_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - never lose what was said: it becomes a task
+        log.warning("voice appointment %r not added to Google Calendar: %r", ev["title"], exc)
+        return None
 
 
 async def store_and_transcribe(
@@ -652,7 +741,12 @@ def _voice_prompt(today: date, now: datetime | None = None) -> str:
         'nothing invented", "tags": ["lowercase", "keywords"], "tasks": [{"title": "imperative action", '
         '"due": "YYYY-MM-DD or null", "due_time": "HH:MM (24 h) or null", '
         '"when": "the exact words the speaker used for the day and/or time, or null", '
+        '"repeat": "the exact words for a repetition (\'chaque lundi\', \'tous les jours\', \'every 3 days\', '
+        '\'le 1er de chaque mois\') or null", '
         '"priority": "low|normal|high", "details": "string or null"}], '
+        '"events": [{"title": "short title, e.g. \'Dentiste\' or \'Réunion avec Karim\'", '
+        '"when": "the exact words for the day and time", "date": "YYYY-MM-DD or null", '
+        '"time": "HH:MM (24 h) or null", "duration_minutes": number or null, "location": "place or null"}], '
         '"money": [{"type": "expense|income", "amount": number, "currency": "ISO 4217 code (dh/dirham = MAD) or null", '
         '"merchant": "who was paid, or who paid", "category": "string", "date": "YYYY-MM-DD or null", '
         '"note": "string or null"}], "money_only": true|false}\n'
@@ -665,7 +759,12 @@ def _voice_prompt(today: date, now: datetime | None = None) -> str:
         "'f 5 dyal l3chiya' = 17:00). A time with no day is today, or tomorrow if that time has already passed. "
         "money: only amounts the speaker already spent or received (e.g. \"j'ai payé 45 dh de taxi\", "
         "\"I got my salary\"), never plans, prices or bills still to pay (those are tasks); otherwise an empty list. "
-        "money_only is true when the memo is about nothing but those amounts."
+        "money_only is true when the memo is about nothing but those amounts. "
+        "events: appointments and meetings, i.e. something that happens with someone or somewhere at a set time "
+        "('rdv dentiste jeudi 10h', 'réunion avec Karim demain à 15h', 'meeting Friday 3pm'); put each one in events "
+        "and NOT in tasks. Things the speaker has to do (call, buy, pay, send, fix...) are tasks, even with a time. "
+        "An appointment with no time of day is a task. A repeated to-do ('chaque lundi sortir les poubelles') is "
+        "one task with repeat set."
     )
 
 
@@ -687,7 +786,8 @@ async def _structure(
 ) -> dict[str, Any]:
     """LLM pass over the transcript; falls back to a plain note when the answer is unusable."""
     fallback: dict[str, Any] = {
-        "title": derive_title(transcript), "body": transcript, "tags": [], "tasks": [], "money": [], "money_only": False,
+        "title": derive_title(transcript), "body": transcript, "tags": [], "tasks": [], "events": [], "money": [],
+        "money_only": False,
     }
     request = ChatRequest(
         messages=[
@@ -712,6 +812,7 @@ async def _structure(
     title = title.strip()[:300] if isinstance(title, str) and title.strip() else derive_title(body)
     tasks: list[dict[str, Any]] = []
     raw_tasks = data.get("tasks")
+    clock = now or datetime.combine(today, datetime.min.time())
     for t in raw_tasks if isinstance(raw_tasks, list) else []:
         if isinstance(t, str):
             t = {"title": t}
@@ -719,23 +820,67 @@ async def _structure(
             continue
         prio = str(t.get("priority") or "normal").strip().lower()
         details = t.get("details")
+        timing, rule = _task_recurrence(t, clock)
         tasks.append(
             {
                 "title": t["title"].strip()[:300],
-                **_task_when(t, now or datetime.combine(today, datetime.min.time())),
+                **timing,
                 "priority": prio if prio in _PRIORITIES else "normal",
                 "details": details.strip() if isinstance(details, str) and details.strip() else None,
+                "rule": rule,
             }
         )
+    events: list[dict[str, Any]] = []
+    raw_events = data.get("events")
+    for e in (raw_events if isinstance(raw_events, list) else [])[:VOICE_EVENTS_MAX]:
+        if not isinstance(e, dict) or not isinstance(e.get("title"), str) or not e["title"].strip():
+            continue
+        timing = _task_when({"when": e.get("when"), "due": e.get("date"), "due_time": e.get("time")}, clock)
+        minutes = e.get("duration_minutes")
+        minutes = int(minutes) if isinstance(minutes, int | float) and 5 <= minutes <= 720 else 60
+        location = e.get("location")
+        events.append({
+            "title": e["title"].strip()[:300], **timing, "minutes": minutes,
+            "location": location.strip()[:300] if isinstance(location, str) and location.strip() else None,
+        })
     money: list[dict[str, Any]] = []
     if isinstance(data.get("money"), list) and data["money"]:
         from hub_api.routers.money import parse_money_entries  # money imports this module
 
         money = parse_money_entries({"entries": data["money"]}, today)
     return {
-        "title": title, "body": body, "tags": _clean_tags(data.get("tags")), "tasks": tasks,
+        "title": title, "body": body, "tags": _clean_tags(data.get("tags")), "tasks": tasks, "events": events,
         "money": money, "money_only": data.get("money_only") is True,
     }
+
+
+def _task_recurrence(t: dict[str, Any], now: datetime) -> tuple[dict[str, str | None], dict[str, Any] | None]:
+    """``({due, due_time}, rule)`` of one LLM task. A repetition said in ``when`` ("tous les jours à 8h") or in
+    ``repeat`` makes a recurring task whose first occurrence comes from the rule (the next Monday for
+    "chaque lundi"), with the time from the rest of the words."""
+    when = t.get("when")
+    rule_raw, rest = recurrence.parse_recurrence(when) if isinstance(when, str) else (None, when)
+    if rule_raw is not None:
+        t = {**t, "when": rest or None}
+    elif isinstance(t.get("repeat"), str):
+        rule_raw, _ = recurrence.parse_recurrence(t["repeat"])
+    timing = _task_when(t, now)
+    if rule_raw is None:
+        return timing, None
+    anchor = date.fromisoformat(timing["due"]) if timing["due"] else now.date()
+    try:
+        rule = recurrence.normalize_rule(rule_raw, anchor)
+    except ValueError:
+        return timing, None
+    if rule is None:
+        return timing, None
+    if rule["freq"] == "interval" and timing["due"]:
+        first: str | None = timing["due"]  # "every 3 days from tomorrow": the cadence starts on the day said
+    else:
+        first = first_occurrence(rule, timing["due_time"], now)
+    if first is None:
+        return timing, None
+    return {"due": first, "due_time": timing["due_time"]}, rule
 
 
 @router.get("/notes/{note_id}")
@@ -778,6 +923,17 @@ async def delete_note(note_id: str, db: AppDB = Depends(_db)) -> Response:
 # --------------------------------------------------------------------------- tasks
 
 
+class ChecklistItem(BaseModel):
+    id: str | None = Field(None, max_length=24)
+    text: str = Field(max_length=taskplus.CHECKLIST_TEXT_MAX)
+    done: bool = False
+
+
+_RECURRENCE_DOC = ("A rule {freq: daily|weekly|monthly|interval|yearly, days?: [0-6] (0 = Monday), day?: 1-31, "
+                   "interval?: N days, month?: 1-12, until?: YYYY-MM-DD} or a phrase ('every monday', 'chaque jour', "
+                   "'le 1er de chaque mois', 'every 3 days'); null = not recurring")
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     details: str | None = Field(None, max_length=20_000)
@@ -785,6 +941,9 @@ class TaskCreate(BaseModel):
     due_time: str | None = Field(None, description="HH:MM, Africa/Casablanca; needs a due date")
     priority: Priority = "normal"
     note_id: str | None = None
+    recurrence: dict[str, Any] | str | None = Field(None, description=_RECURRENCE_DOC)
+    checklist: list[ChecklistItem | str] | None = Field(None, max_length=taskplus.CHECKLIST_MAX)
+    estimate: int | None = Field(None, ge=5, le=1440, description="Minutes, for time blocking")
 
 
 class TaskPatch(BaseModel):
@@ -795,6 +954,68 @@ class TaskPatch(BaseModel):
     done: bool | None = None
     priority: Priority | None = None
     note_id: str | None = None
+    recurrence: dict[str, Any] | str | None = Field(None, description=_RECURRENCE_DOC)
+    checklist: list[ChecklistItem | str] | None = Field(
+        None, max_length=taskplus.CHECKLIST_MAX,
+        description="The whole list, in order (toggle, add, remove and reorder by sending it back changed)",
+    )
+    estimate: int | None = Field(None, ge=5, le=1440)
+
+
+def _rule_param(raw: Any, due: str | None) -> dict[str, Any] | None:
+    anchor = date.fromisoformat(due) if due else local_today()
+    try:
+        return recurrence.normalize_rule(raw, anchor)
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+
+
+def first_occurrence(rule: dict[str, Any], due_time: str | None, now: datetime) -> str | None:
+    """Due date of a new recurring task given no date: the first occurrence from today, or the next one when today's
+    time has already passed ("tous les jours à 8h" said at 10:00 starts tomorrow)."""
+    today = now.date()
+    day = recurrence.first_on_or_after(rule, today)
+    if day == today and due_time and due_time <= f"{now:%H:%M}":
+        day = recurrence.next_after(rule, today, today)
+    return day.isoformat() if day else None
+
+
+def _items(items: list[ChecklistItem | str] | None) -> list[Any]:
+    return [i.model_dump() if isinstance(i, ChecklistItem) else i for i in items or []]
+
+
+def _checklist_json(items: list[ChecklistItem | str] | None) -> str | None:
+    clean = taskplus.normalize_checklist(_items(items))
+    return json.dumps(clean, ensure_ascii=False) if clean else None
+
+
+async def roll_over(db: AppDB, state: Any, row: dict[str, Any]) -> dict[str, Any] | None:
+    """After a recurring task is completed: create its next occurrence (once; None when there is none to create).
+
+    Every completion path calls this (PATCH, MCP ``tasks_complete``, the signed ``/notify/done`` link). The row
+    claims ``next_id`` with a conditional UPDATE first, so completing twice (or two paths racing) makes one copy.
+    """
+    rule = _rule_of(row)
+    if rule is None or row.get("next_id"):
+        return None
+    current_due = date.fromisoformat(row["due"]) if row.get("due") else None
+    day = recurrence.next_due(rule, current_due, local_today())
+    if day is None:
+        return None  # past the rule's end date: the series is over
+    claim = new_id()
+    await db.execute("UPDATE app_tasks SET next_id = ? WHERE id = ? AND next_id IS NULL", [claim, row["id"]])
+    after = await db.fetch_one("SELECT next_id FROM app_tasks WHERE id = ?", [row["id"]])
+    if not after or after.get("next_id") != claim:
+        return None
+    checklist = [{**i, "done": False} for i in taskplus.checklist_of(row.get("checklist"))]
+    task = await _insert_task(
+        db, title=row["title"], details=row.get("details"), due=day.isoformat(), due_time=row.get("due_time"),
+        priority=row.get("priority") or "normal", note_id=row.get("note_id"), rule=rule,
+        series_id=row.get("series_id") or row["id"], checklist=checklist,
+        estimate=int(row["estimate"]) if row.get("estimate") else None, task_id=claim,
+    )
+    await gcal.push_task(state, db, task["id"], task, created=True)
+    return task
 
 
 @router.get("/tasks")
@@ -833,6 +1054,11 @@ async def create_task(
         raise HTTPException(422, detail="title cannot be blank")
     due = _due_param(body.due)
     due_time = _time_param(body.due_time)
+    rule = _rule_param(body.recurrence, due)
+    if rule and not due:  # a recurring task always has a current occurrence ("every sunday at 11:00")
+        due = first_occurrence(rule, due_time, local_now())
+        if due is None:
+            raise HTTPException(422, detail="the recurrence has already ended")
     if due_time and not due:
         raise HTTPException(422, detail="due_time needs a due date")
     task = await _insert_task(
@@ -843,13 +1069,16 @@ async def create_task(
         due_time=due_time,
         priority=body.priority,
         note_id=body.note_id,
+        rule=rule,
+        checklist=taskplus.normalize_checklist(_items(body.checklist)),
+        estimate=body.estimate,
     )
     await gcal.push_task(state, db, task["id"], task, created=True)  # best effort, bounded (~4 s)
     return task
 
 
 # Fields the Google Calendar event is built from: changing only these re-pushes the event.
-_EVENT_FIELDS = frozenset(("title", "details", "due", "due_time", "done", "priority"))
+_EVENT_FIELDS = frozenset(("title", "details", "due", "due_time", "done", "priority", "checklist"))
 
 
 @router.patch("/tasks/{task_id}")
@@ -864,11 +1093,13 @@ async def patch_task(
             raise HTTPException(422, detail=f"{field} cannot be null")
         if field == "due":
             value = _due_param(value)
-            if value is None:
-                changes["due_time"] = None  # no day, no time
+            if value is None and "due_time" not in body.model_fields_set:
+                changes["due_time"] = None  # no day, no time (a time sent along is checked on its own)
         elif field == "due_time":
             value = _time_param(value)
-            if value and not (body.due if "due" in body.model_fields_set else current.get("due")):
+            if value and not (body.due if "due" in body.model_fields_set else current.get("due")) and not (
+                "recurrence" in body.model_fields_set and body.recurrence  # the rule gives the day
+            ):
                 raise HTTPException(422, detail="due_time needs a due date")
         elif field == "title":
             value = value.strip()
@@ -881,13 +1112,30 @@ async def patch_task(
             elif not value:
                 changes["done_at"] = None
             value = 1 if value else 0
+        elif field == "checklist":
+            value = _checklist_json(value)
         changes[field] = value
+    if "recurrence" in body.model_fields_set:  # after the loop: it needs the final due date
+        day = changes["due"] if "due" in changes else current.get("due")
+        rule = _rule_param(body.recurrence, day)
+        if rule and not day:
+            changes["due"] = first_occurrence(rule, changes.get("due_time", current.get("due_time")), local_now())
+            if changes["due"] is None:
+                raise HTTPException(422, detail="the recurrence has already ended")
+        changes["recurrence"] = json.dumps(rule) if rule else None
+    elif "due" in changes and changes["due"] is None and _rule_of(current):
+        raise HTTPException(422, detail="a recurring task needs a due date (clear the recurrence first)")
     if changes:
         sets = ", ".join(f"{k} = ?" for k in changes)
         await db.execute(f"UPDATE app_tasks SET {sets} WHERE id = ?", [*changes.values(), task_id])
-    task = _task_out(await _get_task(db, task_id))
+    row = await _get_task(db, task_id)
+    task = _task_out(row)
     if _EVENT_FIELDS & set(changes):
         await gcal.push_task(state, db, task_id, task)
+    if changes.get("done") == 1 and not current.get("done"):
+        nxt = await roll_over(db, state, row)
+        if nxt is not None:  # the new occurrence rides along so the client can show it at once
+            task = {**_task_out(await _get_task(db, task_id)), "next": nxt}
     return task
 
 
@@ -895,7 +1143,17 @@ async def patch_task(
 async def delete_task(
     task_id: str, db: AppDB = Depends(_db), state: HubState | None = Depends(get_state)
 ) -> Response:
-    await _get_task(db, task_id)
+    row = await _get_task(db, task_id)
     await db.execute("DELETE FROM app_tasks WHERE id = ?", [task_id])
     await gcal.push_task(state, db, task_id, None)
+    if row.get("block_event_id") and state is not None:
+        await _drop_block(state, row["block_event_id"])
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _drop_block(state: Any, event: str) -> None:
+    """Delete a task's time block in Google Calendar, best effort and bounded (the task is already gone)."""
+    try:
+        await asyncio.wait_for(gcal.delete_event(state, event), gcal.PUSH_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not delete the time block %s: %r", event, exc)

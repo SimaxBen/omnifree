@@ -257,10 +257,13 @@ def task_event(row: dict[str, Any], link: str) -> dict[str, Any] | None:
     done = bool(row.get("done"))
     at = _valid_time(row.get("due_time"))
     details = (row.get("details") or "").strip()
+    from hub_api.taskplus import checklist_lines  # taskplus imports this module
+
+    parts = [details, checklist_lines(row.get("checklist")), link]  # one event per occurrence, never an RRULE
     body: dict[str, Any] = {
         "id": event_id(str(row["id"])),
         "summary": f"✓ {row['title']}" if done else str(row["title"]),
-        "description": f"{details}\n\n{link}" if details else link,
+        "description": "\n\n".join(p for p in parts if p),
         "status": "confirmed",
         "transparency": "transparent",
         "source": {"title": "OmniFree", "url": link},
@@ -708,3 +711,67 @@ async def add_event(state: Any, *, title: str, start: datetime | date, end: date
     _events_cache.clear()
     ev = normalise_event(created, cfg.calendar_id, None)
     return ev or {"id": created.get("id"), "title": title}
+
+
+# --------------------------------------------------------------------------- time blocks / voice appointments
+# (event bodies are built in :mod:`hub_api.taskplus`; these only talk to Google)
+
+OWN_KINDS = ("agent", "voice", "block")  # events OmniFree may delete again (task events go through push_task)
+
+
+def writable(state: Any) -> bool:
+    cfg = _config(state)
+    return bool(cfg and cfg.writable)
+
+
+async def busy_events(state: Any, start: datetime, end: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The agenda of [start, end) for free-slot search: the read calendars (as :func:`events_between`) plus the
+    OmniFree calendar when it is not one of them (agent, voice and time-block events live there)."""
+    cfg = _config(state)
+    if cfg is None or not cfg.configured:
+        return [], []
+    events, errors = await events_between(state, start, end)
+    if cfg.calendar_id and cfg.calendar_id not in cfg.calendars:
+        try:
+            events = events + await _list_calendar(cfg, cfg.calendar_id, start, end)
+        except Exception as exc:  # noqa: BLE001
+            errors = [*errors, {"calendar": cfg.calendar_id, "error": str(exc) or type(exc).__name__}]
+    return events, errors
+
+
+async def insert_event(state: Any, body: dict[str, Any]) -> dict[str, Any]:
+    """POST an event body to the OmniFree calendar; the normalized event (see :func:`normalise_event`)."""
+    cfg = _config(state)
+    if cfg is None or not cfg.writable:
+        raise GCalError(f"Google Calendar is not set up (vault keys {SA_KEY} and {ID_KEY})")
+    assert cfg.calendar_id
+    created = await call(cfg, "POST", _events_path(cfg.calendar_id), json_body=body) or {}
+    _events_cache.clear()
+    ev = normalise_event(created, cfg.calendar_id, None)
+    return ev or {"id": str(created.get("id") or ""), "title": body.get("summary")}
+
+
+async def delete_event(state: Any, event: str, *, kinds: tuple[str, ...] | None = None) -> bool:
+    """Delete an event of the OmniFree calendar; False when it is already gone. With ``kinds``, only an event whose
+    ``omnifreeKind`` is one of them (GCalError 403 otherwise), so a stray id never deletes the owner's events."""
+    cfg = _config(state)
+    if cfg is None or not cfg.writable:
+        raise GCalError(f"Google Calendar is not set up (vault keys {SA_KEY} and {ID_KEY})")
+    assert cfg.calendar_id
+    path = _events_path(cfg.calendar_id, event)
+    if kinds is not None:
+        found = await call(cfg, "GET", path, ok=(404, 410))
+        if found is None or found.get("status") == "cancelled":
+            return False
+        kind = ((found.get("extendedProperties") or {}).get("private") or {}).get("omnifreeKind")
+        if kind not in kinds:
+            raise GCalError("this event was not created by OmniFree", 403)
+    try:
+        await call(cfg, "DELETE", path)
+    except GCalError as exc:
+        if exc.status_code in (404, 410):
+            return False
+        raise
+    finally:
+        _events_cache.clear()
+    return True

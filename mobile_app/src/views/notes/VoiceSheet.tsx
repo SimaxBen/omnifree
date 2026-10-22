@@ -3,13 +3,14 @@ import { Icon } from '../../components/icons';
 import { RecordButton, canRecord, formatClock, useRecorder } from '../../components/Recorder';
 import { Sheet } from '../../components/Sheet';
 import { Badge, Button, Chip, ErrorNote, Segmented, riseStyle } from '../../components/ui';
-import { formatMoney } from '../../lib/apps';
+import { formatMoney, isoDay } from '../../lib/apps';
 import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { voiceMoneySummary } from '../../lib/money';
 import { readPref, writePref } from '../../lib/settings';
-import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
+import { eventSlot, slotLabel } from '../../lib/tasks';
+import type { Expense, GCalEvent, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
 import { CATEGORY_COLOR } from '../money/ExpenseEditor';
 import { INCOME_LABEL } from '../money/MoneySheets';
 import { TaskRow } from './TaskRow';
@@ -23,7 +24,7 @@ const MODES: { value: VoiceMode; label: string }[] = [
 ];
 
 const MODE_HINT: Record<VoiceMode, string> = {
-  auto: 'A note, plus tasks and money when you mention them.',
+  auto: 'A note, plus tasks, appointments and money when you mention them.',
   note: 'A cleaned-up note only.',
   tasks: 'Tasks only (a note is kept if no task is heard).',
   both: 'A note and every task in it.',
@@ -67,6 +68,8 @@ export default function VoiceSheet({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VoiceNoteResult | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [events, setEvents] = useState<GCalEvent[]>([]);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const abort = useRef<AbortController | null>(null);
@@ -103,6 +106,7 @@ export default function VoiceSheet({
       }
       setResult(res);
       setTasks(res.tasks);
+      setEvents(res.events ?? []);
       announce('notes', 'tasks');
       if (res.expenses?.length || res.incomes?.length) announce('expenses', 'money');
     } catch (err) {
@@ -135,6 +139,7 @@ export default function VoiceSheet({
   const again = () => {
     setResult(null);
     setTasks([]);
+    setEvents([]);
     setError(null);
     rec.reset();
   };
@@ -153,6 +158,19 @@ export default function VoiceSheet({
       notify(errorText(err), 'error');
     } finally {
       setUndoing(false);
+    }
+  };
+
+  const undoEvent = async (ev: GCalEvent) => {
+    setRemoving(ev.id);
+    try {
+      await client.deleteCalendarEvent(ev.id);
+      setEvents((es) => es.filter((e) => e.id !== ev.id));
+      notify(`Removed ${ev.title} from the calendar`, 'ok');
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setRemoving(null);
     }
   };
 
@@ -342,6 +360,41 @@ export default function VoiceSheet({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {events.length > 0 && (
+            <div className="space-y-1">
+              <h3 className="px-1 font-display text-[16px] font-semibold text-ink-100">
+                {events.length} event{events.length === 1 ? '' : 's'} in your calendar
+              </h3>
+              <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-850">
+                {events.map((ev, i) => (
+                  <div key={ev.id} className="rise flex min-h-[60px] items-center gap-3 py-2 pl-3 pr-1" style={riseStyle(tasks.length + i + 1)}>
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-signal/15 text-signal">
+                      <Icon name="calendar" size={16} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[15px] text-ink-100">{ev.title}</span>
+                      <span className="block truncate text-[12px] text-ink-500">
+                        {slotLabel(eventSlot(ev), isoDay())}
+                        {ev.location && <> · {ev.location}</>}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void undoEvent(ev)}
+                      disabled={removing === ev.id}
+                      aria-label={`Undo ${ev.title}`}
+                      className="press flex min-h-[44px] shrink-0 items-center gap-1 px-2 text-[14px] font-semibold text-signal disabled:opacity-40"
+                    >
+                      <Icon name="undo" size={15} />
+                      {removing === ev.id ? 'Undoing…' : 'Undo'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <p className="px-1 pt-1 text-[12px] text-ink-500">Appointments go to the OmniFree Google Calendar; to-dos stay tasks.</p>
             </div>
           )}
 

@@ -695,6 +695,31 @@ export class HubClient {
     return this.request<void>('DELETE', `/tasks/${encodeURIComponent(id)}`);
   }
 
+  // tasks & calendar: free slots, time blocks, checklist items, undoing a voice-note appointment
+  taskSlots(id: string, params: { days?: number; minutes?: number } = {}, signal?: AbortSignal): Promise<import('./types').TaskSlots> {
+    return this.request('GET', `/tasks/${encodeURIComponent(id)}/slots`, { query: { days: params.days, minutes: params.minutes }, signal });
+  }
+
+  blockTask(id: string, body: { start?: string; minutes?: number } = {}): Promise<import('./types').TaskBlockResult> {
+    return this.request('POST', `/tasks/${encodeURIComponent(id)}/block`, { json: body });
+  }
+
+  unblockTask(id: string): Promise<Task> {
+    return this.request<Task>('DELETE', `/tasks/${encodeURIComponent(id)}/block`);
+  }
+
+  addChecklistItem(id: string, text: string): Promise<Task> {
+    return this.request<Task>('POST', `/tasks/${encodeURIComponent(id)}/checklist`, { json: { text } });
+  }
+
+  updateChecklistItem(id: string, itemId: string, patch: { text?: string; done?: boolean }): Promise<Task> {
+    return this.request<Task>('PATCH', `/tasks/${encodeURIComponent(id)}/checklist/${encodeURIComponent(itemId)}`, { json: patch });
+  }
+
+  deleteCalendarEvent(eventId: string): Promise<void> {
+    return this.request<void>('DELETE', `/gcal/events/${encodeURIComponent(eventId)}`);
+  }
+
   // ------------------------------------------------------------------ expenses
 
   /** `POST /expenses/receipt` (multipart): a receipt photo read by a vision model. */
