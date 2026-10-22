@@ -143,6 +143,15 @@ def _stamp(value: Any) -> datetime | None:
     return None
 
 
+_LENIENT_RE = re.compile(r'"(?P<k>[A-Za-z_]+)"\s*:\s*"(?P<v>.*?)"\s*(?=,\s*"[A-Za-z_]+"\s*:|\}\s*$)', re.S)
+
+
+def _lenient_json(body: str) -> dict[str, Any]:
+    """Forwarder templates like {"from":"%pni%","text":"%mb%"} break as JSON when the SMS itself has a quote or
+    a line break: read the "key":"value" pairs anyway (the value runs up to the next key or the closing brace)."""
+    return {m.group("k"): m.group("v").replace('\\"', '"') for m in _LENIENT_RE.finditer(body)}
+
+
 def read_payload(raw: bytes, content_type: str, query: dict[str, str]) -> tuple[str, str, Any]:
     """(sender, text, raw timestamp) from a JSON, form or plain-text body (query parameters fill gaps)."""
     body = raw.decode("utf-8", errors="replace").strip()
@@ -160,7 +169,7 @@ def read_payload(raw: bytes, content_type: str, query: dict[str, str]) -> tuple[
         elif isinstance(parsed, str):
             data = {"text": parsed}
         elif parsed is None:
-            data = {"text": body}
+            data = _lenient_json(body) or {"text": body}
     elif ctype == "application/x-www-form-urlencoded":
         data = dict(parse_qsl(body, keep_blank_values=True))
     elif body:

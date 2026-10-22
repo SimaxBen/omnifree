@@ -225,3 +225,12 @@ def test_evening_separates_upcoming_timed_tasks(app_hub, sent) -> None:
     out = app_hub.post("/notify/run?kind=evening&preview=1").json()
     assert out["title"] == "Ce soir : 2 tâches encore ouvertes, 1 à venir"
     assert out["message"].split("\n") == ["• 18:00 Raté", "• Sans heure", "À venir : 21:30 Plus tard ce soir"]
+
+
+def test_reminders_every_three_hours_cover_the_next_three_hours(app_hub, sent) -> None:
+    # The owner runs reminders every 3 h: `ahead=180` must cover every task until the next run.
+    _task(app_hub, "Dans 2 h 50", "2026-10-21", "17:40")
+    _task(app_hub, "Après le prochain passage", "2026-10-21", "17:51")
+    out = app_hub.post("/notify/run?kind=reminders&ahead=180").json()
+    assert out["count"] == 1 and [m["title"] for m in sent] == ["⏰ Dans 2 h 50"]
+    assert app_hub.post("/notify/run?kind=reminders&ahead=2000").status_code == 422

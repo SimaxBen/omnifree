@@ -320,3 +320,14 @@ def test_bmce_transfer_to_someone_else_is_spent_to_self_is_not(app_hub, monkeypa
     assert out["expense"]["total"] == 500.0
     logged = app_hub.get("/money/sms/log").json()["messages"]
     assert all("053179" not in (m["text"] or "") and "293440" not in (m["text"] or "") for m in logged)  # codes masked
+
+
+def test_forwarder_template_with_quotes_or_line_breaks_in_the_sms(app_hub) -> None:
+    # {"from":"%pni%","text":"%mb%"} filled with an SMS containing quotes and a line break is not valid JSON.
+    body = ('{"from":"ATTIJARI","text":"Nous vous informons que le paiement d\'un montant de 220,79 MAD effectuee le '
+            '05/09/2026 a 23:48:35 chez "Glovo_pz"\n> a bien ete execute."}')
+    r = app_hub.client.post("/money/sms", content=body.encode(), headers={"Content-Type": "application/json"},
+                            params={"token": SMS_TOKEN, "dry_run": 1})
+    out = r.json()
+    assert r.status_code == 200 and out["parsed"]["kind"] == "expense" and out["parsed"]["amount"] == 220.79
+    assert out["parsed"]["bank"] == "Attijariwafa bank"

@@ -351,14 +351,15 @@ async def compose_month(db: AppDB, today: date) -> Push:
                 actions=[("Dépenses", "#/more/expenses")], dedupe=f"month:{today:%Y-%m}")
 
 
-def reminder_window(now: datetime) -> tuple[datetime, datetime]:
-    """[now - 5 min, now + 15 min]: with a 15-minute schedule every due time falls in at least one window."""
-    return now - REMIND_AFTER, now + REMIND_BEFORE
+def reminder_window(now: datetime, ahead: timedelta = REMIND_BEFORE) -> tuple[datetime, datetime]:
+    """[now - 5 min, now + ahead]: with a schedule every ``ahead`` minutes every due time falls in a window
+    (15 min by default; the owner runs it every 3 h with ``ahead=180``)."""
+    return now - REMIND_AFTER, now + ahead
 
 
-async def due_reminders(db: AppDB, now: datetime) -> list[dict[str, Any]]:
+async def due_reminders(db: AppDB, now: datetime, ahead: timedelta = REMIND_BEFORE) -> list[dict[str, Any]]:
     """Open timed tasks whose local due datetime is inside :func:`reminder_window`, soonest first."""
-    start, end = reminder_window(now)
+    start, end = reminder_window(now, ahead)
     days = sorted({start.date().isoformat(), end.date().isoformat()})
     rows = await db.fetch(
         "SELECT id, title, priority, details, due, due_time FROM app_tasks WHERE done = 0 AND due_time IS NOT NULL"
@@ -406,9 +407,10 @@ def compose_reminder(state: HubState, task: dict[str, Any], now: datetime) -> Pu
     )
 
 
-async def run_reminders(state: HubState, db: AppDB, *, preview: bool, force: bool) -> dict[str, Any]:
+async def run_reminders(state: HubState, db: AppDB, *, preview: bool, force: bool,
+                        ahead: timedelta = REMIND_BEFORE) -> dict[str, Any]:
     now = local_now()
-    tasks = await due_reminders(db, now)
+    tasks = await due_reminders(db, now, ahead)
     pushes = [compose_reminder(state, t, now) for t in tasks[:MAX_REMINDERS]]
     out: dict[str, Any] = {"kind": "reminders", "sent": False, "skipped": None, "count": 0, "title": None,
                            "message": None, "results": []}
@@ -572,6 +574,7 @@ async def notify_run(
     kind: RunKind = Query(...),
     force: bool = Query(False, description="Send even if this kind was already pushed today/this week/month"),
     preview: bool = Query(False, description="Compose the push without sending it"),
+    ahead: int = Query(15, ge=5, le=24 * 60, description="reminders: minutes ahead to cover (= the schedule interval)"),
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
@@ -580,7 +583,7 @@ async def notify_run(
         return {"kind": kind, "sent": False, "skipped": "turned off in the app", "title": None, "message": None}
     if kind == "reminders":
         try:
-            return await run_reminders(state, db, preview=preview, force=force)
+            return await run_reminders(state, db, preview=preview, force=force, ahead=timedelta(minutes=ahead))
         except notifier.NotifyError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     today = local_today()
