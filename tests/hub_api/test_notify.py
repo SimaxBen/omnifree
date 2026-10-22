@@ -83,7 +83,7 @@ def test_status_prefs_and_test_push(app_hub, sent, monkeypatch: pytest.MonkeyPat
     st = app_hub.get("/notify/status").json()
     assert st["configured"] is True and st["topic"] == TOPIC and st["server"] == "https://ntfy.sh"
     assert st["subscribe_url"] == f"https://ntfy.sh/{TOPIC}" and st["token_set"] is False
-    assert st["prefs"] == {k: True for k in ("morning", "evening", "weekly", "budget", "month", "reminders", "bills", "inbox", "spending")}
+    assert st["prefs"] == {k: True for k in ("morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary", "inbox", "spending")}
 
     r = app_hub.post("/notify/test")
     assert r.status_code == 200 and r.json()["sent"] is True

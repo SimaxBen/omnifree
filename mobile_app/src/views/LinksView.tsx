@@ -8,6 +8,7 @@ import { HubError } from '../lib/api';
 import { announce, useTopic } from '../lib/bus';
 import { copyText } from '../lib/dom';
 import { relativeTime } from '../lib/files';
+import { flashRow, peekFocus, useFocusRequest } from '../lib/focus';
 import { formatDateTime } from '../lib/format';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import { usePullRefresh } from '../lib/nav';
@@ -69,6 +70,20 @@ function ShortLinks() {
   const ids = useRef(1);
   useTopic(['links'], links.reload);
   usePullRefresh(links.reload);
+  // A link picked in global search: open its sheet (QR, copy) once the list has it, and flash its row.
+  useFocusRequest(
+    'link',
+    (req) => {
+      if (!links.data) return false;
+      const l = links.data.find((x) => x.code === req.id);
+      if (l) {
+        setShowing({ id: ids.current++, open: true, link: l });
+        flashRow(`link:${l.code}`);
+      }
+      return true;
+    },
+    [links.data],
+  );
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
@@ -161,7 +176,7 @@ function ShortLinks() {
       {links.data && !list.length && <EmptyState icon="link" title="No short links yet" hint="Shorten a link to get a QR code and a click count." />}
       <div className="space-y-2">
         {list.map((l, i) => (
-          <div key={l.code} className={fresh === l.code ? 'pop' : 'rise'} style={riseStyle(i)}>
+          <div key={l.code} data-focus={`link:${l.code}`} className={fresh === l.code ? 'pop' : 'rise'} style={riseStyle(i)}>
             <SwipeRow end={{ icon: 'trash', label: 'Delete', tone: 'danger', run: () => remove(l) }}>
               <button type="button" onClick={() => setShowing({ id: ids.current++, open: true, link: l })} className="flex min-h-[64px] w-full items-center gap-3 px-3 py-2 text-left">
                 <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-signal/15 text-signal">
@@ -186,7 +201,12 @@ function ShortLinks() {
 }
 
 export default function LinksView() {
-  const [section, setSection] = useState<'links' | 'drops'>('links');
+  const [section, setSection] = useState<'links' | 'drops'>(() => (peekFocus('drop') ? 'drops' : 'links'));
+  // A drop picked in global search: show the drops; DropsView then takes the request and opens it.
+  useFocusRequest('drop', () => {
+    setSection('drops');
+    return false;
+  });
   return (
     <div className="space-y-4">
       <Segmented

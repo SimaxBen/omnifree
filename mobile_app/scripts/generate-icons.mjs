@@ -72,6 +72,56 @@ function sample(x, y, opts) {
   return px;
 }
 
+// App icon shortcut glyphs (manifest.shortcuts): saffron strokes on the night background, drawn on the 24px grid
+// of src/components/icons.tsx. Each glyph is polylines, rings and filled discs/capsules.
+const SAFFRON = [255, 194, 75];
+const NIGHT = [11, 13, 30];
+
+function arc(cx, cy, r, from, to, steps = 24) {
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const a = from + ((to - from) * i) / steps;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  });
+}
+
+const GLYPHS = {
+  voice: { lines: [arc(12, 11, 6.5, 0, Math.PI), [[12, 17.5], [12, 20.5]], [[9, 20.5], [15, 20.5]]], fills: [{ a: [12, 6.5], b: [12, 10.5], r: 3 }] },
+  receipt: {
+    lines: [
+      [[6, 3], [18, 3], [18, 21], [15, 19], [12, 21], [9, 19], [6, 21], [6, 3]],
+      [[9, 8], [15, 8]],
+      [[9, 12], [15, 12]],
+      [[9, 16], [12, 16]],
+    ],
+  },
+  note: { lines: [[[6, 3], [15, 3], [19, 7], [19, 21], [6, 21], [6, 3]], [[14, 3], [14, 8], [19, 8]], [[9, 12], [16, 12]], [[9, 16], [14, 16]]] },
+  task: { lines: [arc(12, 12, 8.5, 0, Math.PI * 2, 48), [[8, 12.5], [11, 15.5], [16.5, 9]]] },
+  money: {
+    lines: [[[3, 6], [21, 6], [21, 18], [3, 18], [3, 6]], arc(12, 12, 3, 0, Math.PI * 2, 32)],
+    fills: [{ a: [6.5, 9.5], b: [6.5, 9.5], r: 1 }, { a: [17.5, 14.5], b: [17.5, 14.5], r: 1 }],
+  },
+};
+
+function segDist(px, py, [ax, ay], [bx, by]) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = dx * dx + dy * dy;
+  const t = len ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+
+function shortcutSample(x, y, glyph) {
+  // Glyph area: the middle 60 % of the icon (Android masks shortcut icons to a circle).
+  const gx = ((x - 0.2) / 0.6) * 24;
+  const gy = ((y - 0.2) / 0.6) * 24;
+  let px = [...NIGHT, 1];
+  let d = Infinity;
+  for (const line of glyph.lines) for (let i = 1; i < line.length; i++) d = Math.min(d, segDist(gx, gy, line[i - 1], line[i]));
+  for (const f of glyph.fills ?? []) d = Math.min(d, segDist(gx, gy, f.a, f.b) - f.r + 1);
+  if (d <= 1) px = over(px, SAFFRON, 1);
+  return px;
+}
+
 function render(size, opts) {
   const SS = 4;
   const raw = Buffer.alloc((size * 4 + 1) * size);
@@ -81,7 +131,9 @@ function render(size, opts) {
       let acc = [0, 0, 0, 0];
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
-          const p = sample((x + (sx + 0.5) / SS) / size, (y + (sy + 0.5) / SS) / size, opts);
+          const u = (x + (sx + 0.5) / SS) / size;
+          const v = (y + (sy + 0.5) / SS) / size;
+          const p = opts.glyph ? shortcutSample(u, v, opts.glyph) : sample(u, v, opts);
           acc = [acc[0] + p[0] * p[3], acc[1] + p[1] * p[3], acc[2] + p[2] * p[3], acc[3] + p[3]];
         }
       }
@@ -164,4 +216,5 @@ writeFileSync(join(OUT, 'icon-512.png'), render(512, standard));
 writeFileSync(join(OUT, 'maskable-512.png'), render(512, maskable));
 writeFileSync(join(OUT, 'apple-touch-icon.png'), render(180, { inset: 0.04, fullBleed: true }));
 writeFileSync(join(OUT, 'badge-96.png'), render(96, { inset: 0, fullBleed: false, badge: true }));
+for (const [id, glyph] of Object.entries(GLYPHS)) writeFileSync(join(OUT, `shortcut-${id}.png`), render(96, { glyph }));
 console.log(`icons written to ${OUT}`);

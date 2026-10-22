@@ -95,6 +95,7 @@ import type {
 import type { ChatSummary, ChatThread, ChatThreadPatch, ChatThreadSave } from './types';
 import { normalizeGoal, normalizeGoals, normalizeSuggestions } from './moneyIntel';
 import type { GoalContribution, GoalCreate, GoalPatch, GoalsListing, SavingsGoal, SubscriptionAccept, SubscriptionSuggestion, TrackedSubscription } from './types';
+import type { SearchResponse, SearchResultType } from './types';
 
 /**
  * The hub runs serverless with a ~4.5 MB request/response limit. Files above this size never go
@@ -1090,6 +1091,23 @@ export class HubClient {
       generated_at: isRecord(body) && typeof body.generated_at === 'string' ? body.generated_at : '',
       items: listOf<BudgetItem>(body, 'items'),
       summary: { ok: n('ok'), warn: n('warn'), over: n('over'), unknown: n('unknown') },
+    };
+  }
+
+  // ------------------------------------------------------------------ global search
+
+  /** `GET /search?q=`: notes, tasks, money, Drive files, chats and links, grouped per type, best group first. */
+  async search(q: string, opts: { types?: SearchResultType[]; limit?: number } = {}, signal?: AbortSignal): Promise<SearchResponse> {
+    const body = await this.request<Partial<SearchResponse>>('GET', '/search', {
+      query: { q, types: opts.types?.length ? opts.types.join(',') : undefined, limit: opts.limit },
+      signal,
+    });
+    return {
+      query: body?.query ?? q,
+      terms: Array.isArray(body?.terms) ? body.terms : [],
+      total: typeof body?.total === 'number' ? body.total : 0,
+      groups: Array.isArray(body?.groups) ? body.groups : [],
+      errors: body?.errors && typeof body.errors === 'object' ? body.errors : {},
     };
   }
 }

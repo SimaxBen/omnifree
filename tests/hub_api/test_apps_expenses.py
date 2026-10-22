@@ -146,6 +146,10 @@ def test_receipt_rejects_non_images_and_large_files(app_hub) -> None:
     fa.CHAT_SCRIPT["gemini"].append(json.dumps(RECEIPT))
     r = _scan(app_hub, ctype="application/octet-stream", name="IMG_1.HEIC")
     assert r.status_code == 201 and r.json()["expense"]["receipt_key"].endswith(".heic")
+    # PDF receipts (Android share sheet): stored as .pdf and sent to the vision model as a PDF data URL.
+    fa.CHAT_SCRIPT["gemini"].append(json.dumps(RECEIPT))
+    r = _scan(app_hub, content=b"%PDF-1.4 receipt", ctype="application/pdf", name="facture.pdf")
+    assert r.status_code == 201 and r.json()["expense"]["receipt_key"].endswith(".pdf")
 
 
 # ------------------------------------------------------------------ manual CRUD + month summary

@@ -947,7 +947,7 @@ export interface VoiceMoneyResult {
 
 // ------------------------------------------------------------------ notifications (ntfy) and calendar feed
 
-export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'bills' | 'inbox' | 'spending';
+export type NotifyKind = 'morning' | 'evening' | 'weekly' | 'budget' | 'month' | 'reminders' | 'bills' | 'summary' | 'inbox' | 'spending';
 export type NotifyRunKind = Exclude<NotifyKind, 'inbox' | 'spending'>;
 export type NotifyChannel = 'ntfy' | 'webpush';
 
@@ -1226,4 +1226,37 @@ export interface TaskBlockResult {
 export interface VoiceNoteResult {
   /** Appointments heard in the memo, booked in the OmniFree Google Calendar (undo: DELETE /gcal/events/{id}). */
   events?: GCalEvent[];
+}
+
+// ------------------------------------------------------------------ global search (GET /search)
+
+export type SearchResultType = 'notes' | 'tasks' | 'expenses' | 'incomes' | 'files' | 'chats' | 'links';
+
+export interface SearchResult {
+  type: SearchResultType;
+  /** Note/task/expense/income/chat id; `backend:key` for files; `link:CODE` / `drop:CODE` for links. */
+  id: string;
+  title: string;
+  snippet: string;
+  date: string | null;
+  score: number;
+  /** Per type: the full expense / income row, the StoredObject of a file, `{kind, code, url}` of a link... */
+  data: Record<string, unknown>;
+}
+
+export interface SearchGroup {
+  type: SearchResultType;
+  label: string;
+  /** Matches before the per-type limit. */
+  count: number;
+  items: SearchResult[];
+}
+
+export interface SearchResponse {
+  query: string;
+  terms: string[];
+  total: number;
+  groups: SearchGroup[];
+  /** Sources that failed or timed out (e.g. a storage backend), by type. */
+  errors: Record<string, string>;
 }

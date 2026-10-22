@@ -11,6 +11,11 @@ export const NOTIFY_KINDS: { kind: NotifyKind; label: string; detail: string }[]
   { kind: 'month', label: 'Month-end recap', detail: 'Spending this month, recurring money when set up' },
   { kind: 'reminders', label: 'Task reminders', detail: 'A push 15 min before a timed task (with a “Fait ✓” button) or a Google Calendar event' },
   { kind: 'bills', label: 'Upcoming bills', detail: 'Two days before each recurring charge or tracked subscription, one push per charge' },
+  {
+    kind: 'summary',
+    label: 'Daily summary',
+    detail: 'One notification kept up to date: today’s events, next tasks, money left this month. The app notification is replaced in place; ntfy cannot replace, so it gets a new quiet one each time',
+  },
   { kind: 'inbox', label: 'Email receipts', detail: 'Right after an import creates new expenses' },
   { kind: 'spending', label: 'Budget alerts', detail: 'Right after an expense takes a category past 80 % or 100 % of its monthly budget' },
 ];
@@ -66,6 +71,10 @@ export const SCHEDULE_TEMPLATES: ScheduleTemplate[] = [
   {
     id: 'bills', name: 'push-bills', label: 'Upcoming bills: daily 09:00', schedule: '0 9 * * *', path: '/notify/run?kind=bills',
     description: 'Daily 09:00 Morocco: one push per recurring charge or subscription due in the next 2 days',
+  },
+  {
+    id: 'summary', name: 'push-summary', label: 'Daily summary: 07:00 and 13:00', schedule: '0 7,13 * * *', path: '/notify/run?kind=summary',
+    description: 'Refreshes the one persistent summary notification (events, next tasks, money left) twice a day. 2 calls a day',
   },
 ];
 

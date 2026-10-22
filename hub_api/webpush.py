@@ -124,10 +124,16 @@ def build_payload(
     tag: str | None = None,
     url: str | None = None,
     actions: list[dict[str, str]] | None = None,
+    renotify: bool = True,
 ) -> str:
-    """The JSON the service worker reads: ``{title, body, tag, url, actions}``, at most :data:`MAX_PAYLOAD_BYTES`."""
+    """The JSON the service worker reads: ``{title, body, tag, url, actions}``, at most :data:`MAX_PAYLOAD_BYTES`.
+
+    ``renotify=False`` adds ``"renotify": false``: a notification with the same tag is replaced silently.
+    """
     data: dict[str, Any] = {"title": title[:200] or "OmniFree", "body": body, "tag": (tag or "")[:64] or None,
                             "url": url, "actions": (actions or [])[:2]}
+    if not renotify:
+        data["renotify"] = False
     text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     while len(text.encode("utf-8")) > MAX_PAYLOAD_BYTES:
         over = len(text.encode("utf-8")) - MAX_PAYLOAD_BYTES

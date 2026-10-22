@@ -120,6 +120,13 @@ button,
 }
 .pop { animation: pop 280ms var(--ease-spring) both; }
 
+/* A row opened from global search (src/lib/focus.ts): a short saffron ring. */
+@keyframes focus-flash {
+  0%, 60% { box-shadow: 0 0 0 2px #FFC24B; }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+.focus-flash { border-radius: 16px; animation: focus-flash 1500ms var(--ease-out) both; }
+
 /* ------------------------------------------------------------------ skeletons */
 
 @keyframes shimmer {
@@ -248,3 +255,15 @@ button,
 
 /* Nav indicator blob. */
 .nav-blob { transition: left 340ms var(--ease-spring); }
+
+/* ------------------------------------------------------------------ app lock */
+
+@keyframes shake {
+  0%, 100% { transform: none; }
+  20%, 60% { transform: translate3d(-8px, 0, 0); }
+  40%, 80% { transform: translate3d(8px, 0, 0); }
+}
+.shake { animation: shake 320ms var(--ease-out) both; }
+@media (prefers-reduced-motion: reduce) {
+  .shake { animation: none; }
+}

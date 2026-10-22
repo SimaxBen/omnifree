@@ -52,6 +52,7 @@ SOURCE_INDEX = ("CREATE INDEX IF NOT EXISTS app_expenses_source_ref ON app_expen
 _IMAGE_TYPES = {
     "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp",
     "image/heic": "heic", "image/heif": "heif",
+    "application/pdf": "pdf",  # PDF receipts (shared from other apps): the vision models read them natively
 }
 _CURRENCY_ALIASES = {
     "DH": "MAD", "DHS": "MAD", "MAD": "MAD", "DIRHAM": "MAD", "DIRHAMS": "MAD", "MDH": "MAD", "د.م.": "MAD",
@@ -339,7 +340,7 @@ def _image_type(filename: str | None, content_type: str | None) -> tuple[str, st
             guessed = "image/heic"
         ctype = guessed.lower()
     if ctype not in _IMAGE_TYPES:
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="receipt must be a JPEG, PNG, WebP or HEIC image")
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="receipt must be a JPEG, PNG, WebP or HEIC image, or a PDF")
     return ("image/jpeg" if ctype == "image/jpg" else ctype), _IMAGE_TYPES[ctype]
 
 

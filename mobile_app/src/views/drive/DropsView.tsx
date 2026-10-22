@@ -8,6 +8,7 @@ import { useActions } from '../../lib/actions';
 import { announce, useTopic } from '../../lib/bus';
 import { fileKind, relativeTime } from '../../lib/files';
 import { formatBytes, formatDateTime } from '../../lib/format';
+import { flashRow, useFocusRequest } from '../../lib/focus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
 import type { Drop, StoredObject } from '../../lib/types';
@@ -60,6 +61,20 @@ export default function DropsView() {
   const ids = useRef(1);
   useTopic(['drops'], drops.reload);
   usePullRefresh(drops.reload);
+  // A drop picked in global search (see LinksView): open it once the list has it.
+  useFocusRequest(
+    'drop',
+    (req) => {
+      if (!drops.data) return false;
+      const d = drops.data.find((x) => x.code === req.id);
+      if (d) {
+        setShowing({ id: ids.current++, open: true, drop: d });
+        flashRow(`drop:${d.code}`);
+      }
+      return true;
+    },
+    [drops.data],
+  );
 
   const remove = async (d: Drop) => {
     try {
@@ -87,7 +102,7 @@ export default function DropsView() {
         {list.map((d, i) => {
           const dead = expired(d);
           return (
-            <div key={d.code} className="rise" style={riseStyle(i)}>
+            <div key={d.code} data-focus={`drop:${d.code}`} className="rise" style={riseStyle(i)}>
               <SwipeRow end={{ icon: 'trash', label: 'Remove', tone: 'danger', run: () => remove(d) }}>
                 <button type="button" onClick={() => setShowing({ id: ids.current++, open: true, drop: d })} className="flex min-h-[68px] w-full items-center gap-3 px-3 py-2 text-left">
                   <FileTile kind={fileKind(d.filename)} size={44} className={dead ? 'opacity-40' : ''} />

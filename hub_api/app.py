@@ -31,6 +31,7 @@ from hub_api.routers import money_plus as money_plus_router
 from hub_api.routers import notify as notify_router
 from hub_api.routers import push as push_router
 from hub_api.routers import rag as rag_router
+from hub_api.routers import search as search_router
 from hub_api.routers import sms as sms_router
 from hub_api.routers import tasks_plus as tasks_plus_router
 from hub_api.routers.llm import ROUTED_VIA_HEADER
@@ -156,6 +157,7 @@ def create_app(
     for module in (notes, expenses, money, links, inbox_router, digest_router, chats_router, notify_router, push_router, calendar_router, gcal_router):  # personal apps (data in D1)
         app.include_router(module.router, dependencies=protected)
     app.include_router(tasks_plus_router.router, dependencies=protected)  # /tasks/{id}/slots|block|checklist
+    app.include_router(search_router.router, dependencies=protected)  # GET /search (global search)
     app.include_router(sms_router.router, dependencies=protected)  # /money/sms/log, /money/sms/setup
     app.include_router(money_plus_router.router, dependencies=protected)  # /money/subscriptions*, /money/goals*
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)

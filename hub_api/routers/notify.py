@@ -19,6 +19,10 @@ stored in ``app_notify_log.channels`` (JSON) and returned as ``channels``.
   per event id and start; see :mod:`hub_api.gcal`). The morning push opens with an "Agenda" section (today's
   events) when Google Calendar is set up; ``bills`` (daily) pushes one notification per monthly charge or tracked
   subscription due in the next 2 days, deduplicated per charge and date (see :mod:`hub_api.money_intel`);
+* ``summary`` (template "Daily summary: 07:00 and 13:00"): ONE persistent notification with today's events, the next
+  tasks and the money left this month (see :mod:`hub_api.daily_summary`). Web push sends it with a stable tag and
+  ``renotify: false``, so each run silently replaces the previous one on the phone. ntfy cannot replace a message:
+  every run posts a new one (low priority, same title, tag ``summary``), so turn the ntfy channel off if that is noisy;
 * ``POST /notify/done/{task_id}?sig=...`` (``public_router``, no bearer: the ntfy app calls it from the
   notification button): marks that one task done. ``sig`` is an HMAC-SHA256 of the task id under a key
   derived from the hub token (see :func:`done_sig`), compared in constant time; anything else answers 404.
@@ -64,8 +68,8 @@ log = logging.getLogger("omnifree.hub.notify")
 router = APIRouter(prefix="/notify", tags=["notify"])
 public_router = APIRouter(tags=["public"])
 
-RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders", "bills"]
-RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders", "bills")
+RunKind = Literal["morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary"]
+RUN_KINDS: tuple[str, ...] = ("morning", "evening", "weekly", "budget", "month", "reminders", "bills", "summary")
 KINDS: tuple[str, ...] = (*RUN_KINDS, "inbox", "spending")  # inbox / spending: pushed by an event, not a schedule
 CHANNELS: tuple[str, ...] = ("ntfy", "webpush")
 _CHANNEL_PREFIX = "channel:"  # channel switches live in app_notify_prefs as "channel:ntfy" / "channel:webpush"
@@ -121,6 +125,8 @@ class Push:
     actions: list[tuple[str, str]] = field(default_factory=list)  # (label, PWA hash route)
     http_actions: list[dict[str, Any]] = field(default_factory=list)  # ntfy "http" actions, sent first
     dedupe: str | None = None  # one push per key (kind + day/week/month)
+    tag: str | None = None  # web push tag override: a stable tag replaces the previous notification
+    renotify: bool = True  # web push: False replaces a same-tag notification without alerting again
 
 
 # --------------------------------------------------------------------------- formatting
@@ -549,9 +555,9 @@ def webpush_payload(state: HubState, kind: str, push: Push) -> str:
     ]
     actions += [{"action": "open", "title": label, "url": url}
                 for label, path in push.actions if (url := _pwa(state, path))]
-    tag = (push.dedupe or kind).replace(":", "-")
-    return webpush.build_payload(push.title, push.message, tag=f"omnifree-{tag}", url=_pwa(state, push.path or "#/"),
-                                 actions=actions[:2])
+    tag = push.tag or f"omnifree-{(push.dedupe or kind).replace(':', '-')}"
+    return webpush.build_payload(push.title, push.message, tag=tag, url=_pwa(state, push.path or "#/"),
+                                 actions=actions[:2], renotify=push.renotify)
 
 
 @dataclass
@@ -810,6 +816,10 @@ async def notify_run(
         push = await compose_weekly(db, today)
     elif kind == "month":
         push = await compose_month(db, today)
+    elif kind == "summary":
+        from hub_api.daily_summary import compose_summary
+
+        push = await compose_summary(state, db, today, local_now())
     else:
         try:
             push, budget_alerts = await compose_budget(state, db)

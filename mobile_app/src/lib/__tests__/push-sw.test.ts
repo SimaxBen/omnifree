@@ -67,6 +67,12 @@ describe('push-sw.js', () => {
     expect((options.data as { url: string }).url).toBe(`${ORIGIN}/#/notes/tasks`);
   });
 
+  it('replaces the daily summary silently ("renotify": false)', async () => {
+    const sw = load();
+    await sw.dispatch('push', { data: pushData({ title: 'Aujourd’hui', body: 'x', tag: 'omnifree-summary', renotify: false }) });
+    expect(sw.shown[0].options).toMatchObject({ tag: 'omnifree-summary', renotify: false });
+  });
+
   it('copes with text or empty payloads', async () => {
     const sw = load();
     await sw.dispatch('push', { data: { json: () => { throw new Error('not json'); }, text: () => 'hello' } });

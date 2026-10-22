@@ -164,7 +164,11 @@ export default function ExpenseEditor({ open, mode, onClose }: { open: boolean; 
     >
       {photo && (
         <div className={cx('relative mx-auto mb-4 overflow-hidden rounded-card bg-ink-950 transition-[height] duration-slow ease-out', scanning ? 'h-[52dvh]' : 'h-28')}>
-          <img src={photo} alt="Receipt" className="h-full w-full object-contain" />
+          {mode.kind === 'receipt' && mode.file.type === 'application/pdf' ? (
+            <div className="grid h-full w-full place-items-center text-ink-300">PDF receipt · {mode.file.name}</div>
+          ) : (
+            <img src={photo} alt="Receipt" className="h-full w-full object-contain" />
+          )}
           {scanning && (
             <>
               <div className="absolute inset-0 bg-ink-950/30" />

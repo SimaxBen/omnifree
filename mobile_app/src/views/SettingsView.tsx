@@ -3,6 +3,7 @@ import { Button, Card, SectionTitle, StatusDot, cx, inputClass } from '../compon
 import { HubClient } from '../lib/api';
 import { errorText, useHub } from '../lib/hub';
 import { normalizeHubUrl } from '../lib/settings';
+import LockSettings from './LockSettings';
 
 type TestState = { state: 'idle' } | { state: 'testing' } | { state: 'ok'; detail: string } | { state: 'fail'; detail: string };
 
@@ -87,6 +88,8 @@ export default function SettingsView({ onDone }: { onDone: () => void }) {
           Save
         </Button>
       </form>
+
+      <LockSettings />
 
       <div>
         <SectionTitle>Live events</SectionTitle>
