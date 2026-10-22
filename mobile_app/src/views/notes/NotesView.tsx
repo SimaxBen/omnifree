@@ -8,6 +8,7 @@ import { relativeTime } from '../../lib/files';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { plainText } from '../../lib/markdown';
 import { usePullRefresh, useNav } from '../../lib/nav';
+import { notesByTag, onTagFilter, takePendingTag } from '../../lib/noteLinks';
 import type { Note } from '../../lib/types';
 import TasksPanel from './TasksPanel';
 
@@ -18,6 +19,7 @@ function NoteRow({ note, onOpen }: { note: Note; onOpen: () => void }) {
         <span className="flex items-center gap-1.5">
           {note.pinned && <Icon name="pin" size={14} className="shrink-0 text-signal" />}
           {note.source === 'voice' && <Icon name="mic" size={14} className="shrink-0 text-danger-400" />}
+          {note.source === 'meeting' && <Icon name="wave" size={14} className="shrink-0 text-signal" />}
           <span className="truncate font-display text-[16px] font-semibold text-ink-100">{note.title || 'Untitled'}</span>
         </span>
         <span className="mt-0.5 line-clamp-2 block text-[14px] leading-snug text-ink-400">{plainText(note.body, 180) || 'Empty note'}</span>
@@ -41,13 +43,29 @@ function NotesPanel() {
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
   const [notebook, setNotebook] = useState('');
+  // A #tag tapped in a note: the list shows the notes with that tag until the chip is cleared.
+  const [tag, setTag] = useState(() => takePendingTag() ?? '');
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(q.trim()), 250);
     return () => window.clearTimeout(t);
   }, [q]);
 
-  const list = useHubData((c, s) => c.notes({ notebook: notebook || undefined, q: debounced || undefined, limit: 100 }, s), [notebook, debounced]);
+  useEffect(() => {
+    const off = onTagFilter((t) => {
+      takePendingTag();
+      setTag(t);
+    });
+    return off;
+  }, []);
+
+  const list = useHubData(
+    (c, s) =>
+      tag
+        ? notesByTag(c, tag, { notebook: notebook || undefined, limit: 100, q: debounced || undefined }, s)
+        : c.notes({ notebook: notebook || undefined, q: debounced || undefined, limit: 100 }, s),
+    [notebook, debounced, tag],
+  );
   useTopic(['notes'], list.reload);
   usePullRefresh(list.reload);
 
@@ -103,8 +121,23 @@ function NotesPanel() {
     <div className="space-y-4">
       <div className="relative">
         <Icon name="search" size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-500" />
-        <input type="search" aria-label="Search notes" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search titles, text and tags" className={cx(inputClass, 'pl-11')} />
+        <input type="search" aria-label="Search notes" value={q} onChange={(e) => setQ(e.target.value)} placeholder={tag ? `Search the notes tagged #${tag}` : 'Search titles, text and tags'} className={cx(inputClass, 'pl-11')} />
       </div>
+
+      {tag && (
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-[14px] text-ink-400">Tagged</span>
+          <button
+            type="button"
+            onClick={() => setTag('')}
+            aria-label={`Clear the #${tag} filter`}
+            className="press pop inline-flex min-h-[36px] items-center gap-1 rounded-full bg-signal/15 px-3 text-[14px] font-semibold text-signal"
+          >
+            #{tag}
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
         <Chip active={!notebook} onClick={() => setNotebook('')}>
@@ -122,7 +155,7 @@ function NotesPanel() {
       {list.data && notes.length === 0 && (
         <EmptyState
           icon="note"
-          title={debounced ? 'No notes match' : notebook ? `${notebook} is empty` : 'No notes yet'}
+          title={tag ? (debounced ? `No notes tagged #${tag} match` : `No notes tagged #${tag}`) : debounced ? 'No notes match' : notebook ? `${notebook} is empty` : 'No notes yet'}
           hint={debounced ? 'Try another word, or search a tag without the #.' : 'Write one, or record a voice note and let it be written for you.'}
           action={
             !debounced && (

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from pydantic import BaseModel, Field
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, TranscriptionRequest
-from hub_api import gcal, recurrence, taskplus
+from hub_api import gcal, note_links, recurrence, taskplus
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
@@ -473,6 +473,8 @@ async def _insert_note(
     await db.execute(
         f"INSERT INTO app_notes ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})", [row[c] for c in cols]
     )
+    if "[[" in body:
+        await note_links.safe_index(db, row["id"], body)  # [[wiki links]] -> app_note_links
     return _note_out(row)
 
 
@@ -563,6 +565,7 @@ class NotePatch(BaseModel):
 async def list_notes(
     notebook: str | None = None,
     q: str | None = None,
+    tag: str | None = Query(None, max_length=41, description="Notes with this tag (tags list or a #tag in the body)"),
     limit: int = Query(50, ge=1, le=500),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
@@ -571,6 +574,10 @@ async def list_notes(
     if notebook:
         where.append("notebook = ?")
         params.append(notebook)
+    tag = (tag.strip().lstrip("#").lower() if isinstance(tag, str) else "") or None  # also called directly (MCP)
+    if tag:
+        where.append("(tags LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')")
+        params += [_like(f'"{tag}"'), _like(f"#{tag}")]
     if q and q.strip():
         like = _like(q.strip())
         where.append("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')")
@@ -578,8 +585,17 @@ async def list_notes(
     sql = "SELECT * FROM app_notes"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT ?"
-    rows = await db.fetch(sql, [*params, limit], limit=limit)
+    sql += " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT ? OFFSET ?"
+    if not tag:
+        rows = await db.fetch(sql, [*params, limit, 0], limit=limit)
+    else:  # the body LIKE also matches "#tagged": keep exact tags only, filtered before the limit is applied
+        rows, page = [], max(limit, 100)
+        for offset in range(0, 5 * page, page):
+            batch = await db.fetch(sql, [*params, page, offset], limit=page)
+            rows += [r for r in batch if tag in _note_out(r)["tags"] or tag in note_links.body_tags(r.get("body") or "")]
+            if len(rows) >= limit or len(batch) < page:
+                break
+        rows = rows[:limit]
     books = await db.fetch(
         "SELECT notebook AS name, COUNT(*) AS count FROM app_notes GROUP BY notebook ORDER BY notebook"
     )
@@ -909,6 +925,8 @@ async def patch_note(note_id: str, body: NotePatch, db: AppDB = Depends(_db)) ->
         changes["updated_at"] = now_iso()
         sets = ", ".join(f"{k} = ?" for k in changes)
         await db.execute(f"UPDATE app_notes SET {sets} WHERE id = ?", [*changes.values(), note_id])
+        if "body" in changes:
+            await note_links.safe_index(db, note_id, changes["body"])
     return _note_out(await _get_note(db, note_id))
 
 
@@ -917,6 +935,7 @@ async def delete_note(note_id: str, db: AppDB = Depends(_db)) -> Response:
     await _get_note(db, note_id)
     await db.execute("DELETE FROM app_notes WHERE id = ?", [note_id])
     await db.execute("UPDATE app_tasks SET note_id = NULL WHERE note_id = ?", [note_id])
+    await note_links.safe_index(db, note_id, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

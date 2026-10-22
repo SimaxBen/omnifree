@@ -259,6 +259,10 @@ async def compose_morning(db: AppDB, today: date, state: HubState | None = None)
     lines += _task_lines(due)
     if overdue:
         lines.append(f"En retard : {_plural(overdue, 'tâche')}")
+    from hub_api.routers.plan import morning_line  # plan imports notes; table-guarded, None without a plan
+
+    if plan := await morning_line(db, today):
+        lines.append(plan)
     lines.append(
         f"Hier : {_totals(spent['total_by_currency'])} ({_plural(spent['count'], 'dépense')})" if spent["count"]
         else "Hier : aucune dépense notée"

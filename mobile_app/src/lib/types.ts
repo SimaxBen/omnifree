@@ -343,7 +343,7 @@ export interface RerankResult {
 
 // ------------------------------------------------------------------ apps (round 3 contract)
 
-export type NoteSource = 'text' | 'voice';
+export type NoteSource = 'text' | 'voice' | 'meeting';
 
 export interface Note {
   id: string;
