@@ -27,7 +27,10 @@ from hub_api.routers import chats as chats_router
 from hub_api.routers import digest as digest_router
 from hub_api.routers import gcal as gcal_router
 from hub_api.routers import inbox as inbox_router
+from hub_api.routers import meetings as meetings_router
+from hub_api.routers import note_links as note_links_router
 from hub_api.routers import notify as notify_router
+from hub_api.routers import plan as plan_router
 from hub_api.routers import push as push_router
 from hub_api.routers import rag as rag_router
 from hub_api.routers import sms as sms_router
@@ -154,6 +157,8 @@ def create_app(
     for module in (notes, expenses, money, links, inbox_router, digest_router, chats_router, notify_router, push_router, calendar_router, gcal_router):  # personal apps (data in D1)
         app.include_router(module.router, dependencies=protected)
     app.include_router(sms_router.router, dependencies=protected)  # /money/sms/log, /money/sms/setup
+    for module in (plan_router, note_links_router, meetings_router):  # /plan/today, /notes/{id}/backlinks, /notes/meeting
+        app.include_router(module.router, dependencies=protected)
     app.include_router(links.public_router)  # PUBLIC: /s/{code}, /d/{code} (no token)
     app.include_router(calendar_router.public_router)  # PUBLIC: /calendar/{token}.ics (token in the path)
     app.include_router(notify_router.public_router)  # PUBLIC: POST /notify/done/{task_id}?sig= (HMAC per task)

@@ -14,6 +14,7 @@ import { plainText } from '../lib/markdown';
 import { usePullRefresh, useNav } from '../lib/nav';
 import type { Task } from '../lib/types';
 import { MORE_PAGES } from './MoreView';
+import PlanCard from './PlanCard';
 import { TaskRow } from './notes/TaskRow';
 
 export default function HomeView() {
@@ -195,6 +196,8 @@ export default function HomeView() {
           </div>
         </section>
       )}
+
+      <PlanCard />
 
       <section>
         <SectionTitle

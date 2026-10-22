@@ -12,6 +12,7 @@ import { readPref, writePref } from '../../lib/settings';
 import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
 import { CATEGORY_COLOR } from '../money/ExpenseEditor';
 import { INCOME_LABEL } from '../money/MoneySheets';
+import MeetingPanel from './MeetingPanel';
 import { TaskRow } from './TaskRow';
 
 // 'both' behaves like 'auto' on the hub (a note plus any task), so the phone shows four clear choices.
@@ -69,6 +70,7 @@ export default function VoiceSheet({
   const [tasks, setTasks] = useState<Task[]>([]);
   const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [meeting, setMeeting] = useState(false);
   const abort = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const touched = useRef(false);
@@ -159,8 +161,10 @@ export default function VoiceSheet({
   const notebooks = Array.from(new Set(['Inbox', ...(books.data?.notebooks.map((b) => b.name) ?? [])]));
 
   return (
-    <Sheet open={open} onClose={onClose} title={result ? 'Captured' : mode === 'money' ? 'Voice money' : 'Voice note'}>
-      {!result ? (
+    <Sheet open={open} onClose={onClose} title={meeting ? 'Meeting' : result ? 'Captured' : mode === 'money' ? 'Voice money' : 'Voice note'}>
+      {meeting ? (
+        <MeetingPanel onOpenNote={onOpenNote} onClose={onClose} />
+      ) : !result ? (
         <div className="flex flex-col items-center gap-5 pb-2">
           <div className="w-full space-y-2">
             <Segmented
@@ -232,9 +236,17 @@ export default function VoiceSheet({
           )}
 
           {!rec.recording && !busy && (
-            <button type="button" onClick={() => fileRef.current?.click()} className="press min-h-[44px] text-[14px] text-ink-400 underline underline-offset-4">
-              Use an audio file instead
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-x-5">
+              <button type="button" onClick={() => fileRef.current?.click()} className="press min-h-[44px] text-[14px] text-ink-400 underline underline-offset-4">
+                Use an audio file instead
+              </button>
+              {mode !== 'money' && (
+                <button type="button" onClick={() => setMeeting(true)} className="press flex min-h-[44px] items-center gap-1.5 text-[14px] font-semibold text-signal">
+                  <Icon name="wave" size={16} />
+                  Record a meeting
+                </button>
+              )}
+            </div>
           )}
           <input ref={fileRef} type="file" accept="audio/*,video/webm,video/mp4" className="hidden" onChange={onFile} aria-label="Audio file" />
         </div>

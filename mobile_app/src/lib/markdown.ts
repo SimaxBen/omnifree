@@ -5,9 +5,11 @@
 // Blocks: ATX headings (# to ####; deeper levels render as h4), paragraphs with line breaks, bullet lists
 // (`-`, `*`, `+`) and ordered lists (`1.` / `1)`, the first number is kept) nested by indentation, task items
 // (`- [ ]`), GFM tables (header row + `|---|` separator, column alignment), blockquotes (with blocks inside),
-// fenced code (``` or ~~~, with a language) and horizontal rules (---, ***, ___).
+// fenced code (``` or ~~~, with a language), horizontal rules (---, ***, ___) and collapsed sections
+// (`:::details Summary` ... `:::`).
 // Inline: **strong**, *em*, ~~strike~~, `code`, [links](https://...), <https://autolinks>, bare URLs,
-// citations [1], backslash escapes and hard breaks.
+// citations [1], [[wiki links]] (`[[Title]]`, `[[Title|label]]`, `[[Title#section]]`), #tags, backslash escapes
+// and hard breaks.
 
 export type Inline =
   | { t: 'text'; v: string }
@@ -17,6 +19,8 @@ export type Inline =
   | { t: 'code'; v: string }
   | { t: 'link'; href: string; c: Inline[] }
   | { t: 'cite'; n: number }
+  | { t: 'wikilink'; title: string; label: string }
+  | { t: 'tag'; tag: string }
   | { t: 'br' };
 
 export interface ListItem {
@@ -37,6 +41,7 @@ export type Block =
   | { t: 'code'; lang: string; text: string }
   | { t: 'quote'; blocks: Block[] }
   | { t: 'table'; align: Align[]; head: string[]; rows: string[][] }
+  | { t: 'details'; summary: string; blocks: Block[] }
   | { t: 'hr' };
 
 const LIST_RE = /^( *)([-*+]|\d{1,9}[.)])( +|$)(.*)$/;
@@ -45,6 +50,8 @@ const HEADING_RE = /^ {0,3}(#{1,6})(?:\s+(.*?))?\s*$/;
 const HR_RE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const QUOTE_RE = /^ {0,3}>/;
 const TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+const DETAILS_RE = /^ {0,3}:::\s*details\b\s*(.*)$/i;
+const DETAILS_END_RE = /^ {0,3}:::\s*$/;
 
 /** Text clean-up before parsing: line ends, tabs, and characters many fonts lack. */
 export function normalizeMarkdown(md: string): string {
@@ -106,6 +113,7 @@ function startsBlock(lines: string[], i: number): boolean {
     HEADING_RE.test(line) ||
     HR_RE.test(line) ||
     QUOTE_RE.test(line) ||
+    DETAILS_RE.test(line) ||
     LIST_RE.test(line) ||
     isTableStart(lines, i)
   );
@@ -221,6 +229,21 @@ function parseLines(lines: string[]): Block[] {
       i++;
       continue;
     }
+    const det = DETAILS_RE.exec(line);
+    if (det) {
+      flush();
+      // Collected up to the matching `:::` (nested sections count), or to the end of the text.
+      const inner: string[] = [];
+      let depth = 1;
+      for (i++; i < lines.length; i++) {
+        if (DETAILS_RE.test(lines[i])) depth++;
+        else if (DETAILS_END_RE.test(lines[i]) && --depth === 0) break;
+        inner.push(lines[i]);
+      }
+      blocks.push({ t: 'details', summary: det[1].trim() || 'Details', blocks: parseLines(inner) });
+      i++;
+      continue;
+    }
     const h = HEADING_RE.exec(line);
     if (h) {
       flush();
@@ -273,6 +296,9 @@ export function parseBlocks(md: string): Block[] {
 }
 
 const SAFE_HREF = /^(https?:|mailto:)/i;
+const WIKI_RE = /^\[\[([^[\]\n|#]{1,200})(?:#[^[\]\n|]{0,200})?(?:\|([^[\]\n]{0,200}))?\]\]/;
+const TAG_RE = /^#(\p{L}[\p{L}\p{N}_-]{0,39})/u;
+const TAG_PREV_RE = /[\p{L}\p{N}_&/#]/u;
 const ESCAPABLE = /^\\([\\`*_{}[\]()#+\-.!|~<>"'])/;
 
 export function parseInline(text: string): Inline[] {
@@ -311,6 +337,16 @@ export function parseInline(text: string): Inline[] {
     ) {
       pushText();
       out.push({ t: 'em', c: parseInline(m[1]) });
+    } else if ((m = WIKI_RE.exec(rest)) && m[1].trim()) {
+      pushText();
+      const title = m[1].replace(/\s+/g, ' ').trim();
+      out.push({ t: 'wikilink', title, label: (m[2] ?? '').trim() || title });
+    } else if ((i === 0 || !TAG_PREV_RE.test(text[i - 1])) && (m = TAG_RE.exec(rest))) {
+      const tag = m[1].replace(/-+$/, '');
+      pushText();
+      out.push({ t: 'tag', tag: tag.toLowerCase() });
+      i += 1 + tag.length; // a trailing "-" stays text
+      continue;
     } else if ((m = /^\[([^\]]+)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/.exec(rest))) {
       if (SAFE_HREF.test(m[2])) {
         pushText();
@@ -347,6 +383,8 @@ export function plainText(md: string, max = 160): string {
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^\s*(?:[-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?/gm, '')
     .replace(/^\s*>\s?/gm, '')
+    .replace(/^ {0,3}:::.*$/gm, ' ')
+    .replace(/\[\[([^[\]\n|#]+)(?:#[^[\]\n|]*)?(?:\|([^[\]\n]*))?\]\]/g, (_all, t: string, l?: string) => l?.trim() || t.trim())
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/\s*\|\s*/g, ' ')
     .replace(/[*_`~]/g, '')
@@ -376,4 +414,38 @@ export function toggleCheckbox(md: string, index: number): string {
       });
     })
     .join('\n');
+}
+
+// ------------------------------------------------------------------ wiki links
+
+/** The titles linked with [[...]] in a body, once each (first spelling), code ignored. Matches hub_api/note_links.py. */
+export function wikiLinks(md: string): string[] {
+  const text = normalizeMarkdown(md)
+    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[`~]*[ \t]*$|(?![\s\S]))/gm, '\n')
+    .replace(/(`+)(?!`)[\s\S]+?(?<!`)\1(?!`)/g, ' ');
+  const seen = new Map<string, string>();
+  for (const m of text.matchAll(/\[\[([^[\]\n|#]{1,200})(?:#[^[\]\n|]{0,200})?(?:\|[^[\]\n]{0,200})?\]\]/g)) {
+    const title = m[1].replace(/\s+/g, ' ').trim();
+    const key = title.toLowerCase();
+    if (title && !seen.has(key)) seen.set(key, title);
+  }
+  return [...seen.values()];
+}
+
+/** The `[[` being typed at `caret` (no `]]` yet, still on the title): where it starts and the text typed so far. */
+export function wikiQuery(text: string, caret: number): { start: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const start = before.lastIndexOf('[[');
+  if (start < 0) return null;
+  const query = before.slice(start + 2);
+  if (/[[\]\n|#]/.test(query) || query.length > 80) return null;
+  return { start, query };
+}
+
+/** Replaces the `[[query` at `start..caret` by `[[title]]`; returns the new text and the caret after the link. */
+export function completeWikiLink(text: string, start: number, caret: number, title: string): { text: string; caret: number } {
+  const clean = title.replace(/[[\]|#\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const after = text.slice(caret).replace(/^[^[\]\n|#]*\]\]/, ''); // the rest of a link that was already closed
+  const link = `[[${clean}]]`;
+  return { text: text.slice(0, start) + link + after, caret: start + link.length };
 }

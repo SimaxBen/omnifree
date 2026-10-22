@@ -6,8 +6,14 @@ interface Ctx {
   onCite?: (n: number) => void;
   activeCite?: number | null;
   onToggle?: (checkboxIndex: number) => void;
+  /** [[Wiki link]] tapped: the linked note title. Without it, links render as plain styled text. */
+  onWikiLink?: (title: string) => void;
+  /** #tag tapped (lowercase, without the #). */
+  onTag?: (tag: string) => void;
   /** Running checkbox index, in document order (matches toggleCheckbox). */
   box: { n: number };
+  /** Inside a link: nested links and tags render as text (no button inside an anchor). */
+  inLink?: boolean;
 }
 
 function renderInline(nodes: Inline[], ctx: Ctx): ReactNode {
@@ -40,8 +46,34 @@ function renderInline(nodes: Inline[], ctx: Ctx): ReactNode {
       case 'link':
         return (
           <a key={i} href={n.href} target="_blank" rel="noopener noreferrer" className="break-words text-signal underline decoration-signal/40 underline-offset-4">
-            {renderInline(n.c, ctx)}
+            {renderInline(n.c, { ...ctx, inLink: true })}
           </a>
+        );
+      case 'wikilink':
+        return ctx.onWikiLink && !ctx.inLink ? (
+          <button
+            key={i}
+            type="button"
+            onClick={() => ctx.onWikiLink?.(n.title)}
+            title={n.label !== n.title ? n.title : undefined}
+            className="press inline break-words rounded-md bg-signal/10 px-1 text-left font-medium text-signal underline decoration-signal/40 decoration-dotted underline-offset-4"
+          >
+            {n.label}
+          </button>
+        ) : (
+          <span key={i} className="break-words font-medium text-signal">
+            {n.label}
+          </span>
+        );
+      case 'tag':
+        return ctx.onTag && !ctx.inLink ? (
+          <button key={i} type="button" onClick={() => ctx.onTag?.(n.tag)} aria-label={`Notes tagged ${n.tag}`} className="press inline text-signal/90 hover:text-signal">
+            #{n.tag}
+          </button>
+        ) : (
+          <span key={i} className="text-signal/90">
+            #{n.tag}
+          </span>
         );
       case 'cite':
         return ctx.onCite ? (
@@ -129,6 +161,18 @@ function renderBlocks(blocks: Block[], ctx: Ctx, depth = 0): ReactNode {
         return <CodeBlock key={i} lang={b.lang} text={b.text} />;
       case 'hr':
         return <hr key={i} className="my-1 h-px border-0 bg-ink-700" />;
+      case 'details':
+        return (
+          <details key={i} className="group rounded-row bg-ink-900 ring-1 ring-inset ring-ink-800">
+            <summary className="press flex min-h-[44px] cursor-pointer list-none items-center gap-2 px-3 font-semibold text-ink-200 [&::-webkit-details-marker]:hidden">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0 transition-transform duration-base group-open:rotate-90">
+                <path d="M9 5l7 7-7 7" />
+              </svg>
+              <span className="min-w-0 break-words">{inline(b.summary)}</span>
+            </summary>
+            <div className="space-y-3 border-t border-ink-800 px-3 py-3">{renderBlocks(b.blocks, ctx, depth)}</div>
+          </details>
+        );
       case 'table':
         return (
           <div key={i} role="region" aria-label="Table" tabIndex={0} className="overflow-x-auto overscroll-x-contain rounded-row ring-1 ring-inset ring-ink-800">
@@ -221,14 +265,18 @@ export function Markdown({
   onCite,
   activeCite,
   onToggle,
+  onWikiLink,
+  onTag,
   className,
 }: {
   text: string;
   onCite?: (n: number) => void;
   activeCite?: number | null;
   onToggle?: (checkboxIndex: number) => void;
+  onWikiLink?: (title: string) => void;
+  onTag?: (tag: string) => void;
   className?: string;
 }) {
-  const ctx: Ctx = { onCite, activeCite, onToggle, box: { n: -1 } };
+  const ctx: Ctx = { onCite, activeCite, onToggle, onWikiLink, onTag, box: { n: -1 } };
   return <div className={cx('min-w-0 space-y-3 text-[15px] leading-relaxed text-ink-200', className)}>{renderBlocks(parseBlocks(text), ctx)}</div>;
 }

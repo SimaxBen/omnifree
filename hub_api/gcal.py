@@ -42,7 +42,7 @@ from plugins.gcp._auth import DEFAULT_TOKEN_URI, build_jwt, parse_service_accoun
 __all__ = [
     "SA_KEY", "ID_KEY", "READ_KEY", "SCOPE", "API", "TZ_NAME", "SCHEMA", "GCalConfig", "GCalError", "load_config",
     "event_id", "task_event", "ensure_schema", "push_task", "sync_all", "events_between", "agenda_day",
-    "calendar_status", "add_event", "reset", "normalise_event", "transport",
+    "calendar_status", "add_event", "reset", "normalise_event", "transport", "delete_event", "delete_tagged",
 ]
 
 log = logging.getLogger("omnifree.hub.gcal")
@@ -681,12 +681,17 @@ async def calendar_status(state: Any, db: AppDB) -> dict[str, Any]:
 
 
 async def add_event(state: Any, *, title: str, start: datetime | date, end: datetime | date | None = None,
-                    location: str | None = None, description: str | None = None) -> dict[str, Any]:
-    """Create an event in the OmniFree calendar (dates = all day; datetimes are local wall-clock times)."""
+                    location: str | None = None, description: str | None = None,
+                    private: dict[str, str] | None = None) -> dict[str, Any]:
+    """Create an event in the OmniFree calendar (dates = all day; datetimes are local wall-clock times).
+
+    ``private`` adds/overrides private extended properties (e.g. ``omnifreeKind=plan`` for day-plan blocks).
+    """
     cfg = _config(state)
     if cfg is None or not cfg.writable:
         raise GCalError(f"Google Calendar is not set up (vault keys {SA_KEY} and {ID_KEY})")
-    body: dict[str, Any] = {"summary": title, "extendedProperties": {"private": {"omnifreeKind": "agent"}}}
+    body: dict[str, Any] = {"summary": title,
+                            "extendedProperties": {"private": {"omnifreeKind": "agent", **(private or {})}}}
     if isinstance(start, datetime):
         stop = end if isinstance(end, datetime) else start + timedelta(hours=1)
         if stop <= start:
@@ -708,3 +713,33 @@ async def add_event(state: Any, *, title: str, start: datetime | date, end: date
     _events_cache.clear()
     ev = normalise_event(created, cfg.calendar_id, None)
     return ev or {"id": created.get("id"), "title": title}
+
+
+async def delete_event(state: Any, event: str) -> bool:
+    """Delete one event of the OmniFree calendar by id (an already deleted one is fine); False when Google
+    Calendar is not set up."""
+    cfg = _config(state)
+    if cfg is None or not cfg.writable or not cfg.calendar_id:
+        return False
+    await call(cfg, "DELETE", _events_path(cfg.calendar_id, event), ok=(404, 410))
+    _events_cache.clear()
+    return True
+
+
+async def delete_tagged(state: Any, prop: str, start: datetime, end: datetime) -> list[str]:
+    """Delete the OmniFree-calendar events in [start, end) whose private extended property matches ``prop``
+    (``"key=value"``). Returns the deleted event ids."""
+    cfg = _config(state)
+    if cfg is None or not cfg.writable or not cfg.calendar_id:
+        return []
+    params: dict[str, Any] = {"privateExtendedProperty": prop, "timeMin": iso(start), "timeMax": iso(end),
+                              "maxResults": 250, "singleEvents": "true"}
+    page = await call(cfg, "GET", _events_path(cfg.calendar_id), params=params) or {}
+    deleted: list[str] = []
+    for item in page.get("items") or []:
+        if item.get("status") == "cancelled" or not item.get("id"):
+            continue
+        await call(cfg, "DELETE", _events_path(cfg.calendar_id, str(item["id"])), ok=(404, 410))
+        deleted.append(str(item["id"]))
+    _events_cache.clear()
+    return deleted
