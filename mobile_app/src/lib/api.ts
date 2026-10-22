@@ -716,6 +716,10 @@ export class HubClient {
     return this.request<Task>('PATCH', `/tasks/${encodeURIComponent(id)}/checklist/${encodeURIComponent(itemId)}`, { json: patch });
   }
 
+  deleteChecklistItem(id: string, itemId: string): Promise<Task> {
+    return this.request<Task>('DELETE', `/tasks/${encodeURIComponent(id)}/checklist/${encodeURIComponent(itemId)}`);
+  }
+
   deleteCalendarEvent(eventId: string): Promise<void> {
     return this.request<void>('DELETE', `/gcal/events/${encodeURIComponent(eventId)}`);
   }

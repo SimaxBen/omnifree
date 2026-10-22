@@ -1071,6 +1071,8 @@ export interface Task {
   block?: TaskBlock | null;
   /** Only in the PATCH answer that completed a recurring task: its new occurrence. */
   next?: Task;
+  /** Only in the PATCH answer that reopened a recurring task: the untouched next occurrence it deleted. */
+  removed_next?: string;
 }
 
 export interface TaskCreate {

@@ -128,7 +128,16 @@ function TaskSheet({ open, task, onClose, onSaved, onDeleted }: { open: boolean;
           <p className="px-1 text-[12px] text-ink-500">{time ? 'A reminder is pushed 15 min before.' : 'Optional: all day without a time.'}</p>
         </div>
         <RepeatPicker value={repeat} onChange={setRepeat} label={recurrenceLabel(ruleFromDraft(repeat, due || null, today))} />
-        <ChecklistEditor items={checklist} onChange={setChecklist} />
+        <ChecklistEditor
+          items={checklist}
+          onChange={setChecklist}
+          taskId={task.id}
+          onSaved={(t) => {
+            setLive(t);
+            onSaved(t);
+            announce('tasks');
+          }}
+        />
         <TimeBlockPanel
           task={live}
           estimate={estimate}
@@ -311,8 +320,9 @@ export default function TasksPanel() {
         if (showDone) done.setData((ts) => [t, ...(ts ?? []).filter((x) => x.id !== t.id)]);
       }, 900);
     } else {
+      const gone = t.removed_next; // reopened: the hub deleted the occurrence its completion had created
       done.setData((ts) => ts?.filter((x) => x.id !== t.id));
-      open.setData((ts) => [...(ts ?? []).filter((x) => x.id !== t.id), t]);
+      open.setData((ts) => [...(ts ?? []).filter((x) => x.id !== t.id && x.id !== gone), t]);
     }
   };
 

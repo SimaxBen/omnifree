@@ -187,7 +187,10 @@ _NUMBER_WORDS = {
 }
 _NUM = r"(\d{1,3}|" + "|".join(sorted((w.strip() for w in _NUMBER_WORDS), key=len, reverse=True)) + r")"
 _DAY_ALT = "|".join(sorted(_WEEKDAY_WORDS, key=len, reverse=True))
-_PLURAL_ALT = "|".join(sorted((w for w in _WEEKDAY_WORDS if len(w) > 4 and w.endswith("s")), key=len, reverse=True))
+# Explicit plural forms only: Darija singulars also end in "s" (lkhmis, khamis) and must stay one-off.
+_PLURALS = ("mondays", "tuesdays", "wednesdays", "thursdays", "fridays", "saturdays", "sundays",
+            "lundis", "mardis", "mercredis", "jeudis", "vendredis", "samedis", "dimanches")
+_PLURAL_ALT = "|".join(sorted(_PLURALS, key=len, reverse=True))
 _EVERY = r"(?:every|each|chaque|tous\s+les|toutes\s+les|kol|koll|kull)"
 _ORD = r"(\d{1,2})\s*(?:er|ere|ère|e|eme|ème|st|nd|rd|th)?"
 _UNTIL_RE = re.compile(r"\s*(?:,\s*)?\b(?:until|till|jusqu'?(?:au|à|a)|jusqu'au|htal?)\s+(\d{4}-\d{2}-\d{2})\b")

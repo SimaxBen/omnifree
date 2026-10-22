@@ -5,6 +5,7 @@ import {
   checklistProgress,
   cleanChecklist,
   eventSlot,
+  mergeAdded,
   minutesLabel,
   moveItem,
   newItemId,
@@ -64,6 +65,18 @@ describe('checklist', () => {
     { id: 'b', text: 'tickets', done: false },
     { id: 'c', text: 'adapter', done: false },
   ];
+
+  it('merges an item added on the hub without losing local renames or order', () => {
+    const local = [items[2], { ...items[0], text: 'passport + visa' }, items[1]];
+    const server = [...items, { id: 'srv1', text: 'snacks', done: false }];
+    expect(mergeAdded(local, server).map((i) => [i.id, i.text])).toEqual([
+      ['c', 'adapter'],
+      ['a', 'passport + visa'],
+      ['b', 'tickets'],
+      ['srv1', 'snacks'],
+    ]);
+    expect(mergeAdded(local, undefined)).toEqual(local);
+  });
 
   it('counts progress', () => {
     expect(checklistProgress(items)).toEqual({ done: 1, total: 3, label: '1/3' });

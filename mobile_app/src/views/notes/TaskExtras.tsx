@@ -10,6 +10,7 @@ import {
   activeBlock,
   addItem,
   checklistProgress,
+  mergeAdded,
   minutesLabel,
   moveItem,
   removeItem,
@@ -129,16 +130,68 @@ export function RepeatPicker({ value, onChange, label }: { value: RepeatDraft; o
   );
 }
 
-/** The checklist editor: check, rename in place, move up/down, remove, add. Edits stay local until the task is saved. */
-export function ChecklistEditor({ items, onChange }: { items: ChecklistItem[]; onChange: (items: ChecklistItem[]) => void }) {
+/**
+ * The checklist editor: check, rename in place, move up/down, remove, add. With a `taskId`, ticks, adds and removes
+ * are saved at once (optimistic, like the task check; `onSaved` gets the hub's task); renames and order wait for
+ * "Save task". Without one, every edit stays local.
+ */
+export function ChecklistEditor({
+  items,
+  onChange,
+  taskId,
+  onSaved,
+}: {
+  items: ChecklistItem[];
+  onChange: (items: ChecklistItem[]) => void;
+  taskId?: string;
+  onSaved?: (t: Task) => void;
+}) {
+  const { client, notify } = useHub();
   const [text, setText] = useState('');
+  const [adding, setAdding] = useState(false);
   const progress = checklistProgress(items);
-  const add = (e: FormEvent) => {
+  // Apply locally first, then save; on failure put the list back as it was.
+  const persist = async (next: ChecklistItem[], call: () => Promise<Task>) => {
+    const before = items;
+    onChange(next);
+    try {
+      onSaved?.(await call());
+    } catch (err) {
+      onChange(before);
+      notify(errorText(err), 'error');
+    }
+  };
+  const toggle = (it: ChecklistItem) => {
+    const next = toggleItem(items, it.id);
+    if (!taskId) return onChange(next);
+    void persist(next, () => client.updateChecklistItem(taskId, it.id, { done: !it.done }));
+  };
+  const remove = (it: ChecklistItem) => {
+    const next = removeItem(items, it.id);
+    if (!taskId) return onChange(next);
+    void persist(next, () => client.deleteChecklistItem(taskId, it.id));
+  };
+  const add = async (e: FormEvent) => {
     e.preventDefault();
-    if (!text.trim()) return;
+    const clean = text.replace(/\s+/g, ' ').trim();
+    if (!clean) return;
     haptic(6);
-    onChange(addItem(items, text));
-    setText('');
+    if (!taskId) {
+      onChange(addItem(items, clean));
+      setText('');
+      return;
+    }
+    setAdding(true);
+    try {
+      const t = await client.addChecklistItem(taskId, clean);
+      onChange(mergeAdded(items, t.checklist));
+      setText('');
+      onSaved?.(t);
+    } catch (err) {
+      notify(errorText(err), 'error');
+    } finally {
+      setAdding(false);
+    }
   };
   return (
     <div className="space-y-2">
@@ -154,7 +207,7 @@ export function ChecklistEditor({ items, onChange }: { items: ChecklistItem[]; o
                 aria-label={`${it.done ? 'Uncheck' : 'Check'} ${it.text}`}
                 onClick={() => {
                   haptic(it.done ? 5 : [6, 20, 10]);
-                  onChange(toggleItem(items, it.id));
+                  toggle(it);
                 }}
                 className="press grid h-11 w-10 shrink-0 place-items-center"
               >
@@ -170,14 +223,14 @@ export function ChecklistEditor({ items, onChange }: { items: ChecklistItem[]; o
               />
               <IconButton icon="up" label={`Move ${it.text} up`} disabled={i === 0} onClick={() => onChange(moveItem(items, i, -1))} className="h-10 w-9" />
               <IconButton icon="down" label={`Move ${it.text} down`} disabled={i === items.length - 1} onClick={() => onChange(moveItem(items, i, 1))} className="h-10 w-9" />
-              <IconButton icon="x" label={`Remove ${it.text}`} onClick={() => onChange(removeItem(items, it.id))} className="h-10 w-9 hover:text-danger-400" />
+              <IconButton icon="x" label={`Remove ${it.text}`} onClick={() => remove(it)} className="h-10 w-9 hover:text-danger-400" />
             </li>
           ))}
         </ul>
       )}
-      <form onSubmit={add} className="flex items-center gap-2">
+      <form onSubmit={(e) => void add(e)} className="flex items-center gap-2">
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Add an item" aria-label="New checklist item" enterKeyHint="done" className={cx(inputClass, 'min-w-0 flex-1')} />
-        <IconButton icon="plus" label="Add item" type="submit" disabled={!text.trim()} className="bg-ink-800" />
+        <IconButton icon="plus" label="Add item" type="submit" disabled={!text.trim() || adding} className="bg-ink-800" />
       </form>
     </div>
   );

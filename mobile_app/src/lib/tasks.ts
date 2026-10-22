@@ -141,6 +141,12 @@ export function moveItem<T>(items: T[], index: number, delta: number): T[] {
   return next;
 }
 
+/** After an item was added on the hub: keep the local list (and its unsaved renames/order), append what is new. */
+export function mergeAdded(local: ChecklistItem[], server: ChecklistItem[] | null | undefined): ChecklistItem[] {
+  const ids = new Set(local.map((i) => i.id));
+  return [...local, ...(server ?? []).filter((i) => !ids.has(i.id))];
+}
+
 /** Checklist items worth sending: trimmed, blanks dropped. */
 export function cleanChecklist(items: ChecklistItem[]): ChecklistItem[] {
   return items.map((i) => ({ ...i, text: i.text.replace(/\s+/g, ' ').trim() })).filter((i) => i.text);

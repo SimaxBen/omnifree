@@ -57,7 +57,7 @@ export default function HomeView() {
 
   // A completed task stays for a beat (so the check animation is seen), then leaves the list.
   const onTask = (t: Task) => {
-    tasks.setData((ts) => ts?.map((x) => (x.id === t.id ? t : x)));
+    tasks.setData((ts) => ts?.map((x) => (x.id === t.id ? t : x)).filter((x) => x.id !== t.removed_next));
     window.clearTimeout(timers.current[t.id]);
     if (t.done) {
       timers.current[t.id] = window.setTimeout(() => {

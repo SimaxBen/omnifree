@@ -1136,7 +1136,31 @@ async def patch_task(
         nxt = await roll_over(db, state, row)
         if nxt is not None:  # the new occurrence rides along so the client can show it at once
             task = {**_task_out(await _get_task(db, task_id)), "next": nxt}
+    elif changes.get("done") == 0 and current.get("done") and row.get("next_id"):
+        removed = await undo_roll_over(db, state, row)
+        if removed is not None:  # the client drops it from its open list
+            task = {**_task_out(await _get_task(db, task_id)), "removed_next": removed}
     return task
+
+
+async def undo_roll_over(db: AppDB, state: Any, row: dict[str, Any]) -> str | None:
+    """Reopening a completed recurring task: delete the occurrence its completion created, if still untouched.
+
+    "Untouched" = still open, no time block booked and no checklist item ticked; an occurrence the user has
+    worked on is kept (and stays claimed by ``next_id``, so completing again makes no third copy).
+    """
+    nxt = await db.fetch_one("SELECT * FROM app_tasks WHERE id = ?", [row["next_id"]])
+    if nxt is not None and (
+        nxt.get("done") or nxt.get("block_event_id")
+        or any(i.get("done") for i in taskplus.checklist_of(nxt.get("checklist")))
+    ):
+        return None
+    await db.execute("UPDATE app_tasks SET next_id = NULL WHERE id = ?", [row["id"]])
+    if nxt is None:
+        return None  # already deleted by hand: only the claim is released
+    await db.execute("DELETE FROM app_tasks WHERE id = ? AND done = 0", [nxt["id"]])
+    await gcal.push_task(state, db, nxt["id"], None)
+    return str(nxt["id"])
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

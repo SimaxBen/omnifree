@@ -130,7 +130,8 @@ def test_parse_recurrence(phrase: str, rule: dict[str, Any], rest: str) -> None:
 
 
 @pytest.mark.parametrize("phrase", ["call mom on monday", "rdv le 3 du mois prochain", "meeting friday 3pm",
-                                    "dans 3 jours", "next week", ""])
+                                    "dans 3 jours", "next week", "nhar lkhmis f 10", "call mom khamis",
+                                    "khmis", ""])
 def test_parse_recurrence_leaves_one_offs_alone(phrase: str) -> None:
     assert recurrence.parse_recurrence(phrase)[0] is None
 
@@ -184,11 +185,17 @@ def test_recurring_task_rolls_over_once(hub) -> None:
     assert (nxt["title"], nxt["details"], nxt["priority"], nxt["estimate"]) == ("Gym", "legs", "high", 60)
     assert nxt["recurrence"] == t["recurrence"] and nxt["series_id"] == t["id"]
     assert [(i["text"], i["done"]) for i in nxt["checklist"]] == [("shoes", False)]  # a fresh checklist
-    # undo + redo, or completing twice: still one next occurrence
-    hub.patch(f"/tasks/{t['id']}", json={"done": False})
+    # completing twice: still one next occurrence
     again = hub.patch(f"/tasks/{t['id']}", json={"done": True}).json()
     assert "next" not in again and again["next_id"] == nxt["id"]
-    assert len(_all_tasks(hub)) == 2
+    # undo (reopen): the untouched occurrence goes away, so only one copy is open
+    reopened = hub.patch(f"/tasks/{t['id']}", json={"done": False}).json()
+    assert reopened["removed_next"] == nxt["id"] and reopened["next_id"] is None
+    assert [x["id"] for x in _all_tasks(hub) if not x["done"]] == [t["id"]]
+    # redo: a fresh next occurrence
+    redo = hub.patch(f"/tasks/{t['id']}", json={"done": True}).json()
+    nxt = redo["next"]
+    assert redo["next_id"] == nxt["id"] and len(_all_tasks(hub)) == 2
     # the series id stays the first task's
     third = hub.patch(f"/tasks/{nxt['id']}", json={"done": True}).json()["next"]
     assert third["series_id"] == t["id"] and third["due"] == "2030-03-19"
@@ -219,6 +226,18 @@ def test_recurrence_phrases_and_validation(hub) -> None:
     r = hub.patch(f"/tasks/{plain['id']}", json={"due": None, "due_time": "07:30", "recurrence": "daily"})
     assert (r.json()["due"], r.json()["due_time"]) == ("2030-03-13", "07:30")
     assert hub.patch(f"/tasks/{plain['id']}", json={"due_time": "09:00", "recurrence": None, "due": None}).status_code == 422
+
+
+def test_reopen_keeps_an_occurrence_already_worked_on(hub) -> None:
+    t = _task(hub, title="Gym", due="2030-03-12", recurrence="daily", checklist=[{"text": "shoes"}])
+    nxt = hub.patch(f"/tasks/{t['id']}", json={"done": True}).json()["next"]
+    hub.patch(f"/tasks/{nxt['id']}", json={"checklist": [{"text": "shoes", "done": True}]})
+    out = hub.patch(f"/tasks/{t['id']}", json={"done": False}).json()
+    assert "removed_next" not in out and out["next_id"] == nxt["id"]
+    assert len([x for x in _all_tasks(hub) if not x["done"]]) == 2
+    # completing again makes no third copy
+    assert "next" not in hub.patch(f"/tasks/{t['id']}", json={"done": True}).json()
+    assert len(_all_tasks(hub)) == 2
 
 
 def test_series_ends_at_until(hub) -> None:
