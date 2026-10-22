@@ -1,8 +1,22 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Icon } from '../../components/icons';
 import { Markdown } from '../../components/Markdown';
-import { Badge, Button, Card, ErrorNote, IconButton, Toggle, cx, inputClass } from '../../components/ui';
+import { Badge, Button, Card, ErrorNote, IconButton, Segmented, Toggle, cx, inputClass } from '../../components/ui';
 import { HubError } from '../../lib/api';
+import {
+  DATA_MODES,
+  MAX_ATTACHMENTS,
+  assistantChat,
+  assistantConfirm,
+  attachmentKey,
+  attachmentKind,
+  usesAssistant,
+  type AssistantReply,
+  type AttachmentRef,
+  type DataMode,
+  type UsedTool,
+} from '../../lib/assistant';
+import { announce, type Topic } from '../../lib/bus';
 import {
   NEW_CHAT_TITLE,
   chatTitleFrom,
@@ -19,10 +33,12 @@ import { scrollToEnd } from '../../lib/dom';
 import { formatMs } from '../../lib/format';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { readPref, writePref } from '../../lib/settings';
-import type { ChatMessage, ChatSummary, ChatThreadMessage, Usage } from '../../lib/types';
+import type { ChatMessage, ChatSummary, ChatThreadMessage, StoredObject, Usage } from '../../lib/types';
+import { ActionCard, AttachSheet, AttachmentChips, ToolChips, type ActionState, type DraftAttachment } from './AssistantBits';
 import ChatHistorySheet from './ChatHistorySheet';
 import ModelPicker, { parseModelChoice } from './ModelPicker';
 import TranscribePanel from './TranscribePanel';
+import VoiceAssistant from './VoiceAssistant';
 
 interface Turn {
   id: number;
@@ -35,7 +51,20 @@ interface Turn {
   usage?: Usage | null;
   error?: string;
   pending?: boolean;
+  /** Assistant turns (/assistant/chat): data route, tools used, writes to confirm, files sent. */
+  routed?: 'data' | 'general';
+  tools?: UsedTool[];
+  actions?: ActionState[];
+  attachments?: AttachmentRef[];
 }
+
+/** What a confirmed write changes, so open lists reload. */
+const TOOL_TOPICS: Record<string, Topic[]> = {
+  tasks_add: ['tasks'],
+  expense_add: ['expenses', 'money'],
+  income_add: ['money'],
+  notes_create: ['notes'],
+};
 
 interface Meta {
   title: string;
@@ -66,6 +95,12 @@ export default function ChatPanel() {
   const [system, setSystem] = useState<string>(() => readPref('chat.system', ''));
   const [showOptions, setShowOptions] = useState(false);
   const [showTranscribe, setShowTranscribe] = useState(false);
+  const [dataMode, setDataMode] = useState<DataMode>(() => readPref<DataMode>('assistant.mode', 'auto'));
+  const [autoConfirm, setAutoConfirm] = useState<boolean>(() => readPref('assistant.autoConfirm', false));
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [drafts, setDrafts] = useState<DraftAttachment[]>([]);
+  const draftId = useRef(1);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState<string>(() => {
     const draft = readPref('chat.draft', '');
@@ -111,6 +146,12 @@ export default function ChatPanel() {
     writePref('chat.system', system);
   }, [system]);
   useEffect(() => {
+    writePref('assistant.mode', dataMode);
+  }, [dataMode]);
+  useEffect(() => {
+    writePref('assistant.autoConfirm', autoConfirm);
+  }, [autoConfirm]);
+  useEffect(() => {
     scrollToEnd(endRef.current);
   }, [turns]);
   // Remember the conversation to reopen, except while one is still opening or failed to open.
@@ -132,7 +173,15 @@ export default function ChatPanel() {
     setTurns(
       c.messages
         .filter((m) => m.role !== 'system')
-        .map((m) => ({ id: idRef.current++, role: m.role as Turn['role'], content: m.content, routedVia: m.routed_via, model: m.model })),
+        .map((m) => ({
+          id: idRef.current++,
+          role: m.role as Turn['role'],
+          content: m.content,
+          routedVia: m.routed_via,
+          model: m.model,
+          ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+          ...(m.tools?.length ? { tools: m.tools } : {}),
+        })),
     );
     setSync(synced ? 'saved' : 'pending');
     setOpenError(null);
@@ -145,6 +194,7 @@ export default function ChatPanel() {
     setSync('idle');
     setOpenError(null);
     setHistoryOpen(false);
+    setDrafts([]);
   };
 
   /** Reopens a saved conversation; the queued local copy wins over the hub's (it is newer). */
@@ -190,6 +240,8 @@ export default function ChatPanel() {
       content: t.content,
       ...(t.routedVia ? { routed_via: t.routedVia } : {}),
       ...(t.model ? { model: t.model } : {}),
+      ...(t.attachments?.length ? { attachments: t.attachments.map(({ provider, key, name, content_type, size }) => ({ provider, key, name, content_type, size })) } : {}),
+      ...(t.tools?.length ? { tools: t.tools.map(({ name, summary, ok }) => ({ name, summary, ok })) } : {}),
     }));
     const lastModel = [...current].reverse().find((t) => t.role === 'assistant' && t.model)?.model ?? null;
     const title = m.titleSource === 'auto' ? chatTitleFrom(messages) : m.title;
@@ -267,19 +319,105 @@ export default function ChatPanel() {
     };
   }, [client]);
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || busy) return;
-    const userTurn: Turn = { id: idRef.current++, role: 'user', content: text };
+  // ---------------------------------------------------------------- attachments (uploaded to Drive chat/YYYY/MM/ first)
+
+  const patchDraft = (id: number, p: Partial<DraftAttachment>) => setDrafts((ds) => ds.map((d) => (d.id === id ? { ...d, ...p } : d)));
+
+  const attachFiles = (files: File[]) => {
+    setAttachOpen(false);
+    const room = MAX_ATTACHMENTS - drafts.length;
+    if (files.length > room) notify(`At most ${MAX_ATTACHMENTS} files per message`, 'error');
+    for (const file of files.slice(0, Math.max(0, room))) {
+      const check = attachmentKind(file.name, file.type, file.size);
+      if ('error' in check) {
+        notify(check.error, 'error');
+        continue;
+      }
+      const id = draftId.current++;
+      setDrafts((ds) => [...ds, { id, name: file.name, size: file.size, progress: 0 }]);
+      // Large files go straight to the storage backend (presigned PUT), never through the hub's body limit.
+      client
+        .driveUploadFile(file, { key: attachmentKey(file.name), onProgress: (p) => patchDraft(id, { progress: p }) })
+        .then((res) => patchDraft(id, { progress: 1, ref: { provider: res.provider, key: res.key, name: file.name, content_type: file.type || null, size: file.size } }))
+        .catch((err) => patchDraft(id, { error: errorText(err) }));
+    }
+  };
+
+  const attachDrive = (obj: StoredObject) => {
+    setAttachOpen(false);
+    const name = obj.key.split('/').pop() || obj.key;
+    const check = attachmentKind(name, obj.content_type, obj.size);
+    if ('error' in check) {
+      notify(check.error, 'error');
+      return;
+    }
+    if (drafts.length >= MAX_ATTACHMENTS) {
+      notify(`At most ${MAX_ATTACHMENTS} files per message`, 'error');
+      return;
+    }
+    const id = draftId.current++;
+    setDrafts((ds) => [...ds, { id, name, size: obj.size, progress: 1, ref: { provider: obj.backend, key: obj.key, name, content_type: obj.content_type ?? null, size: obj.size } }]);
+  };
+
+  const uploading = drafts.some((d) => !d.ref && !d.error);
+
+  // ---------------------------------------------------------------- confirmations of assistant writes
+
+  const setAction = (turnId: number, actionId: string, p: Partial<ActionState>) =>
+    patch(turnId, (t) => ({ ...t, actions: t.actions?.map((a) => (a.id === actionId ? { ...a, ...p } : a)) }));
+
+  const confirmAction = async (turnId: number, action: ActionState): Promise<boolean> => {
+    setAction(turnId, action.id, { status: 'running', error: undefined });
+    try {
+      const res = await assistantConfirm(client, action);
+      setAction(turnId, action.id, { status: 'done' });
+      announce(...(TOOL_TOPICS[action.tool] ?? []));
+      notify(`Created: ${res.summary}`, 'ok');
+      return true;
+    } catch (err) {
+      setAction(turnId, action.id, { status: 'error', error: errorText(err) });
+      return false;
+    }
+  };
+
+  const waitingActions = () =>
+    turnsRef.current.flatMap((t) => (t.actions ?? []).filter((a) => a.status === 'waiting' || a.status === 'error').map((a) => ({ turnId: t.id, action: a })));
+
+  /** Voice "oui": confirms everything still waiting; returns a short sentence to speak. */
+  const confirmAllWaiting = async (): Promise<string> => {
+    const items = waitingActions();
+    if (!items.length) return 'Rien à confirmer.';
+    let ok = 0;
+    for (const { turnId, action } of items) if (await confirmAction(turnId, action)) ok++;
+    return ok === items.length ? `C'est fait : ${items.map((i) => i.action.summary).join(', ')}.` : `${ok} sur ${items.length} créés, voir les erreurs.`;
+  };
+
+  const dismissAllWaiting = () => {
+    for (const { turnId, action } of waitingActions()) setAction(turnId, action.id, { status: 'dismissed' });
+  };
+
+  // ---------------------------------------------------------------- send
+
+  /** Sends `override` (voice) or the input box. Returns the assistant reply when it went through /assistant/chat. */
+  const send = async (override?: string): Promise<AssistantReply | null> => {
+    const text = (override ?? input).trim();
+    const files = override === undefined ? drafts.filter((d) => d.ref).map((d) => d.ref as AttachmentRef) : [];
+    if ((!text && !files.length) || busy || (override === undefined && uploading)) return null;
+    // Voice turns always go through the assistant (it answers in JSON to speak; "Never" still keeps data out).
+    const viaAssistant = override !== undefined || usesAssistant(dataMode, files.length);
+    const userTurn: Turn = { id: idRef.current++, role: 'user', content: text || 'What is in this file?', ...(files.length ? { attachments: files } : {}) };
     const reply: Turn = { id: idRef.current++, role: 'assistant', content: '', pending: true };
     // The whole conversation goes back to the model; the oldest turns are dropped when it gets too long.
     const history: ChatMessage[] = trimHistory([
       ...(system.trim() ? [{ role: 'system' as const, content: system.trim() }] : []),
       ...turns.filter((t) => !t.error && t.content).map((t) => ({ role: t.role, content: t.content })),
-      { role: 'user', content: text },
+      { role: 'user', content: userTurn.content },
     ]);
     setTurns((ts) => [...ts, userTurn, reply]);
-    setInput('');
+    if (override === undefined) {
+      setInput('');
+      setDrafts([]);
+    }
     setOpenError(null);
     dirtyRef.current = true;
     setBusy(true);
@@ -289,6 +427,31 @@ export default function ChatPanel() {
     const req = { messages: history, model, provider, allow_fallback: allowFallback };
     const started = performance.now();
     try {
+      if (viaAssistant) {
+        const res = await assistantChat(
+          client,
+          { ...req, mode: dataMode, auto_confirm: autoConfirm, chat_id: chatIdRef.current, attachments: files },
+          ctrl.signal,
+        );
+        patch(reply.id, (t) => ({
+          ...t,
+          pending: false,
+          content: res.content,
+          routedVia: res.routed_via || undefined,
+          model: res.model || undefined,
+          latencyMs: res.latency_ms ?? performance.now() - started,
+          routed: res.routed,
+          tools: res.used_tools,
+          actions: res.pending_actions.map((a) => ({ ...a, status: 'waiting' as const })),
+        }));
+        if (res.attachments.length) patch(userTurn.id, (t) => ({ ...t, attachments: res.attachments }));
+        if (autoConfirm) {
+          const topics = res.used_tools.flatMap((u) => TOOL_TOPICS[u.name] ?? []);
+          if (topics.length) announce(...topics);
+        }
+        if (res.remembered.length) notify(`Remembered: ${res.remembered.map((m) => m.fact).join(' · ')}`, 'ok');
+        return res;
+      }
       if (streaming) {
         await client.stream(
           req,
@@ -326,6 +489,7 @@ export default function ChatPanel() {
       setBusy(false);
       abortRef.current = null;
     }
+    return null;
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -371,7 +535,7 @@ export default function ChatPanel() {
             <ModelPicker models={models.data} value={choice} onChange={setChoice} disabled={busy} />
           </div>
           <IconButton
-            icon="mic"
+            icon="wave"
             label="Transcribe audio"
             onClick={() => setShowTranscribe((v) => !v)}
             className={showTranscribe ? 'text-signal' : ''}
@@ -379,10 +543,23 @@ export default function ChatPanel() {
           <IconButton icon="settings" label="Chat options" onClick={() => setShowOptions((v) => !v)} className={showOptions ? 'text-signal' : ''} />
         </div>
         {models.error && <p className="text-xs text-danger-400">Model list unavailable: {models.error}</p>}
+        <div className="flex items-center gap-3">
+          <span className="shrink-0 text-[13px] text-ink-300">Use my data</span>
+          <div className="min-w-0 flex-1">
+            <Segmented value={dataMode} onChange={setDataMode} options={DATA_MODES} />
+          </div>
+        </div>
         {showOptions && (
           <div className="space-y-3 border-t border-ink-800 pt-3">
             <label className="flex items-center justify-between gap-3 text-sm text-ink-200">
-              Stream tokens (SSE)
+              <span>
+                Create without asking
+                <span className="block text-[12px] text-ink-500">Tasks, expenses and notes the assistant proposes are created at once</span>
+              </span>
+              <Toggle checked={autoConfirm} onChange={setAutoConfirm} label="Auto-confirm" />
+            </label>
+            <label className="flex items-center justify-between gap-3 text-sm text-ink-200">
+              Stream tokens (SSE, when not using your data)
               <Toggle checked={streaming} onChange={setStreaming} label="Stream tokens" />
             </label>
             <label className="flex items-center justify-between gap-3 text-sm text-ink-200">
@@ -417,13 +594,15 @@ ${text}` : text));
       <div className="space-y-3" aria-live="polite">
         {turns.length === 0 && sync !== 'loading' && (
           <p className="px-2 py-8 text-center text-sm text-ink-400">
-            Ask anything. Each reply shows which free provider answered, and any failovers on the way. Past conversations are in the history.
+            Ask anything, or about your own money, tasks, agenda and notes ({dataMode === 'never' ? 'off: “Use my data” is Never' : dataMode === 'always' ? 'always on' : 'used only when the question needs it'}). Attach photos
+            or PDFs, or talk with the mic. Past conversations are in the history.
           </p>
         )}
         {turns.map((t) =>
           t.role === 'user' ? (
-            <div key={t.id} className="rise ml-10 whitespace-pre-wrap rounded-[20px] rounded-br-md bg-signal/15 px-4 py-2.5 text-[15px] text-ink-100">
-              {t.content}
+            <div key={t.id} className="rise ml-10 space-y-2 whitespace-pre-wrap rounded-[20px] rounded-br-md bg-signal/15 px-4 py-2.5 text-[15px] text-ink-100">
+              {t.attachments && t.attachments.length > 0 && <AttachmentChips items={t.attachments} />}
+              <div>{t.content}</div>
             </div>
           ) : (
             <div key={t.id} className="rise mr-4 space-y-2">
@@ -440,6 +619,7 @@ ${text}` : text));
                 {t.latencyMs != null && <Badge>{formatMs(t.latencyMs)}</Badge>}
                 {t.usage && t.usage.total_tokens > 0 && <Badge>{t.usage.total_tokens} tok</Badge>}
               </div>
+              <ToolChips tools={t.tools} routed={t.routed} />
               {t.attempts && t.attempts.length > 0 && (
                 <p className="text-[12px] text-amber-400">failover: {t.attempts.join(' -> ')}</p>
               )}
@@ -449,6 +629,14 @@ ${text}` : text));
                   {t.pending && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-signal align-middle" />}
                 </div>
               )}
+              {t.actions?.map((a) => (
+                <ActionCard
+                  key={a.id}
+                  action={a}
+                  onConfirm={() => void confirmAction(t.id, a)}
+                  onDismiss={() => setAction(t.id, a.id, { status: 'dismissed' })}
+                />
+              ))}
               {t.error && <ErrorNote message={t.error} />}
             </div>
           ),
@@ -471,8 +659,21 @@ ${text}` : text));
         }}
       />
 
-      <div className="sticky -mx-4 bg-gradient-to-t from-ink-950 via-ink-950/95 to-transparent px-4 pb-2 pt-4" style={{ bottom: 'calc(var(--nav-h) + var(--safe-bottom) + 8px)' }}>
-        <div className="flex items-end gap-2 rounded-[24px] bg-ink-900 p-1.5 pl-3 ring-1 ring-inset ring-ink-700 focus-within:ring-signal/60">
+      <AttachSheet open={attachOpen} onClose={() => setAttachOpen(false)} onPickFiles={attachFiles} onPickDrive={attachDrive} />
+
+      <div className="sticky -mx-4 space-y-2 bg-gradient-to-t from-ink-950 via-ink-950/95 to-transparent px-4 pb-2 pt-4" style={{ bottom: 'calc(var(--nav-h) + var(--safe-bottom) + 8px)' }}>
+        {voiceOpen && (
+          <VoiceAssistant
+            ask={(text) => send(text)}
+            hasPending={turns.some((t) => t.actions?.some((a) => a.status === 'waiting'))}
+            onConfirmPending={confirmAllWaiting}
+            onDismissPending={dismissAllWaiting}
+            onClose={() => setVoiceOpen(false)}
+          />
+        )}
+        <AttachmentChips items={drafts} onRemove={(i) => setDrafts((ds) => ds.filter((_, j) => j !== i))} />
+        <div className="flex items-end gap-1 rounded-[24px] bg-ink-900 p-1.5 ring-1 ring-inset ring-ink-700 focus-within:ring-signal/60">
+          <IconButton icon="plus" label="Attach a photo, PDF or Drive file" onClick={() => setAttachOpen(true)} disabled={busy || drafts.length >= MAX_ATTACHMENTS} />
           <textarea
             ref={inputRef}
             aria-label="Message"
@@ -480,13 +681,24 @@ ${text}` : text));
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKey}
-            placeholder="Message the pool"
+            placeholder={dataMode === 'never' ? 'Message the pool' : 'Ask anything'}
             className="max-h-40 min-h-[44px] flex-1 resize-none bg-transparent px-1 py-2.5 text-[16px] text-ink-100 placeholder:text-ink-500 focus:outline-none"
           />
           {busy ? (
             <IconButton icon="stop" label="Stop" onClick={() => abortRef.current?.abort()} className="bg-ink-800 text-danger-400" />
           ) : (
-            <IconButton icon="send" label="Send" onClick={() => void send()} disabled={!input.trim() || sync === 'loading'} className="bg-signal text-ink-950 hover:bg-signal/90 hover:text-ink-950" />
+            <>
+              {!input.trim() && !drafts.length && (
+                <IconButton icon="mic" label="Voice assistant" onClick={() => setVoiceOpen((v) => !v)} className={voiceOpen ? 'text-signal' : ''} />
+              )}
+              <IconButton
+                icon="send"
+                label="Send"
+                onClick={() => void send()}
+                disabled={(!input.trim() && !drafts.some((d) => d.ref)) || uploading || sync === 'loading'}
+                className="bg-signal text-ink-950 hover:bg-signal/90 hover:text-ink-950"
+              />
+            </>
           )}
         </div>
       </div>

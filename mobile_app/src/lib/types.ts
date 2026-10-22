@@ -41,6 +41,9 @@ export interface ChatThreadMessage {
   routed_via?: string;
   model?: string;
   created_at?: string;
+  /** Assistant turns: files attached to the message (Drive refs) and the tools used for the reply. */
+  attachments?: { provider: string; key: string; name?: string; content_type?: string | null; size?: number | null }[];
+  tools?: { name: string; summary: string; ok?: boolean }[];
 }
 
 /** `GET /chats` row: a saved conversation without its messages. */

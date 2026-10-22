@@ -60,6 +60,10 @@ class ChatTurn(BaseModel):
     routed_via: str | None = Field(None, max_length=100)
     model: str | None = Field(None, max_length=200)
     created_at: str | None = Field(None, max_length=40)
+    # Assistant turns (/assistant/chat): files attached to the message (Drive references under chat/YYYY/MM/)
+    # and the tools the assistant used, as small dicts.
+    attachments: list[dict[str, Any]] | None = Field(None, max_length=8)
+    tools: list[dict[str, Any]] | None = Field(None, max_length=16)
 
 
 class ChatSave(BaseModel):
