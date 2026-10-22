@@ -292,6 +292,18 @@ def _note(p: ParsedSms) -> str:
     return ", ".join(parts)
 
 
+OWNER_NAMES_KEY = "OWNER_NAMES"  # vault: the owner's names as banks write them, comma separated
+
+
+def _is_owner(state: HubState, name: str) -> bool:
+    """Same set of words as one of OWNER_NAMES ("OUHNINE ILYAS" == "Ilyas Ouhnine")."""
+    words = set(re.findall(r"[a-z]+", name.lower()))
+    for owner in (state.settings.secret(OWNER_NAMES_KEY) or "").split(","):
+        if words and words == set(re.findall(r"[a-z]+", owner.lower())):
+            return True
+    return False
+
+
 async def _log(db: AppDB, ref: str, sender: str, text: str | None, received: datetime | None, status_: str,
                reason: str | None, p: ParsedSms, ids: dict[str, str | None]) -> None:
     row = {
@@ -326,6 +338,9 @@ async def handle_sms(
             parsed.reason = "could not read it (no LLM available)"
     elif parsed.kind == "unknown" and not looks_like_bank(sender, text):
         parsed.reason = "not a bank message"
+    beneficiary = parsed.extra.get("beneficiary")
+    if beneficiary and _is_owner(state, beneficiary):
+        parsed.kind, parsed.reason = "ignored", "transfer to your own account (not spending)"
     if re.fullmatch(r"\s*%\w+%\s*", text or "") or re.fullmatch(r"\s*%\w+%\s*", sender or ""):
         parsed.kind, parsed.reason = "ignored", "test from the forwarding app (its %placeholders% were not filled in)"
     out["parsed"] = parsed.public()

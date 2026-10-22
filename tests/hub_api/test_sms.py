@@ -304,4 +304,19 @@ def test_owner_real_attijari_and_bmce_formats() -> None:
     assert rejected.kind == "ignored" and rejected.reason.startswith("payment rejected")
     bmce = parse_sms("BKOFAFRICA", "OPERATION SUR BMCE DIRECT DE 500,00 MAD AU PROFIT DE TEST BENEFICIAIRE COMPTE "
                      "011388000001200000325396 CODE DE CONFIRMATION : 293440 UTILISABLE JUSQU'A 18h09", today)
-    assert (bmce.kind, bmce.reason) == ("ignored", "one-time code")
+    # Owner's choice: BMCE Direct only sends the confirmation code, so the transfer counts as spent right away.
+    assert (bmce.kind, bmce.amount, bmce.merchant, bmce.date) == ("expense", 500.0, "Virement à Test Beneficiaire", "2026-10-22")
+    assert bmce.extra["beneficiary"] == "Test Beneficiaire"
+
+
+def test_bmce_transfer_to_someone_else_is_spent_to_self_is_not(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OWNER_NAMES", "Ilyas Ouhnine, I. Ouhnine")
+    text = ("OPERATION SUR BMCE DIRECT DE 454,00 MAD AU PROFIT DE OUHNINE ILYAS COMPTE 007486000885530040004880 "
+            "CODE DE CONFIRMATION : 053179 UTILISABLE JUSQU'A 18h02")
+    out = _sms(app_hub, text, sender="BKOFAFRICA", stamp=11)
+    assert out["ignored"] == "transfer to your own account (not spending)" and out["expense"] is None
+    out = _sms(app_hub, text.replace("454,00", "500,00").replace("OUHNINE ILYAS", "TEST BENEFICIAIRE"), sender="BKOFAFRICA", stamp=12)
+    assert out["status"] == "created" and out["expense"]["merchant"] == "Virement à Test Beneficiaire"
+    assert out["expense"]["total"] == 500.0
+    logged = app_hub.get("/money/sms/log").json()["messages"]
+    assert all("053179" not in (m["text"] or "") and "293440" not in (m["text"] or "") for m in logged)  # codes masked

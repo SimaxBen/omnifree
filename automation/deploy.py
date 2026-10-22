@@ -686,6 +686,7 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         # Email receipt import (hub_api/routers/inbox.py): the account list plus each account's password key.
         names.update(dict.fromkeys(("INBOX_ACCOUNTS", "GMAIL_IMAP_USER", "GMAIL_APP_PASSWORD")))
         names["SMS_WEBHOOK_TOKEN"] = None  # bank SMS webhook (hub_api/routers/sms.py)
+        names["OWNER_NAMES"] = None  # bank SMS: transfers to these names are not spending
         names.update(dict.fromkeys(self._inbox_password_keys()))
         # Push notifications (hub_api/notifier.py) and the calendar feed (hub_api/routers/calendar.py).
         names.update(dict.fromkeys(("NTFY_TOPIC", "NTFY_SERVER", "NTFY_TOKEN", "CALENDAR_FEED_TOKEN")))

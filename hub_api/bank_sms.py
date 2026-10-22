@@ -69,6 +69,12 @@ _AD_RE = re.compile(
     r"remise|reduction|bonus|cadeau|black friday|nouveau service|telechargez)\b",
     re.I,
 )
+# "OPERATION SUR BMCE DIRECT DE 500,00 MAD AU PROFIT DE X COMPTE 0113... CODE DE CONFIRMATION : 293440"
+_ONLINE_TRANSFER_RE = re.compile(
+    rf"\boperation sur [a-z ]*direct de (?P<amt>{_NUM})\s*(?P<cur>{_CUR})\s+au profit de (?P<name>[a-z' .-]+?)"
+    r"\s+compte\b.*\bcode de confirmation\b",
+    re.I | re.S,
+)
 _REJECTED_RE = re.compile(r"\b(?:rejete|refuse|declined|rejected|echoue|failed|non abouti)\b", re.I)
 _WITHDRAWAL_RE = re.compile(r"\b(?:retrait|withdrawal|cash ?withdraw\w*|gab|dab|atm)\b|سحب", re.I)
 _CREDIT_RE = re.compile(
@@ -290,6 +296,17 @@ def parse_sms(sender: str | None, text: str, today: date, received: datetime | N
     bank = bank_for(sender, raw)
     if not raw:
         return ParsedSms("ignored", bank, reason="empty message")
+    transfer = _ONLINE_TRANSFER_RE.search(_plain(raw))
+    if transfer:
+        # BMCE Direct only texts the confirmation code of an online transfer, never an "executed" SMS:
+        # the owner chose to record it as spent right away (the router skips transfers to themselves).
+        name = re.sub(r"\s+", " ", transfer.group("name")).strip().title()
+        return ParsedSms(
+            "expense", bank, amount=round(abs(parse_amount(transfer.group("amt")) or 0.0), 2),
+            currency=_currency(transfer.group("cur")), merchant=f"Virement à {name}"[:80],
+            date=(received.date() if received else today).isoformat(), category="other",
+            extra={"beneficiary": name, "confirmation_code": True},
+        )
     reason = ignore_reason(raw)
     if reason:
         return ParsedSms("ignored", bank, reason=reason)

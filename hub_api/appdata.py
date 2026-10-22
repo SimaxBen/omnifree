@@ -164,14 +164,31 @@ def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def local_tz() -> tzinfo:
-    """Africa/Casablanca (fixed UTC+1 when the tz database is unavailable)."""
-    try:
-        from zoneinfo import ZoneInfo
+_LOCAL_TZ: tzinfo | None = None
 
-        return ZoneInfo("Africa/Casablanca")
-    except Exception:  # noqa: BLE001 - missing tzdata on slim images
-        return timezone(timedelta(hours=1), "UTC+01")
+
+def local_tz() -> tzinfo:
+    """Africa/Casablanca, read from the ``tzdata`` package first.
+
+    The system database can be years old (Vercel's runtime still has Morocco on UTC+0 in October),
+    so the pinned ``tzdata`` wheel wins; then the system database; then a fixed UTC+1.
+    """
+    global _LOCAL_TZ
+    if _LOCAL_TZ is None:
+        try:
+            from importlib import resources
+            from zoneinfo import ZoneInfo
+
+            with resources.files("tzdata.zoneinfo").joinpath("Africa/Casablanca").open("rb") as fh:
+                _LOCAL_TZ = ZoneInfo.from_file(fh, key="Africa/Casablanca")
+        except Exception:  # noqa: BLE001 - tzdata wheel missing
+            try:
+                from zoneinfo import ZoneInfo
+
+                _LOCAL_TZ = ZoneInfo("Africa/Casablanca")
+            except Exception:  # noqa: BLE001 - no tz database at all on slim images
+                _LOCAL_TZ = timezone(timedelta(hours=1), "UTC+01")
+    return _LOCAL_TZ
 
 
 def local_now() -> datetime:
