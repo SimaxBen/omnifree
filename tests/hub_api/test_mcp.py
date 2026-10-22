@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "schedules_list", "schedule_create", "budget_status", "chats_list",
     "money_overview", "income_add", "account_set_balance", "calendar_events", "calendar_add_event",
     "goals_list", "goal_contribute",
+    "saved_add", "saved_search", "saved_list", "collections_list", "saved_ask",
 }
 
 

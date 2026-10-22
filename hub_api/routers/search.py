@@ -2,8 +2,8 @@
 
 ``GET /search?q=...&types=notes,tasks&limit=8`` answers typed results grouped per type, best group first:
 notes (title, body), tasks (title, details), expenses (merchant, note, category), incomes (source, note,
-category), Drive files (key/file name), saved AI chats (title, messages) and short links / file drops (title,
-URL, code, file name).
+category), Drive files (key/file name), saved AI chats (title, messages), short links / file drops (title,
+URL, code, file name) and the Saved library (title, tags, site, note, summary).
 
 Matching is accent- and case-insensitive (``Café`` matches ``cafe``): every query word must appear somewhere in
 the item. Scoring is simple and deterministic: a hit in the title is worth more than one in the body, a whole
@@ -42,9 +42,9 @@ log = logging.getLogger("omnifree.hub.search")
 
 router = APIRouter(tags=["search"])
 
-TYPES: tuple[str, ...] = ("notes", "tasks", "expenses", "incomes", "files", "chats", "links")
+TYPES: tuple[str, ...] = ("notes", "tasks", "expenses", "incomes", "files", "chats", "links", "saved")
 LABELS = {"notes": "Notes", "tasks": "Tasks", "expenses": "Expenses", "incomes": "Income", "files": "Drive",
-          "chats": "AI chats", "links": "Links & drops"}
+          "chats": "AI chats", "links": "Links & drops", "saved": "Saved"}
 SCAN_ROWS = 2000  # newest rows scored per table
 CHAT_ROWS = 400  # chats carry their whole conversation: fewer rows
 DRIVE_LIST_LIMIT = 5000
@@ -305,6 +305,32 @@ def _score_links(links: list[dict[str, Any]], drops: list[dict[str, Any]], terms
     return out
 
 
+async def _saved(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
+    rows = await _rows(db, "SELECT id, kind, url, title, site, summary, description, tags, note, content_type, image_url,"
+                           " saved_at FROM app_saved ORDER BY saved_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_saved, rows, terms)
+
+
+def _score_saved(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
+    """The Saved library (links, quotes, files saved with /saved): title first, then tags, site, note, summary."""
+    out = []
+    for r in rows:
+        try:
+            tags = " ".join(str(t) for t in json.loads(r.get("tags") or "[]"))
+        except (TypeError, ValueError):
+            tags = ""
+        summary = r.get("summary") or r.get("description") or ""
+        s = score_item([Field(r.get("title") or "", 3, True), Field(tags, 1.5), Field(r.get("site") or "", 1.5),
+                        Field(r.get("note") or "", 1), Field(summary, 1)], terms)
+        if s:
+            out.append(_hit("saved", r["id"], r.get("title") or r.get("url") or "Saved item", s,
+                            snippet_text=snippet(summary or r.get("note") or r.get("url") or "", terms),
+                            date=r.get("saved_at"),
+                            data={"url": r.get("url"), "site": r.get("site") or "", "type": r.get("content_type") or "other",
+                                  "kind": r.get("kind"), "image_url": r.get("image_url")}))
+    return out
+
+
 # (router, monotonic time, listing): the last Drive listing, reused for DRIVE_CACHE_S. Holding the router itself
 # (not its id) means a new hub state (tests, a cold start) never reads another state's listing.
 _drive_cache: tuple[Any, float, dict[str, Any]] | None = None
@@ -375,6 +401,7 @@ async def search(
         "files": lambda: _files(state, terms),
         "chats": lambda: _chats(db, terms),
         "links": lambda: _links(db, terms),
+        "saved": lambda: _saved(db, terms),
     }
     found: dict[str, list[dict[str, Any]]] = {}
     errors: dict[str, str] = {}

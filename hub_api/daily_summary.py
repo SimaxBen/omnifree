@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from hub_api import gcal
@@ -24,7 +24,7 @@ from hub_api.appdata import AppDB
 from hub_api.routers.notify import MAX_TASK_LINES, Push, _day_label, _due_at, _event_time, _plural, fmt_money
 from hub_api.state import HubState
 
-__all__ = ["compose_summary", "SUMMARY_TAG", "summary_lines", "money_line", "next_tasks"]
+__all__ = ["compose_summary", "SUMMARY_TAG", "summary_lines", "money_line", "next_tasks", "saved_line"]
 
 log = logging.getLogger("omnifree.hub.summary")
 
@@ -108,12 +108,29 @@ async def _overview(db: AppDB, today: date) -> dict[str, Any] | None:
         return None
 
 
+async def saved_line(db: AppDB, today: date) -> str | None:
+    """"Enregistrés depuis hier : N éléments" (Saved library), or None when nothing was saved / no table yet."""
+    from hub_api.appdata import iso, local_tz
+    from hub_api.routers.saved import count_saved_since
+
+    start = datetime(today.year, today.month, today.day, tzinfo=local_tz()) - timedelta(days=1)
+    try:
+        n = await asyncio.wait_for(count_saved_since(db, iso(start)), MONEY_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - the summary still goes out without the saved line
+        log.info("saved count for the summary unavailable: %r", exc)
+        return None
+    return f"Enregistrés depuis hier : {_plural(n, 'élément')}" if n else None
+
+
 async def compose_summary(state: HubState, db: AppDB, today: date, now: datetime) -> Push:
-    events, (tasks, overdue), overview = await asyncio.gather(
+    events, (tasks, overdue), overview, saved = await asyncio.gather(
         gcal.agenda_day(state, today, timeout_s=AGENDA_TIMEOUT_S), next_tasks(db, today), _overview(db, today),
+        saved_line(db, today),
     )
     today_tasks = [t for t in tasks if str(t["due"])[:10] == today.isoformat()]
     lines = summary_lines(events, tasks, overdue, money_line(overview), today, now)
+    if saved:
+        lines = [ln for ln in lines if ln != "Rien de prévu aujourd'hui."] + [saved]
     parts = [p for p in (events and _plural(len(events), 'événement'), today_tasks and _plural(len(today_tasks), 'tâche')) if p]
     return Push(
         title=f"Aujourd'hui, {_day_label(today)}" + (f" : {', '.join(parts)}" if parts else ""),

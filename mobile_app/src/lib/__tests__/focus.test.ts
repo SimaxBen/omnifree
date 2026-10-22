@@ -31,7 +31,7 @@ describe('split search', () => {
   });
 
   it('covers every type once', () => {
-    expect([...FAST_TYPES, ...SLOW_TYPES].sort()).toEqual(['chats', 'expenses', 'files', 'incomes', 'links', 'notes', 'tasks']);
+    expect([...FAST_TYPES, ...SLOW_TYPES].sort()).toEqual(['chats', 'expenses', 'files', 'incomes', 'links', 'notes', 'saved', 'tasks']);
   });
 
   it('merges the parts answered so far, best group first', () => {

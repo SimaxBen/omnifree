@@ -4,7 +4,7 @@
 
 import { useEffect, useRef } from 'react';
 
-export type FocusKind = 'task' | 'link' | 'drop';
+export type FocusKind = 'task' | 'link' | 'drop' | 'saved';
 
 export interface FocusRequest<T = unknown> {
   kind: FocusKind;

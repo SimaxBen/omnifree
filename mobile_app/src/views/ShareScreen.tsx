@@ -25,8 +25,12 @@ import {
   type SharedPayload,
 } from '../lib/share';
 import type { ShortLink } from '../lib/types';
+import { saveRequestFromShare, savedFileKey, type SaveResult, type SaveRequest } from '../lib/saved';
+import { requestFocus } from '../lib/focus';
+import SharedSaveCard from './saved/SharedSaveCard';
 
 const ACTIONS: Record<ShareAction, { icon: IconName; label: string; hint: string; tone: string }> = {
+  save: { icon: 'bookmark', label: 'Save', hint: 'Keep it in Saved: find it later by describing it', tone: 'bg-signal text-ink-950' },
   receipt: { icon: 'receipt', label: 'Expense', hint: 'Read the receipt into an expense', tone: 'bg-mint-400/15 text-mint-400' },
   voice: { icon: 'mic', label: 'Voice note', hint: 'Transcribe into a note or tasks', tone: 'bg-danger-400/15 text-danger-400' },
   drive: { icon: 'upload', label: 'Drive', hint: 'Upload to Drive / Shared', tone: 'bg-[#7FA8FF]/15 text-[#A9CBFF]' },
@@ -45,6 +49,7 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
   const [busy, setBusy] = useState<ShareAction | null>(null);
   const [link, setLink] = useState<ShortLink | null>(null);
   const [taskOpen, setTaskOpen] = useState(false);
+  const [saved, setSaved] = useState<SaveResult | null>(null);
   const failed = /[?&]error=1/.test(window.location.hash);
 
   useEffect(() => {
@@ -104,6 +109,20 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
         announce('notes', 'tasks');
         notify(res.note ? 'Voice note saved' : `${res.tasks.length} task${res.tasks.length === 1 ? '' : 's'} added`, 'ok');
         finish(() => (res.note ? actions.openNote(res.note) : go('notes', 'tasks')));
+      } else if (a === 'save') {
+        let req: SaveRequest | null;
+        if (payload.files.length) {
+          const [file] = await files();
+          const up = await client.driveUploadFile(file, { key: savedFileKey(file.name) });
+          const note = [payload.title.trim(), sharedText(payload)].filter(Boolean).join('\n\n');
+          req = { key: up.key, ...(up.provider ? { provider: up.provider } : {}), ...(note ? { note: note.slice(0, 4000) } : {}) };
+        } else req = saveRequestFromShare(payload);
+        if (!req) throw new Error('Nothing to save in what was shared');
+        const res = await client.savedSave(req);
+        announce('saved');
+        haptic(14);
+        setSaved(res);
+        notify(res.duplicate ? 'Already saved: moved to the top' : `Saved: ${res.item.title.slice(0, 60)}`, 'ok');
       } else if (a === 'link') {
         const made = await client.createLink({ url: sharedUrl(payload), ...(payload.title.trim() ? { title: payload.title.trim().slice(0, 300) } : {}) });
         announce('links');
@@ -155,6 +174,28 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
               ))}
             </Card>
 
+            {busy === 'save' && (
+              <Card className="flex items-center gap-3 p-4">
+                <span className="spin h-5 w-5 shrink-0 rounded-full border-2 border-signal border-t-transparent" />
+                <p className="min-w-0 flex-1 text-[14px] text-ink-300">Saving and reading the page…</p>
+                <Button variant="ghost" onClick={() => finish()}>
+                  Hide
+                </Button>
+              </Card>
+            )}
+
+            {saved && (
+              <SharedSaveCard
+                result={saved}
+                onChange={(item) => setSaved({ ...saved, item })}
+                onOpen={() => {
+                  requestFocus({ kind: 'saved', id: saved.item.id, data: { item: saved.item } });
+                  finish(() => go('more', 'saved'));
+                }}
+                onDone={() => finish()}
+              />
+            )}
+
             {link && (
               <Card className="flex items-center gap-2 p-3">
                 <span className="min-w-0 flex-1 truncate font-mono text-[14px] text-ink-100">{link.short_url}</span>
@@ -170,6 +211,27 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
             <div className="grid grid-cols-2 gap-3">
               {shareActions(payload).map((a, i) => {
                 const meta = ACTIONS[a];
+                if (a === 'save') {
+                  // The default: one wide button on top, one tap saves.
+                  return (
+                    <button
+                      key={a}
+                      type="button"
+                      onClick={() => void run(a)}
+                      disabled={!!busy || !!saved}
+                      style={riseStyle(i)}
+                      className="press rise col-span-2 flex min-h-[84px] items-center gap-4 rounded-card bg-signal/10 p-4 text-left ring-1 ring-inset ring-signal/40 active:bg-signal/15 disabled:opacity-50"
+                    >
+                      <span className={cx('grid h-12 w-12 shrink-0 place-items-center rounded-full', meta.tone)}>
+                        {busy === a ? <span className="spin h-5 w-5 rounded-full border-2 border-current border-t-transparent" /> : <Icon name={saved ? 'check' : meta.icon} size={24} />}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block font-display text-[18px] font-semibold text-ink-100">{saved ? 'Saved' : meta.label}</span>
+                        <span className="block text-[13px] leading-snug text-ink-300">{meta.hint}</span>
+                      </span>
+                    </button>
+                  );
+                }
                 return (
                   <button
                     key={a}

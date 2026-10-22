@@ -52,7 +52,7 @@ from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
 from hub_api.errors import error_body
-from hub_api.routers import chats, cron, drive, expenses, links, llm, money, money_plus, notes, rag
+from hub_api.routers import chats, cron, drive, expenses, links, llm, money, money_plus, notes, rag, saved
 from hub_api.routers import gcal as gcal_router
 from hub_api.state import HubState
 
@@ -84,7 +84,7 @@ UPDATES = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempote
 INSTRUCTIONS = (
     "OmniFree is the user's personal cloud: a pooled free-tier LLM gateway with failover, a unified Drive "
     "across several storage backends, 'Ask my Drive' (RAG with citations), notes, tasks, expenses, money (incomes, accounts, budgets), short "
-    "links, file drops, scheduled HTTP jobs, a free-tier budget and the owner's Google Calendar (read the agenda, add events). Dates use the Africa/Casablanca time "
+    "links, file drops, a Saved library (links, videos, posts and quotes, found again by describing them), scheduled HTTP jobs, a free-tier budget and the owner's Google Calendar (read the agenda, add events). Dates use the Africa/Casablanca time "
     "zone; amounts default to MAD. Nothing here deletes data: deletions are done by the user in the app."
 )
 
@@ -727,6 +727,94 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
             max_downloads=max_downloads,
         )
         return await links.create_drop(body, state=state, db=await links_db())
+
+    # ----------------------------------------------------------------- saved library
+
+    async def saved_store_db() -> AppDB:
+        return await saved.saved_db(appdb())
+
+    @tool(
+        description=(
+            "Save a link (article, YouTube video, X post, app, product ...) or a text/quote to the owner's Saved "
+            "library. Links are enriched (title, site, image, text), summarised, tagged and given a suggested "
+            "collection. Saving a link already saved bumps the existing item (`duplicate` true)."
+        ),
+        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True,
+                                    open_world_hint=True),
+    )
+    @_guard
+    async def saved_add(
+        url: Annotated[str | None, Field(description="Absolute http(s) URL to save.")] = None,
+        text: Annotated[str | None, Field(max_length=20_000, description="Plain text or a quote (when no URL).")] = None,
+        note: Annotated[str | None, Field(max_length=4000, description="The owner's note.")] = None,
+        collection: Annotated[str | None, Field(max_length=60, description="Collection name (created when missing).")] = None,
+    ) -> dict[str, Any]:
+        body = saved.SaveBody(url=url, text=text, note=note, collection=collection)
+        result = await saved.save_item(state, await saved_store_db(), body)
+        item = result["item"]
+        return {"duplicate": result["duplicate"], "item": {k: item.get(k) for k in (
+            "id", "title", "url", "site", "type", "summary", "tags", "note", "collection_id", "suggestion",
+            "enrich_status", "saved_at")}}
+
+    @tool(
+        description=(
+            "Find saved items by describing them in any words or language (\"the video about a nostalgic football "
+            "song\", \"l'article sur le manager engineering\", \"une app pour marcher\"): hybrid meaning + keyword "
+            "search. Each result gives the item, why it matched and a snippet."
+        ),
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def saved_search(
+        query: Annotated[str, Field(min_length=1, max_length=300, description="A description of what was saved.")],
+        limit: Annotated[int, Field(ge=1, le=30)] = 8,
+    ) -> dict[str, Any]:
+        found = await saved.search_items(state, await saved_store_db(), query, limit=limit)
+        return {"query": query, "mode": found["mode"], "results": [{
+            "id": r["item"]["id"], "title": r["item"]["title"], "url": r["item"].get("url"), "site": r["item"]["site"],
+            "type": r["item"]["type"], "summary": r["item"].get("summary"), "tags": r["item"]["tags"],
+            "saved_at": r["item"].get("saved_at"), "reason": r["reason"], "snippet": r["snippet"],
+        } for r in found["results"]]}
+
+    @tool(
+        description="List saved items, newest first, optionally in one collection (id, or 'none' = Uncategorised) "
+                    "or of one content type (article, video, social post, app, music ...).",
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def saved_list(
+        collection: Annotated[str | None, Field(description="Collection id from collections_list, or 'none'.")] = None,
+        type: Annotated[str | None, Field(description="Content type, e.g. 'video'.")] = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    ) -> dict[str, Any]:
+        if type is not None and type not in saved.CONTENT_TYPES:
+            raise ToolError(f"unknown type '{type}' (one of: {', '.join(saved.CONTENT_TYPES)})")
+        listing = await saved.list_items(state, await saved_store_db(), collection=collection, ctype=type, limit=limit)
+        keep = ("id", "title", "url", "site", "type", "summary", "tags", "note", "collection_id", "saved_at")
+        return {"total": listing["total"], "items": [{k: i.get(k) for k in keep} for i in listing["items"]]}
+
+    @tool(
+        description="Saved-library collections with their item counts, the Uncategorised count and the smart "
+                    "collections by content type (Videos, Articles, Apps ...).",
+        annotations=READ_ONLY,
+    )
+    @_guard
+    async def collections_list() -> dict[str, Any]:
+        return await saved.list_collections(await saved_store_db())
+
+    @tool(
+        description=(
+            "Ask a question about the owner's saved items (\"what did I save about productivity last month?\"): "
+            "answers from the saved items only, with [n] citations to `sources`."
+        ),
+        annotations=READ_ONLY_OPEN,
+    )
+    @_guard
+    async def saved_ask(
+        question: Annotated[str, Field(min_length=1, max_length=2000)],
+        top_k: Annotated[int, Field(ge=1, le=15)] = 8,
+    ) -> dict[str, Any]:
+        return await saved.ask_saved(state, await saved_store_db(), saved.AskBody(question=question, top_k=top_k))
 
     # ----------------------------------------------------------------- schedules
 

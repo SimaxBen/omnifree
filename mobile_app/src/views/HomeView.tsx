@@ -15,6 +15,7 @@ import { usePullRefresh, useNav } from '../lib/nav';
 import type { Task } from '../lib/types';
 import { MORE_PAGES } from './MoreView';
 import PlanCard from './PlanCard';
+import RecentlySaved from './saved/RecentlySaved';
 import { TaskRow } from './notes/TaskRow';
 
 export default function HomeView() {
@@ -281,6 +282,8 @@ export default function HomeView() {
           ))}
         </div>
       </section>
+
+      <RecentlySaved />
 
       {recentFiles.length > 0 && (
         <section>

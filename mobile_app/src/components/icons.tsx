@@ -63,6 +63,7 @@ const PATHS = {
   cash: 'M3 6h18v12H3z M12 9a3 3 0 110 6 3 3 0 010-6z M6.5 9.5v.01 M17.5 14.5v.01',
   repeat: 'M17 3l3 3-3 3 M4 11V9a3 3 0 013-3h13 M7 21l-3-3 3-3 M20 13v2a3 3 0 01-3 3H4',
   bell: 'M6 16V11a6 6 0 0112 0v5l2 2H4l2-2z M10 20a2 2 0 004 0',
+  bookmark: 'M6 3h12v18l-6-4.5L6 21V3z',
 } as const;
 
 export type IconName = keyof typeof PATHS;

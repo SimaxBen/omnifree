@@ -17,11 +17,12 @@ export const RESULT_ICON: Record<SearchResultType, IconName> = {
   files: 'file',
   chats: 'chat',
   links: 'link',
+  saved: 'bookmark',
 };
 
 /** Everything but the Drive: D1 scans that answer fast. The Drive listing (every backend) is asked separately so
  *  these groups show without waiting for it. */
-export const FAST_TYPES: SearchResultType[] = ['notes', 'tasks', 'expenses', 'incomes', 'chats', 'links'];
+export const FAST_TYPES: SearchResultType[] = ['notes', 'tasks', 'expenses', 'incomes', 'chats', 'links', 'saved'];
 export const SLOW_TYPES: SearchResultType[] = ['files'];
 
 /** One response from the parts answered so far (groups ordered by their best hit, as the hub does). */

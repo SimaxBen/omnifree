@@ -55,7 +55,7 @@ export default defineConfig({
         importScripts: ['push-sw.js', 'share-sw.js'],
         navigateFallback: '/index.html',
         // The hub API is always live data: never serve it from the service worker cache.
-        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|notify|push|search|share-target|s|d)\b/],
+        navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|notify|push|search|saved|share-target|s|d)\b/],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',

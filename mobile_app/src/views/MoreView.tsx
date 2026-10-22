@@ -17,6 +17,7 @@ import SchedulesView from './SchedulesView';
 import SettingsView from './SettingsView';
 import SummaryView from './SummaryView';
 import SwitchboardView from './SwitchboardView';
+import SavedView from './saved/SavedView';
 
 export interface MorePage {
   id: string;
@@ -29,6 +30,7 @@ export interface MorePage {
 }
 
 export const MORE_PAGES: MorePage[] = [
+  { id: 'saved', title: 'Saved', short: 'Saved', subtitle: 'Links, videos and posts: find them by describing them', icon: 'bookmark', group: 'life' },
   { id: 'money', title: 'Money', short: 'Money', subtitle: 'Income, spending, budgets and accounts', icon: 'cash', group: 'life' },
   { id: 'summary', title: 'Summary', short: 'Summary', subtitle: 'Your week or month at a glance', icon: 'chart', group: 'life' },
   { id: 'expenses', title: 'Expenses', short: 'Expenses', subtitle: 'Receipts and spending by month', icon: 'wallet', group: 'life' },
@@ -48,6 +50,8 @@ export const MORE_PAGES: MorePage[] = [
 function Page({ id }: { id: string }): ReactNode {
   const { go } = useNav();
   switch (id) {
+    case 'saved':
+      return <SavedView />;
     case 'money':
       return <MoneyView />;
     case 'summary':

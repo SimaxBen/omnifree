@@ -1,5 +1,6 @@
 // Android share target: what public/share-sw.js stashed in Cache Storage, and the pure helpers the Share screen
-// uses to offer the right actions (note, task, receipt scan, Drive upload, short link, Ask AI, transcription).
+// uses to offer the right actions (save to the Saved library, note, task, receipt scan, Drive upload, short link,
+// Ask AI, transcription).
 
 export const SHARE_CACHE = 'omnifree-share';
 export const SHARE_META = '/__share/meta.json';
@@ -20,7 +21,7 @@ export interface SharedPayload {
   files: SharedFileMeta[];
 }
 
-export type ShareAction = 'receipt' | 'drive' | 'voice' | 'link' | 'note' | 'task' | 'ai';
+export type ShareAction = 'save' | 'receipt' | 'drive' | 'voice' | 'link' | 'note' | 'task' | 'ai';
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/i;
 
@@ -50,11 +51,17 @@ export function isAudioFile(f: Pick<SharedFileMeta, 'type' | 'name'>): boolean {
   return /^audio\//.test(f.type) || /\.(m4a|mp3|ogg|opus|wav|webm|aac|amr|3gp)$/i.test(f.name);
 }
 
-/** The actions that make sense for a payload, the most likely first. */
+/** True for one shared image or PDF: the Saved library keeps it (Drive upload, then a summary and a thumbnail). */
+export function isSavableFile(f: Pick<SharedFileMeta, 'type' | 'name'>): boolean {
+  return isReceiptFile(f);
+}
+
+/** The actions that make sense for a payload, the most likely first: Save (the Saved library) always leads. */
 export function shareActions(p: SharedPayload): ShareAction[] {
   const out: ShareAction[] = [];
   const hasText = !!(sharedText(p) || p.title.trim());
   const url = sharedUrl(p);
+  if (p.files.length ? p.files.length === 1 && isSavableFile(p.files[0]) : hasText || !!url) out.push('save');
   if (p.files.length === 1 && isAudioFile(p.files[0])) out.push('voice');
   if (p.files.length === 1 && isReceiptFile(p.files[0])) out.push('receipt');
   if (p.files.length) out.push('drive');

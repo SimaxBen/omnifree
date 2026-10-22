@@ -35,6 +35,6 @@ describe('global search helpers', () => {
   });
 
   it('has an icon for every result type', () => {
-    expect(Object.keys(RESULT_ICON).sort()).toEqual(['chats', 'expenses', 'files', 'incomes', 'links', 'notes', 'tasks']);
+    expect(Object.keys(RESULT_ICON).sort()).toEqual(['chats', 'expenses', 'files', 'incomes', 'links', 'notes', 'saved', 'tasks']);
   });
 });
