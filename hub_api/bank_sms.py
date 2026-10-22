@@ -60,7 +60,7 @@ _BALANCE_RE = re.compile(r"(?:solde|balance|رصيد|sold)\b", re.I)
 
 _OTP_RE = re.compile(
     r"\b(?:otp|one[- ]time|mot de passe|password|code (?:de )?(?:confirmation|verification|securite|validation|d'activation|"
-    r"secret|otp)|votre code|your code|code\s*:|3d ?secure|ne (?:le )?communiquez|ne (?:le )?partagez|do not share)\b|"
+    r"secret|otp)|votre code|your code|code\s*:|3d ?secure|saisir le code|afin d'authentifier|pour authentifier|ne (?:le )?communiquez|ne (?:le )?partagez|do not share)\b|"
     r"رمز|كود|القن السري",
     re.I,
 )
@@ -69,6 +69,7 @@ _AD_RE = re.compile(
     r"remise|reduction|bonus|cadeau|black friday|nouveau service|telechargez)\b",
     re.I,
 )
+_REJECTED_RE = re.compile(r"\b(?:rejete|refuse|declined|rejected|echoue|failed|non abouti)\b", re.I)
 _WITHDRAWAL_RE = re.compile(r"\b(?:retrait|withdrawal|cash ?withdraw\w*|gab|dab|atm)\b|سحب", re.I)
 _CREDIT_RE = re.compile(
     r"\b(?:vir(?:ement)?\.?\s*(?:re[cç]u|recu|entrant|en votre faveur)|virement de\b.*\ben votre faveur|"
@@ -91,7 +92,7 @@ _SALARY_RE = re.compile(r"\b(?:salaire|salary|paie|traitement|remuneration)\b", 
 
 _STOP = (
     r"(?=\s+(?:le|on|du|en date|pour|avec|par carte|d'un|d un|de\s+-?\d|via|ref|réf|solde|sold|balance|carte|card|"
-    r"a\s+\d|à\s+\d|at\s+\d|بتاريخ|يوم|بمبلغ)\b|\s+\d{1,2}[/.-]\d{1,2}|\s+-?\d[\d  .,]*\s*" + _CUR + r"|\s*[,;!()\n]|\.\s|\.$|\s+-\s|$)"
+    r"a\s+\d|à\s+\d|at\s+\d|a bien|a ete|est|بتاريخ|يوم|بمبلغ)\b|\s+\d{1,2}[/.-]\d{1,2}|\s+-?\d[\d  .,]*\s*" + _CUR + r"|\s*[,;!()\n]|\.\s|\.$|\s+-\s|$)"
 )
 _MERCHANT_RES = (
     re.compile(rf"\b(?:chez|aupr[eè]s de|at|au profit de|en faveur de|b[eé]n[eé]ficiaire\s*:?|merchant\s*:?|commer[cç]ant\s*:?)\s+(?P<m>[^\n,;]+?){_STOP}", re.I),
@@ -202,6 +203,8 @@ def ignore_reason(text: str) -> str | None:
     plain = _plain(text)
     if _OTP_RE.search(plain):
         return "one-time code"
+    if _REJECTED_RE.search(plain):
+        return "payment rejected (nothing was debited)"
     has_tx = _WITHDRAWAL_RE.search(plain) or _CREDIT_RE.search(plain) or _DEBIT_RE.search(plain)
     if _AD_RE.search(plain) and not has_tx:
         return "advertising"
@@ -246,7 +249,11 @@ def _clean_name(raw: str) -> str:
     name = re.sub(r"\s+", " ", raw).strip(" .:-*'\"()")
     name = re.sub(r"\s+(?:le|du|on|a|à|at)$", "", name, flags=re.I)
     name = _LONG_NUMBER_RE.sub("", name).strip()
-    return name[:80]
+    name = re.split(r"\s*>", name)[0]
+    # Payment-processor tails: "Spotify P4685E6A8B" (reference), "Glovo_pz" (terminal suffix).
+    name = re.sub(r"\s+(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,}$", "", name)
+    name = re.sub(r"_[A-Za-z0-9]{1,4}$", "", name)
+    return name.strip(" .:-*'\"()")[:80]
 
 
 def _first(patterns: tuple[re.Pattern[str], ...], text: str) -> str:

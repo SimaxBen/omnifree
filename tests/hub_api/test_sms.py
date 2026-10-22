@@ -285,3 +285,23 @@ def test_plain_text_and_empty_bodies(app_hub) -> None:
     assert r.status_code == 200 and r.json()["expense"]["merchant"] == "MAROC TELECOM"
     r = app_hub.client.post("/money/sms", content=b"", params={"token": SMS_TOKEN})
     assert r.json() == {"status": "ignored", "ignored": "empty message", "dry_run": False}
+
+
+# Real messages from the owner's phone (2026-10), anonymised where needed.
+def test_owner_real_attijari_and_bmce_formats() -> None:
+    today = date(2026, 10, 22)
+    glovo = parse_sms("ATTIJARI", "Nous vous informons que le paiement d'un montant de 220,79 MAD effectuée le 05/09/2026 "
+                      "à 23:48:35 chez Glovo_pz > a bien été exécuté.", today)
+    assert (glovo.kind, glovo.amount, glovo.merchant, glovo.date, glovo.category) == ("expense", 220.79, "Glovo", "2026-09-05", "food")
+    spotify = parse_sms("ATTIJARI", "Nous vous informons que le paiement d'un montant de 77,21 MAD effectuée le 05/09/2026 "
+                        "à 22:57:56 chez Spotify P4685E6A8B a bien été exécuté.", today)
+    assert (spotify.kind, spotify.amount, spotify.merchant, spotify.category) == ("expense", 77.21, "Spotify", "entertainment")
+    otp = parse_sms("ATTIJARI", "AFIN D'AUTHENTIFIER VOTRE ACHAT SUR INTERNET DU 10/09/2026 18:53:20 de 20.00 MAD ,"
+                    "VEUILLEZ SAISIR LE CODE 727218", today)
+    assert (otp.kind, otp.reason) == ("ignored", "one-time code")  # the "paiement ... exécuté" SMS records it
+    rejected = parse_sms("ATTIJARI", "Votre paiement a été rejeté en raison de la désactivation du service de paiement "
+                         "TPE/Internet. Veuillez le réactiver via Attijari Mobile et réessayer.", today)
+    assert rejected.kind == "ignored" and rejected.reason.startswith("payment rejected")
+    bmce = parse_sms("BKOFAFRICA", "OPERATION SUR BMCE DIRECT DE 500,00 MAD AU PROFIT DE TEST BENEFICIAIRE COMPTE "
+                     "011388000001200000325396 CODE DE CONFIRMATION : 293440 UTILISABLE JUSQU'A 18h09", today)
+    assert (bmce.kind, bmce.reason) == ("ignored", "one-time code")
