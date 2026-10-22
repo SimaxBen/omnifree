@@ -120,6 +120,13 @@ button,
 }
 .pop { animation: pop 280ms var(--ease-spring) both; }
 
+/* A row opened from global search (src/lib/focus.ts): a short saffron ring. */
+@keyframes focus-flash {
+  0%, 60% { box-shadow: 0 0 0 2px #FFC24B; }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+.focus-flash { border-radius: 16px; animation: focus-flash 1500ms var(--ease-out) both; }
+
 /* ------------------------------------------------------------------ skeletons */
 
 @keyframes shimmer {

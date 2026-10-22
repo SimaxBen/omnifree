@@ -3,7 +3,7 @@
 
 import type { IconName } from '../components/icons';
 import { readPref, writePref } from './settings';
-import type { SearchResultType } from './types';
+import type { SearchResponse, SearchResultType } from './types';
 
 export const RECENT_KEY = 'search.recent';
 export const MAX_RECENT = 8;
@@ -18,6 +18,25 @@ export const RESULT_ICON: Record<SearchResultType, IconName> = {
   chats: 'chat',
   links: 'link',
 };
+
+/** Everything but the Drive: D1 scans that answer fast. The Drive listing (every backend) is asked separately so
+ *  these groups show without waiting for it. */
+export const FAST_TYPES: SearchResultType[] = ['notes', 'tasks', 'expenses', 'incomes', 'chats', 'links'];
+export const SLOW_TYPES: SearchResultType[] = ['files'];
+
+/** One response from the parts answered so far (groups ordered by their best hit, as the hub does). */
+export function mergeSearch(parts: (SearchResponse | null | undefined)[]): SearchResponse | null {
+  const got = parts.filter((p): p is SearchResponse => !!p);
+  if (!got.length) return null;
+  const groups = got.flatMap((p) => p.groups).sort((a, b) => (b.items[0]?.score ?? 0) - (a.items[0]?.score ?? 0));
+  return {
+    query: got[0].query,
+    terms: got.find((p) => p.terms.length)?.terms ?? [],
+    total: got.reduce((n, p) => n + p.total, 0),
+    groups,
+    errors: Object.assign({}, ...got.map((p) => p.errors)) as Record<string, string>,
+  };
+}
 
 /** Lower case without accents ("Été" -> "ete"), one output character per input character when possible. */
 export function fold(text: string): string {

@@ -2,12 +2,19 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useHub } from '../lib/hub';
 import {
   DEFAULT_LOCK,
+  HARD_FAILS,
   MAX_FAILS,
+  clearFails,
+  expectReturn,
+  expectingReturn,
   lockEnabled,
   lockoutRemaining,
+  loadFailState,
   loadLockConfig,
+  recordFail,
   saveLockConfig,
   shouldLockOnResume,
+  takeExpectedReturn,
   tokenMatches,
   verifyBiometric,
   verifyPin,
@@ -20,6 +27,8 @@ import { Button, cx, haptic, inputClass } from './ui';
 // The app lock (see src/lib/lock.ts): locks on a cold start and after N minutes in the background, and covers
 // the screen while the app is hidden (app switcher thumbnail). The app stays mounted under the lock screen, so a
 // notification tap or a share that navigated while locked lands on its target right after unlocking.
+// Opening the app's own camera or file picker hides the page too (another Android activity): a click on any file
+// input marks that hand-off, so coming back with the photo within RETURN_GRACE_MS does not lock again.
 
 interface LockValue {
   config: LockConfig;
@@ -51,15 +60,25 @@ export default function AppLock({ children }: { children: ReactNode }) {
       if (document.visibilityState === 'hidden') {
         hiddenAt.current = Date.now();
         if (cfg.shield && lockEnabled(cfg)) setHidden(true);
-        if (lockEnabled(cfg) && cfg.afterMinutes === 0) setLocked(true);
+        if (lockEnabled(cfg) && cfg.afterMinutes === 0 && !expectingReturn()) setLocked(true);
         return;
       }
-      if (shouldLockOnResume(cfg, hiddenAt.current, Date.now())) setLocked(true);
+      const ownPicker = takeExpectedReturn();
+      if (!ownPicker && shouldLockOnResume(cfg, hiddenAt.current, Date.now())) setLocked(true);
       hiddenAt.current = null;
       setHidden(false);
     };
+    // Capture phase: also sees the programmatic input.click() of the capture sheets (receipt camera, uploads).
+    const onClick = (e: MouseEvent) => {
+      const t = e.target;
+      if (t instanceof HTMLInputElement && t.type === 'file') expectReturn();
+    };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('click', onClick, true);
+    };
   }, []);
 
   const update = useCallback((cfg: LockConfig) => {
@@ -101,14 +120,16 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
   const [pin, setPin] = useState('');
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fails, setFails] = useState(0);
-  const [lastFail, setLastFail] = useState<number | null>(null);
+  // Kept in localStorage: closing and reopening the app does not reset the count or the wait.
+  const [fails, setFails] = useState(() => loadFailState().fails);
+  const [lastFail, setLastFail] = useState<number | null>(() => loadFailState().lastFailAt);
   const [now, setNow] = useState(Date.now());
   const [recovering, setRecovering] = useState(false);
   const [token, setToken] = useState('');
   const triedBio = useRef(false);
   const length = config.pin?.length ?? 6;
   const wait = lockoutRemaining(fails, lastFail, now);
+  const blocked = !!config.pin && fails >= HARD_FAILS;
 
   useEffect(() => {
     if (!wait) return undefined;
@@ -121,6 +142,7 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
     setError(null);
     if (await verifyBiometric(config.credentialId)) {
       haptic(10);
+      clearFails();
       onUnlock();
     } else if (config.pin) {
       setError('Fingerprint not recognised: use your PIN');
@@ -143,20 +165,22 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
     setChecking(false);
     if (ok) {
       haptic(10);
+      clearFails();
       onUnlock();
       return;
     }
     haptic([30, 40, 30]);
-    const n = fails + 1;
+    const next = recordFail(Date.now());
+    const n = Math.max(next.fails, fails + 1);
     setFails(n);
-    setLastFail(Date.now());
+    setLastFail(next.lastFailAt);
     setNow(Date.now());
     setPin('');
     setError(n >= MAX_FAILS ? 'Too many tries' : 'Wrong PIN');
   };
 
   const press = (k: (typeof KEYS)[number]) => {
-    if (checking || wait) return;
+    if (checking || (wait && k !== 'bio') || (blocked && k !== 'bio')) return;
     haptic(5);
     setError(null);
     if (k === 'bio') {
@@ -179,6 +203,7 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
       setError('That is not the hub token saved in this app');
       return;
     }
+    clearFails();
     onReset();
     notify('Lock removed. Set a new PIN in Settings.', 'ok');
     go('more', 'settings');
@@ -227,7 +252,7 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
               </div>
             )}
             <p className={cx('h-5 text-center text-[13px]', error ? 'text-danger-400' : 'text-ink-500')}>
-              {wait ? `Try again in ${Math.ceil(wait / 1000)} s` : error ?? ''}
+              {blocked ? 'Too many wrong PINs: use Forgot PIN' : wait ? `Try again in ${Math.ceil(wait / 1000)} s` : error ?? ''}
             </p>
             <div className="grid w-full grid-cols-3 gap-3">
               {KEYS.map((k) => {
@@ -239,7 +264,7 @@ function LockScreen({ config, onUnlock, onReset }: { config: LockConfig; onUnloc
                     key={k}
                     type="button"
                     onClick={() => press(k)}
-                    disabled={checking || (!!wait && k !== 'bio')}
+                    disabled={checking || ((!!wait || blocked) && k !== 'bio')}
                     aria-label={k === 'bio' ? 'Unlock with fingerprint or face' : k === 'del' ? 'Delete digit' : k}
                     className={cx(
                       'press grid h-[68px] place-items-center rounded-full text-[26px] font-semibold disabled:opacity-40',

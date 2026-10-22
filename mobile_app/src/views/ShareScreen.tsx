@@ -40,7 +40,7 @@ const ACTIONS: Record<ShareAction, { icon: IconName; label: string; hint: string
 export default function ShareScreen({ onClose }: { onClose: (after?: () => void) => void }) {
   const { client, notify } = useHub();
   const actions = useActions();
-  const { go } = useNav();
+  const { route, go } = useNav();
   const [payload, setPayload] = useState<SharedPayload | null | undefined>(undefined);
   const [busy, setBusy] = useState<ShareAction | null>(null);
   const [link, setLink] = useState<ShortLink | null>(null);
@@ -78,8 +78,20 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
         const body = noteBodyOf(payload);
         finish(() => actions.newNote({ body }));
       } else if (a === 'ai') {
-        writePref('chat.draft', aiPromptOf(payload));
-        finish(() => go('ai'));
+        const prompt = aiPromptOf(payload);
+        // A fresh conversation with the shared text in its composer. ChatPanel reads both prefs when it mounts, so
+        // when the AI tab is already showing (the restored last tab) leave it first, as SearchScreen does.
+        const openChat = () => {
+          writePref('chat.current', '');
+          writePref('chat.draft', prompt);
+          go('ai');
+        };
+        finish(() => {
+          if (route.tab === 'ai') {
+            go('home');
+            window.setTimeout(openChat, 0);
+          } else openChat();
+        });
       } else if (a === 'receipt') {
         const [file] = await files();
         finish(() => actions.scanReceiptFile(file));

@@ -11,9 +11,12 @@ title / title prefix / word start more than a substring, and recent items win ti
 ``limit``; ``count`` is the number of matches before the cap.
 
 D1 has no accent folding (``LIKE`` is ASCII-only case-insensitive), so the newest :data:`SCAN_ROWS` rows of each
-table are scored in Python: plenty for one person's data, and every scan is bounded. A table that does not exist
-yet just gives no results; a slow or failing source (the Drive listing across backends) is reported in ``errors``
-without failing the others.
+table are scored in Python: plenty for one person's data, and every scan is bounded. Each field is folded in one
+pass and capped at :data:`MAX_FIELD_CHARS` (long AI chats), and the scoring runs in a worker thread so the per-source
+timeout really interrupts a slow source. A table that does not exist yet just gives no results; a slow or failing
+source is reported in ``errors`` without failing the others. The Drive listing (every backend, the slowest source)
+is cached for :data:`DRIVE_CACHE_S` so each refined query does not list the Drive again; the PWA also asks for the
+files group in a second request so the fast groups show first.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -45,7 +49,9 @@ SCAN_ROWS = 2000  # newest rows scored per table
 CHAT_ROWS = 400  # chats carry their whole conversation: fewer rows
 DRIVE_LIST_LIMIT = 5000
 DRIVE_TIMEOUT_S = 8.0
+DRIVE_CACHE_S = 60.0
 SOURCE_TIMEOUT_S = 15.0
+MAX_FIELD_CHARS = 30_000  # scored characters per field (a long chat is matched on its first 30 KB)
 SNIPPET_CHARS = 140
 MAX_TERMS = 8
 
@@ -58,12 +64,16 @@ def _fold_char(c: str) -> str:
 
 
 def fold(text: str) -> str:
-    """Lower case without accents: ``"Été à Fès"`` -> ``"ete a fes"``."""
-    return "".join(_fold_char(c) for c in text)
+    """Lower case without accents: ``"Été à Fès"`` -> ``"ete a fes"`` (one normalisation for the whole text)."""
+    if text.isascii():
+        return text.lower()
+    return "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch)).lower()
 
 
 def _fold_map(text: str) -> tuple[str, list[int]]:
     """The folded text and, for each folded character, the index of the original character it came from."""
+    if text.isascii():
+        return text.lower(), list(range(len(text)))
     out: list[str] = []
     index: list[int] = []
     for i, c in enumerate(text):
@@ -96,7 +106,7 @@ def _word_start(hay: str, pos: int) -> bool:
 
 def score_item(fields: Iterable[Field], terms: list[str]) -> float:
     """0 when a term is missing from every field; otherwise the sum of each term's best field score."""
-    folded = [(fold(f.text or ""), f) for f in fields]
+    folded = [(fold((f.text or "")[:MAX_FIELD_CHARS]), f) for f in fields]
     total = 0.0
     for term in terms:
         best = 0.0
@@ -128,7 +138,7 @@ def score_item(fields: Iterable[Field], terms: list[str]) -> float:
 
 def snippet(text: str, terms: list[str], width: int = SNIPPET_CHARS) -> str:
     """About ``width`` characters of ``text`` around its first matching term (whitespace collapsed)."""
-    flat = re.sub(r"\s+", " ", text or "").strip()
+    flat = re.sub(r"\s+", " ", (text or "")[:MAX_FIELD_CHARS]).strip()
     if not flat:
         return ""
     folded, index = _fold_map(flat)
@@ -173,6 +183,10 @@ def _hit(kind: str, item_id: str, title: str, score: float, *, snippet_text: str
 async def _notes(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
     rows = await _rows(db, "SELECT id, title, body, notebook, pinned, updated_at FROM app_notes"
                            " ORDER BY updated_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_notes, rows, terms)
+
+
+def _score_notes(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
     out = []
     for r in rows:
         s = score_item([Field(r["title"] or "", 3, True), Field(r.get("body") or "", 1),
@@ -185,6 +199,12 @@ async def _notes(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
 
 async def _tasks(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
     rows = await _rows(db, "SELECT * FROM app_tasks ORDER BY created_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_tasks, rows, terms)
+
+
+def _score_tasks(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
+    from hub_api.routers.notes import _task_out
+
     out = []
     for r in rows:
         s = score_item([Field(r["title"] or "", 3, True), Field(r.get("details") or "", 1)], terms)
@@ -192,15 +212,18 @@ async def _tasks(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
             s *= 0.8 if r.get("done") else 1.0  # open tasks first
             out.append(_hit("tasks", r["id"], r["title"], s, snippet_text=snippet(r.get("details") or "", terms),
                             date=r.get("due") or r.get("created_at"),
-                            data={"done": bool(r.get("done")), "due": r.get("due"), "due_time": r.get("due_time"),
-                                  "priority": r.get("priority") or "normal"}))
+                            data=_task_out(r)))  # the whole task: the PWA opens it in its editor
     return out
 
 
 async def _expenses(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
+    rows = await _rows(db, "SELECT * FROM app_expenses ORDER BY date DESC, created_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_expenses, rows, terms)
+
+
+def _score_expenses(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
     from hub_api.routers.expenses import expense_out
 
-    rows = await _rows(db, "SELECT * FROM app_expenses ORDER BY date DESC, created_at DESC LIMIT ?")
     out = []
     for r in rows:
         items = r.get("items") or ""
@@ -214,9 +237,13 @@ async def _expenses(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
 
 
 async def _incomes(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
+    rows = await _rows(db, "SELECT * FROM app_incomes ORDER BY date DESC, created_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_incomes, rows, terms)
+
+
+def _score_incomes(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
     from hub_api.routers.money import _income_out
 
-    rows = await _rows(db, "SELECT * FROM app_incomes ORDER BY date DESC, created_at DESC LIMIT ?")
     out = []
     for r in rows:
         s = score_item([Field(r.get("source") or "", 3, True), Field(r.get("note") or "", 1),
@@ -241,6 +268,10 @@ def _chat_text(raw: Any) -> str:
 async def _chats(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
     rows = await _rows(db, "SELECT id, title, messages, message_count, updated_at FROM app_chats"
                            " ORDER BY updated_at DESC LIMIT ?", CHAT_ROWS)
+    return await asyncio.to_thread(_score_chats, rows, terms)
+
+
+def _score_chats(rows: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
     out = []
     for r in rows:
         text = _chat_text(r.get("messages"))
@@ -252,14 +283,20 @@ async def _chats(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
 
 
 async def _links(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
+    links = await _rows(db, "SELECT code, url, title, clicks, created_at FROM app_links ORDER BY created_at DESC LIMIT ?")
+    drops = await _rows(db, "SELECT code, provider, key, filename, created_at, expires_at FROM app_drops"
+                            " ORDER BY created_at DESC LIMIT ?")
+    return await asyncio.to_thread(_score_links, links, drops, terms)
+
+
+def _score_links(links: list[dict[str, Any]], drops: list[dict[str, Any]], terms: list[str]) -> list[dict[str, Any]]:
     out = []
-    for r in await _rows(db, "SELECT code, url, title, clicks, created_at FROM app_links ORDER BY created_at DESC LIMIT ?"):
+    for r in links:
         s = score_item([Field(r.get("title") or "", 3, True), Field(r.get("url") or "", 1.5), Field(r["code"], 1)], terms)
         if s:
             out.append(_hit("links", f"link:{r['code']}", r.get("title") or r["url"], s, snippet_text=r["url"],
                             date=r.get("created_at"), data={"kind": "link", "code": r["code"], "url": r["url"]}))
-    for r in await _rows(db, "SELECT code, provider, key, filename, created_at, expires_at FROM app_drops"
-                             " ORDER BY created_at DESC LIMIT ?"):
+    for r in drops:
         s = score_item([Field(r.get("filename") or "", 3, True), Field(r["code"], 1)], terms)
         if s:
             out.append(_hit("links", f"drop:{r['code']}", r["filename"], s, snippet_text=f"File drop · {r['key']}",
@@ -268,8 +305,28 @@ async def _links(db: AppDB, terms: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-async def _files(state: HubState, terms: list[str]) -> list[dict[str, Any]]:
+# (router, monotonic time, listing): the last Drive listing, reused for DRIVE_CACHE_S. Holding the router itself
+# (not its id) means a new hub state (tests, a cold start) never reads another state's listing.
+_drive_cache: tuple[Any, float, dict[str, Any]] | None = None
+
+
+async def _drive_listing(state: HubState) -> dict[str, Any]:
+    global _drive_cache
+    now = time.monotonic()
+    cached = _drive_cache
+    if cached is not None and cached[0] is state.router and now - cached[1] < DRIVE_CACHE_S:
+        return cached[2]
     raw = await asyncio.wait_for(state.router.storage_list("", limit=DRIVE_LIST_LIMIT), DRIVE_TIMEOUT_S)
+    _drive_cache = (state.router, now, raw)
+    return raw
+
+
+async def _files(state: HubState, terms: list[str]) -> list[dict[str, Any]]:
+    raw = await _drive_listing(state)
+    return await asyncio.to_thread(_score_files, raw, terms)
+
+
+def _score_files(raw: dict[str, Any], terms: list[str]) -> list[dict[str, Any]]:
     out = []
     seen: set[tuple[str, str]] = set()
     for name, result in raw.items():

@@ -81,3 +81,61 @@ def test_search_on_empty_database_and_auth(hub) -> None:
     out = hub.get("/search", params={"q": "rien"}).json()
     assert out["total"] == 0 and out["groups"] == [] and out["errors"] == {}
     assert hub.client.get("/search", params={"q": "x"}).status_code == 401
+
+
+def test_long_fields_are_capped_and_folded_in_one_pass() -> None:
+    from hub_api.routers import search as sr
+
+    long = "é" * sr.MAX_FIELD_CHARS + " needle"
+    assert score_item([Field(long, 1)], ["needle"]) == 0  # past the cap: not scanned
+    assert score_item([Field("Été " * 10 + "needle", 1)], ["needle"]) > 0
+    assert fold("ÇA Également") == "ca egalement" and fold("plain ASCII") == "plain ascii"
+    assert len(snippet("x" * (sr.MAX_FIELD_CHARS * 3), ["zzz"])) <= sr.SNIPPET_CHARS
+
+
+def test_cpu_bound_source_times_out_without_hiding_the_others(hub, monkeypatch) -> None:
+    import time as _time
+
+    from hub_api.routers import search as sr
+
+    hub.post("/notes", json={"title": "Recette tajine", "body": "x"})
+    hub.post("/tasks", json={"title": "Acheter tajine"})
+
+    def slow(rows, terms):  # scoring that never yields to the event loop
+        _time.sleep(0.6)
+        return []
+
+    monkeypatch.setattr(sr, "_score_notes", slow)
+    monkeypatch.setattr(sr, "SOURCE_TIMEOUT_S", 0.2)
+    started = _time.monotonic()
+    out = hub.get("/search", params={"q": "tajine", "types": "notes,tasks"}).json()
+    assert out["errors"] == {"notes": "timed out"}
+    assert [g["type"] for g in out["groups"]] == ["tasks"]
+    assert _time.monotonic() - started < 0.6 + 0.5
+    task = out["groups"][0]["items"][0]["data"]  # the whole task, for the PWA's editor
+    assert task["title"] == "Acheter tajine" and task["details"] is None and "created_at" in task
+
+
+def test_drive_listing_is_cached_between_queries(hub, monkeypatch) -> None:
+    from core.router import SmartRouter
+    from hub_api.routers import search as sr
+
+    assert hub.post("/drive/upload", files={"file": ("tajine.jpg", b"jpeg", "image/jpeg")}).status_code == 201
+    calls: list[int] = []
+    original = SmartRouter.storage_list
+
+    async def counting(self, *args, **kwargs):
+        calls.append(1)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SmartRouter, "storage_list", counting)
+    monkeypatch.setattr(sr, "_drive_cache", None)
+    for q in ("taj", "tajine", "tajine jpg"):
+        out = hub.get("/search", params={"q": q, "types": "files"}).json()
+        assert out["groups"][0]["items"][0]["title"] == "tajine.jpg"
+    assert len(calls) == 1
+    hub.get("/search", params={"q": "tajine", "types": "notes"})  # no files asked: no listing
+    assert len(calls) == 1
+    monkeypatch.setattr(sr, "DRIVE_CACHE_S", 0.0)
+    hub.get("/search", params={"q": "tajine", "types": "files"})
+    assert len(calls) == 2

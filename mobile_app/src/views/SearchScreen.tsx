@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../components/icons';
 import { cx, haptic, riseStyle } from '../components/ui';
 import { useActions } from '../lib/actions';
+import { requestFocus } from '../lib/focus';
 import { errorText, useHub } from '../lib/hub';
 import { useNav } from '../lib/nav';
-import { MIN_QUERY, RESULT_ICON, highlightParts, loadRecent, pushRecent, queryTerms, saveRecent } from '../lib/search';
+import { FAST_TYPES, MIN_QUERY, RESULT_ICON, SLOW_TYPES, highlightParts, loadRecent, mergeSearch, pushRecent, queryTerms, saveRecent } from '../lib/search';
 import { writePref } from '../lib/settings';
 import type { Expense, Income, SearchResponse, SearchResult, StoredObject } from '../lib/types';
 
@@ -65,18 +66,36 @@ export default function SearchScreen({ onClose }: { onClose: (after?: () => void
     const ctrl = new AbortController();
     setLoading(true);
     const t = window.setTimeout(() => {
-      client
-        .search(q.trim(), {}, ctrl.signal)
+      // Two requests: the fast app groups render right away, the Drive files join when their listing answers.
+      let fast: SearchResponse | null = null;
+      let files: SearchResponse | null = null;
+      const show = () => {
+        if (!ctrl.signal.aborted) setResult(mergeSearch([fast, files]));
+      };
+      const fastReq = client
+        .search(q.trim(), { types: FAST_TYPES }, ctrl.signal)
         .then((r) => {
-          setResult(r);
+          fast = r;
           setError(null);
+          show();
         })
         .catch((err) => {
           if (!ctrl.signal.aborted) setError(errorText(err));
+        });
+      const filesReq = client
+        .search(q.trim(), { types: SLOW_TYPES }, ctrl.signal)
+        .then((r) => {
+          files = r;
+        })
+        .catch((err) => {
+          files = { query: q.trim(), terms: [], total: 0, groups: [], errors: { files: errorText(err) } };
         })
         .finally(() => {
-          if (!ctrl.signal.aborted) setLoading(false);
+          if (fast) show();
         });
+      void Promise.allSettled([fastReq, filesReq]).then(() => {
+        if (!ctrl.signal.aborted) setLoading(false);
+      });
     }, DEBOUNCE_MS);
     return () => {
       window.clearTimeout(t);
@@ -101,11 +120,19 @@ export default function SearchScreen({ onClose }: { onClose: (after?: () => void
           .then((n) => actions.openNote(n))
           .catch((err) => notify(errorText(err), 'error'));
       });
-    } else if (r.type === 'tasks') onClose(() => go('notes', 'tasks'));
+    } else if (r.type === 'tasks') {
+      // TasksPanel opens the task's sheet (done tasks included) once it is showing.
+      requestFocus({ kind: 'task', id: r.id, data: d });
+      onClose(() => go('notes', 'tasks'));
+    }
     else if (r.type === 'expenses') onClose(() => actions.editExpense(d as unknown as Expense));
     else if (r.type === 'incomes') onClose(() => actions.editIncome(d as unknown as Income));
     else if (r.type === 'files') onClose(() => actions.preview(d as unknown as StoredObject));
-    else if (r.type === 'links') onClose(() => go('more', 'links'));
+    else if (r.type === 'links') {
+      const drop = d.kind === 'drop';
+      requestFocus({ kind: drop ? 'drop' : 'link', id: String(d.code ?? '') });
+      onClose(() => go('more', 'links'));
+    }
     else if (r.type === 'chats') {
       writePref('chat.current', r.id);
       // The chat panel reopens `chat.current` when it mounts: leave the AI tab first when already on it.

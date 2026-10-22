@@ -33,6 +33,8 @@ export const PIN_ITERATIONS = 210_000;
 export const LOCK_AFTER_CHOICES = [0, 1, 5, 15, 60] as const;
 export const MAX_FAILS = 5;
 export const LOCKOUT_MS = 30_000;
+/** After this many wrong PINs in a row the keypad stops: only the hub token ("Forgot PIN") removes the lock. */
+export const HARD_FAILS = 20;
 
 export const DEFAULT_LOCK: LockConfig = { pin: null, credentialId: null, afterMinutes: 1, shield: true };
 
@@ -151,6 +153,79 @@ export function lockoutRemaining(fails: number, lastFailAt: number | null, now: 
   // Each further block of failures doubles the wait: 30 s, 60 s, 120 s ... capped at 15 min.
   const factor = 2 ** Math.min(Math.floor((fails - MAX_FAILS) / MAX_FAILS), 5);
   return Math.max(0, lastFailAt + Math.min(LOCKOUT_MS * factor, 15 * 60_000) - now);
+}
+
+// ------------------------------------------------------------------ failed attempts (survive a restart)
+
+export const FAILS_KEY = 'omnifree.lock.fails';
+
+export interface FailState {
+  fails: number;
+  lastFailAt: number | null;
+}
+
+export function parseFailState(raw: string | null): FailState {
+  try {
+    const v = JSON.parse(raw ?? 'null') as Partial<FailState> | null;
+    const fails = Math.floor(Number(v?.fails));
+    const at = Number(v?.lastFailAt);
+    return { fails: Number.isFinite(fails) && fails > 0 ? fails : 0, lastFailAt: Number.isFinite(at) && at > 0 ? at : null };
+  } catch {
+    return { fails: 0, lastFailAt: null };
+  }
+}
+
+/** Wrong PINs so far (kept in localStorage: swiping the app away does not give fresh tries). */
+export function loadFailState(): FailState {
+  try {
+    return parseFailState(window.localStorage.getItem(FAILS_KEY));
+  } catch {
+    return { fails: 0, lastFailAt: null };
+  }
+}
+
+/** Records one more wrong PIN at `now` and returns the new state. */
+export function recordFail(now: number): FailState {
+  const prev = loadFailState();
+  const next = { fails: prev.fails + 1, lastFailAt: now };
+  try {
+    window.localStorage.setItem(FAILS_KEY, JSON.stringify(next));
+  } catch {
+    // Blocked storage: the counter then only lasts while the lock screen is shown.
+  }
+  return next;
+}
+
+export function clearFails(): void {
+  try {
+    window.localStorage.removeItem(FAILS_KEY);
+  } catch {
+    // See recordFail().
+  }
+}
+
+// ------------------------------------------------------------------ own camera / file picker
+
+/** How long a hand-off to the app's own camera or file picker keeps "Immediately" from locking on return. */
+export const RETURN_GRACE_MS = 2 * 60_000;
+
+let expectedReturnAt: number | null = null;
+
+/** Called just before the app opens its own file input or camera (another Android activity hides the page). */
+export function expectReturn(now: number = Date.now()): void {
+  expectedReturnAt = now;
+}
+
+/** True (once) when the page was hidden by the app's own picker less than RETURN_GRACE_MS ago. */
+export function takeExpectedReturn(now: number = Date.now()): boolean {
+  const at = expectedReturnAt;
+  expectedReturnAt = null;
+  return at !== null && now - at >= 0 && now - at < RETURN_GRACE_MS;
+}
+
+/** Peek without consuming (the hide handler must not lock "Immediately" during a hand-off). */
+export function expectingReturn(now: number = Date.now()): boolean {
+  return expectedReturnAt !== null && now - expectedReturnAt >= 0 && now - expectedReturnAt < RETURN_GRACE_MS;
 }
 
 /** "Forgot PIN": the typed hub token must match the stored one (whitespace ignored at the ends). */

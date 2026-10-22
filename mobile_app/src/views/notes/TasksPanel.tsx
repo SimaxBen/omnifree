@@ -6,6 +6,7 @@ import { Button, Chip, EmptyState, ErrorNote, Field, IconButton, Segmented, Skel
 import { eventWhen, groupEventsByDay } from '../../lib/agenda';
 import { addDays, dueInfo, isoDay, sortTasks, taskDue, validTime } from '../../lib/apps';
 import { announce, useTopic } from '../../lib/bus';
+import { flashRow, useFocusRequest } from '../../lib/focus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
 import type { Task, TaskPriority } from '../../lib/types';
@@ -234,6 +235,18 @@ export default function TasksPanel() {
     open.reload();
     if (showDone) done.reload();
   });
+  // A task picked in global search: open it in its sheet (done ones too, from the search hit) and flash its row.
+  useFocusRequest<Task>(
+    'task',
+    (req) => {
+      const t = open.data?.find((x) => x.id === req.id) ?? done.data?.find((x) => x.id === req.id) ?? (req.data?.created_at ? req.data : undefined);
+      if (!t) return open.data ? true : false;
+      setEditing({ id: editId.current++, open: true, task: t });
+      flashRow(t.id);
+      return true;
+    },
+    [open.data],
+  );
 
   const grouped = useMemo(() => {
     const out: Record<Bucket, Task[]> = { overdue: [], today: [], soon: [], later: [], none: [] };
@@ -306,7 +319,7 @@ export default function TasksPanel() {
   };
 
   const row = (t: Task, i: number) => (
-    <div key={t.id} className={fresh === t.id ? 'pop' : 'rise'} style={riseStyle(i)}>
+    <div key={t.id} data-focus={t.id} className={fresh === t.id ? 'pop' : 'rise'} style={riseStyle(i)}>
       <SwipeRow
         start={{ icon: 'check', label: t.done ? 'Reopen' : 'Done', tone: 'signal', run: () => void toggleFromSwipe(t) }}
         end={{ icon: 'trash', label: 'Delete', tone: 'danger', run: () => remove(t) }}
