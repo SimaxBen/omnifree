@@ -29,7 +29,7 @@ EXPECTED_TOOLS = {
     "drive_share_link", "ask_drive", "rag_index", "notes_search", "notes_create", "notes_get", "tasks_list",
     "tasks_add", "tasks_complete", "expenses_month", "expense_add", "links_create", "drops_create",
     "schedules_list", "schedule_create", "budget_status", "chats_list",
-    "money_overview", "income_add", "account_set_balance",
+    "money_overview", "income_add", "account_set_balance", "calendar_events", "calendar_add_event",
 }
 
 

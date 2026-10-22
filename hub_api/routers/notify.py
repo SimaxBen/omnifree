@@ -15,7 +15,9 @@ stored in ``app_notify_log.channels`` (JSON) and returned as ``channels``.
   ``force=1`` bypasses it, ``preview=1`` composes without sending); ``budget`` only pushes items that
   became ``warn``/``over`` since the last budget push; ``reminders`` (every 15 min) pushes one notification
   per open task whose due date + time falls in [now - 5 min, now + 15 min], deduplicated per task and due
-  time, with a "Fait ✓" button;
+  time, with a "Fait ✓" button, plus one per timed Google Calendar event starting in the same window (deduplicated
+  per event id and start; see :mod:`hub_api.gcal`). The morning push opens with an "Agenda" section (today's
+  events) when Google Calendar is set up;
 * ``POST /notify/done/{task_id}?sig=...`` (``public_router``, no bearer: the ntfy app calls it from the
   notification button): marks that one task done. ``sig`` is an HMAC-SHA256 of the task id under a key
   derived from the hub token (see :func:`done_sig`), compared in constant time; anything else answers 404.
@@ -38,7 +40,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 
-from hub_api import notifier, webpush
+from hub_api import gcal, notifier, webpush
 from hub_api.appdata import AppDB, get_appdb, iso, local_now, local_today, local_tz, new_id, now_iso
 from hub_api.budget_report import build_budget
 from hub_api.recurring import monthly_equivalent, recurring_items
@@ -72,6 +74,7 @@ MAX_TASK_LINES = 5
 REMIND_BEFORE = timedelta(minutes=15)  # a reminder goes out up to 15 min before the due time...
 REMIND_AFTER = timedelta(minutes=5)  # ...or up to 5 min after it (a late or retried run)
 MAX_REMINDERS = 10  # per run: stays well inside the 60 s serverless limit
+EVENTS_TIMEOUT_S = 6.0  # Google Calendar read for the reminders
 _DONE_KEY_LABEL = b"omnifree/notify-done/v1"
 
 SCHEMA = (
@@ -220,13 +223,31 @@ def _recent(stamp: Any, hours: float) -> bool:
 # --------------------------------------------------------------------------- composers
 
 
-async def compose_morning(db: AppDB, today: date) -> Push:
+def _event_time(ev: dict[str, Any]) -> str:
+    return "Journée" if ev.get("all_day") else str(ev.get("start") or "")[11:16]
+
+
+def agenda_lines(events: list[dict[str, Any]]) -> list[str]:
+    """The "Agenda" section of the morning push: all-day events first, then by start time."""
+    if not events:
+        return []
+    lines = ["Agenda :"] + [f"• {_event_time(e)} {e['title']}" for e in events[:MAX_TASK_LINES]]
+    if len(events) > MAX_TASK_LINES:
+        lines.append(f"… et {len(events) - MAX_TASK_LINES} autre{'s' if len(events) - MAX_TASK_LINES > 1 else ''}")
+    return lines
+
+
+async def compose_morning(db: AppDB, today: date, state: HubState | None = None) -> Push:
     due = await _tasks_due(db, today)
     overdue = await _count(db, "SELECT COUNT(*) AS n FROM app_tasks WHERE done = 0 AND due IS NOT NULL AND due < ?",
                            [today.isoformat()])
     yesterday = today - timedelta(days=1)
     spent = summarise(await _expenses(db, yesterday, yesterday))
-    lines = _task_lines(due)
+    events = await gcal.agenda_day(state, today) if state is not None else []
+    lines = agenda_lines(events)
+    if events and due:
+        lines.append("Tâches :")
+    lines += _task_lines(due)
     if overdue:
         lines.append(f"En retard : {_plural(overdue, 'tâche')}")
     lines.append(
@@ -237,7 +258,8 @@ async def compose_morning(db: AppDB, today: date) -> Push:
     created = (sync.get("last_result") or {}).get("created") or []
     if created and _recent(sync.get("last_sync_at"), 24):
         lines.append(f"Import e-mail : {_plural(len(created), 'nouvelle dépense', 'nouvelles dépenses')}")
-    title = (f"Bonjour : {_plural(len(due), 'tâche')} aujourd'hui" if due
+    parts = [p for p in (due and _plural(len(due), 'tâche'), events and _plural(len(events), 'événement')) if p]
+    title = (f"Bonjour : {' et '.join(parts)} aujourd'hui" if parts
              else "Bonjour : rien de prévu aujourd'hui")
     return Push(title=title, message="\n".join(lines), tags=["sunrise"], path="#/notes/tasks",
                 actions=[("Tâches", "#/notes/tasks"), ("Dépenses", "#/more/expenses")], dedupe=f"morning:{today}")
@@ -420,11 +442,52 @@ def compose_reminder(state: HubState, task: dict[str, Any], now: datetime) -> Pu
     )
 
 
+async def event_reminders(state: HubState, now: datetime, ahead: timedelta = REMIND_BEFORE) -> list[dict[str, Any]]:
+    """Timed Google Calendar events starting inside :func:`reminder_window` (best effort: [] on any failure)."""
+    start, end = reminder_window(now, ahead)
+    try:
+        events, _ = await asyncio.wait_for(gcal.events_between(state, start, end, use_cache=False), EVENTS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - the task reminders still go out
+        log.info("calendar events for the reminders unavailable: %r", exc)
+        return []
+    out = []
+    for ev in events:
+        if ev.get("all_day"):
+            continue
+        try:
+            at = datetime.fromisoformat(str(ev["start"])).astimezone(local_tz())
+        except ValueError:
+            continue
+        if start <= at <= end:
+            out.append({**ev, "at": at})
+    return out
+
+
+def compose_event_reminder(ev: dict[str, Any], now: datetime) -> Push:
+    at: datetime = ev["at"]
+    minutes = round((at - now).total_seconds() / 60)
+    when = (f"dans {minutes} min" if minutes > 0 else "maintenant" if minutes == 0 else f"il y a {-minutes} min")
+    end = str(ev.get("end") or "")[11:16]
+    lines = [f"{at:%H:%M}{f'–{end}' if end else ''} ({when})"]
+    if ev.get("location"):
+        lines.append(f"📍 {str(ev['location'])[:200]}")
+    if ev.get("calendar"):
+        lines.append(str(ev["calendar"])[:100])
+    return Push(
+        title=f"📅 {ev['title']}"[:250], message="\n".join(lines), tags=["calendar"], priority=4,
+        path="#/notes/tasks", actions=[("Agenda", "#/notes/tasks")],
+        dedupe=f"event:{ev['id']}:{at.astimezone(timezone.utc):%Y-%m-%dT%H:%M}",
+    )
+
+
 async def run_reminders(state: HubState, db: AppDB, *, preview: bool, force: bool,
                         ahead: timedelta = REMIND_BEFORE) -> dict[str, Any]:
     now = local_now()
     tasks = await due_reminders(db, now, ahead)
-    pushes = [compose_reminder(state, t, now) for t in tasks[:MAX_REMINDERS]]
+    items: list[tuple[datetime, Push]] = [(t["at"], compose_reminder(state, t, now)) for t in tasks]
+    items += [(e["at"], compose_event_reminder(e, now)) for e in await event_reminders(state, now, ahead)]
+    items.sort(key=lambda it: it[0])
+    pushes = [p for _, p in items[:MAX_REMINDERS]]
     out: dict[str, Any] = {"kind": "reminders", "sent": False, "skipped": None, "count": 0, "title": None,
                            "message": None, "results": []}
     if not pushes:
@@ -730,7 +793,7 @@ async def notify_run(
     today = local_today()
     budget_alerts: dict[str, str] | None = None
     if kind == "morning":
-        push: Push | None = await compose_morning(db, today)
+        push: Push | None = await compose_morning(db, today, state)
     elif kind == "evening":
         push = await compose_evening(db, today)
     elif kind == "weekly":
@@ -773,4 +836,6 @@ async def notify_done(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not Found")
     if not row.get("done"):
         await db.execute("UPDATE app_tasks SET done = 1, done_at = ? WHERE id = ? AND done = 0", [now_iso(), task_id])
+        task = await db.fetch_one("SELECT * FROM app_tasks WHERE id = ?", [task_id])
+        await gcal.push_task(state, db, task_id, task)  # "✓ " title, no reminder
     return {"ok": True, "id": task_id, "title": row["title"], "done": True}

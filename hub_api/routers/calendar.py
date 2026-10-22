@@ -3,7 +3,8 @@
 No OAuth: ``GET /calendar/{token}.ics`` is PUBLIC (``public_router``, mounted without the bearer dependency)
 and authenticated by an unguessable token in the path (vault key ``CALENDAR_FEED_TOKEN``, compared in constant
 time; any mismatch, or no token configured, answers 404). ``GET /calendar/info`` (``router``, bearer protected)
-gives the PWA the feed URL.
+gives the PWA the feed URL. Google Calendar itself is written directly (and instantly) by :mod:`hub_api.gcal`;
+this feed stays as the fallback and for Apple Calendar / Outlook.
 
 Feed content (RFC 5545: CRLF line ends, lines folded at 75 octets, TEXT escaping):
 

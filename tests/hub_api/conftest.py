@@ -53,8 +53,15 @@ DEFAULT_PLUGINS: dict[str, Any] = {
 
 
 @pytest.fixture(autouse=True)
-def _reset_fakes() -> None:
+def _reset_fakes(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from hub_api import gcal
+
     fakes.reset()
+    for var in ("GOOGLE_CALENDAR_SA_JSON", "GOOGLE_CALENDAR_ID", "GOOGLE_CALENDAR_READ_IDS"):
+        monkeypatch.delenv(var, raising=False)  # Google Calendar off unless a test turns it on
+    gcal.reset()
+    yield
+    gcal.reset()
 
 
 @pytest.fixture

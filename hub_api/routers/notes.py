@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from pydantic import BaseModel, Field
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, TranscriptionRequest
+from hub_api import gcal
 from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, local_today, new_id, now_iso, read_upload
 from hub_api.state import HubState, get_state
 
@@ -589,6 +590,8 @@ async def voice_note(
         )
         for t in tasks_in
     ]
+    for task in tasks:  # same instant Google Calendar push as POST /tasks
+        await gcal.push_task(state, db, task["id"], task, created=True)
     created: dict[str, list[dict[str, Any]]] = {"expenses": [], "incomes": []}
     if money_in:
         from hub_api.routers import money  # money imports this module
@@ -823,14 +826,16 @@ async def list_tasks(
 
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED)
-async def create_task(body: TaskCreate, db: AppDB = Depends(_db)) -> dict[str, Any]:
+async def create_task(
+    body: TaskCreate, db: AppDB = Depends(_db), state: HubState | None = Depends(get_state)
+) -> dict[str, Any]:
     if not body.title.strip():
         raise HTTPException(422, detail="title cannot be blank")
     due = _due_param(body.due)
     due_time = _time_param(body.due_time)
     if due_time and not due:
         raise HTTPException(422, detail="due_time needs a due date")
-    return await _insert_task(
+    task = await _insert_task(
         db,
         title=body.title,
         details=body.details,
@@ -839,10 +844,18 @@ async def create_task(body: TaskCreate, db: AppDB = Depends(_db)) -> dict[str, A
         priority=body.priority,
         note_id=body.note_id,
     )
+    await gcal.push_task(state, db, task["id"], task, created=True)  # best effort, bounded (~4 s)
+    return task
+
+
+# Fields the Google Calendar event is built from: changing only these re-pushes the event.
+_EVENT_FIELDS = frozenset(("title", "details", "due", "due_time", "done", "priority"))
 
 
 @router.patch("/tasks/{task_id}")
-async def patch_task(task_id: str, body: TaskPatch, db: AppDB = Depends(_db)) -> dict[str, Any]:
+async def patch_task(
+    task_id: str, body: TaskPatch, db: AppDB = Depends(_db), state: HubState | None = Depends(get_state)
+) -> dict[str, Any]:
     current = await _get_task(db, task_id)
     changes: dict[str, Any] = {}
     for field in body.model_fields_set:
@@ -872,11 +885,17 @@ async def patch_task(task_id: str, body: TaskPatch, db: AppDB = Depends(_db)) ->
     if changes:
         sets = ", ".join(f"{k} = ?" for k in changes)
         await db.execute(f"UPDATE app_tasks SET {sets} WHERE id = ?", [*changes.values(), task_id])
-    return _task_out(await _get_task(db, task_id))
+    task = _task_out(await _get_task(db, task_id))
+    if _EVENT_FIELDS & set(changes):
+        await gcal.push_task(state, db, task_id, task)
+    return task
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(task_id: str, db: AppDB = Depends(_db)) -> Response:
+async def delete_task(
+    task_id: str, db: AppDB = Depends(_db), state: HubState | None = Depends(get_state)
+) -> Response:
     await _get_task(db, task_id)
     await db.execute("DELETE FROM app_tasks WHERE id = ?", [task_id])
+    await gcal.push_task(state, db, task_id, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

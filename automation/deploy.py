@@ -692,6 +692,8 @@ chown {q(user)}:{q(user)} {q(mount_path)}
         names.update(dict.fromkeys(("NTFY_TOPIC", "NTFY_SERVER", "NTFY_TOKEN", "CALENDAR_FEED_TOKEN")))
         # Native Web Push from the PWA (hub_api/webpush.py; generate with `python -m automation.vapid`).
         names.update(dict.fromkeys(("VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT")))
+        # Google Calendar through a service account (hub_api/gcal.py).
+        names.update(dict.fromkeys(("GOOGLE_CALENDAR_SA_JSON", "GOOGLE_CALENDAR_ID", "GOOGLE_CALENDAR_READ_IDS")))
         return [n for n in names if n not in self._HF_SECRET_DENYLIST]
 
     def _inbox_password_keys(self) -> list[str]:

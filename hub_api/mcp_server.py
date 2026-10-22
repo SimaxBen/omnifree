@@ -46,12 +46,14 @@ from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderError, ProviderKind
+from hub_api import gcal
 from hub_api.appdata import AppDB, appdb_for, local_now
 from hub_api.auth import token_matches
 from hub_api.budget_report import build_budget
 from hub_api.deps import default_provider, spec_of_kind
 from hub_api.errors import error_body
 from hub_api.routers import chats, cron, drive, expenses, links, llm, money, notes, rag
+from hub_api.routers import gcal as gcal_router
 from hub_api.state import HubState
 
 __all__ = ["build_mcp_server", "mount_mcp", "MCPEndpoint", "MCP_TOKEN_KEY", "MCP_PATH"]
@@ -82,7 +84,7 @@ UPDATES = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempote
 INSTRUCTIONS = (
     "OmniFree is the user's personal cloud: a pooled free-tier LLM gateway with failover, a unified Drive "
     "across several storage backends, 'Ask my Drive' (RAG with citations), notes, tasks, expenses, money (incomes, accounts, budgets), short "
-    "links, file drops, scheduled HTTP jobs and a free-tier budget. Dates use the Africa/Casablanca time "
+    "links, file drops, scheduled HTTP jobs, a free-tier budget and the owner's Google Calendar (read the agenda, add events). Dates use the Africa/Casablanca time "
     "zone; amounts default to MAD. Nothing here deletes data: deletions are done by the user in the app."
 )
 
@@ -475,12 +477,50 @@ def build_mcp_server(app: FastAPI, *, version: str = "") -> MCPServer:
     ) -> dict[str, Any]:
         day, at = _resolve_when(due, due_time)
         body = notes.TaskCreate(title=title, due=day, due_time=at, priority=priority, details=details)
-        return await notes.create_task(body, db=await notes_db())
+        return await notes.create_task(body, db=await notes_db(), state=state)
 
     @tool(description="Mark a task as done (by id, from tasks_list).", annotations=UPDATES)
     @_guard
     async def tasks_complete(id: Annotated[str, Field(min_length=1, description="Task id.")]) -> dict[str, Any]:
-        return await notes.patch_task(id, notes.TaskPatch(done=True), db=await notes_db())
+        return await notes.patch_task(id, notes.TaskPatch(done=True), db=await notes_db(), state=state)
+
+    # ----------------------------------------------------------------- Google Calendar
+
+    @tool(
+        description=(
+            "The owner's upcoming Google Calendar events (today included, the next `days` days), from the calendars "
+            "shared with OmniFree; OmniFree's own task events are left out (use tasks_list for those). Times are "
+            "Africa/Casablanca. `configured` is false when Google Calendar is not set up."
+        ),
+        annotations=READ_ONLY_OPEN,
+    )
+    @_guard
+    async def calendar_events(days: Annotated[int, Field(ge=1, le=gcal_router.MAX_DAYS)] = 7) -> dict[str, Any]:
+        return await gcal_router.list_events(state, days)
+
+    @tool(
+        description=(
+            "Add an event to the owner's 'OmniFree' Google Calendar (to schedule something; for a to-do use tasks_add). "
+            "`start`/`end`: YYYY-MM-DD (all day), YYYY-MM-DDTHH:MM in Africa/Casablanca time, or a phrase such as "
+            "'demain à 15h' / 'friday 10am'. `end` defaults to one hour after a timed start, or the same day."
+        ),
+        annotations=CREATES,
+    )
+    @_guard
+    async def calendar_add_event(
+        title: Annotated[str, Field(min_length=1, max_length=500)],
+        start: Annotated[str, Field(min_length=1, description="Start date or date-time (local time).")],
+        end: Annotated[str | None, Field(description="End date or date-time (local time).")] = None,
+        all_day: bool = False,
+        location: Annotated[str | None, Field(max_length=500)] = None,
+        description: Annotated[str | None, Field(max_length=8000)] = None,
+    ) -> dict[str, Any]:
+        body = gcal_router.EventCreate(title=title, start=start, end=end, all_day=all_day, location=location,
+                                       description=description)
+        try:
+            return await gcal_router.create_event(state, body)
+        except gcal.GCalError as exc:
+            raise ToolError(str(exc)) from exc
 
     # ----------------------------------------------------------------- saved AI chats
 

@@ -20,6 +20,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query
 
 from core.interfaces import ChatMessage, ChatRequest, ProviderKind
+from hub_api import gcal
 from hub_api.appdata import AppDB, extract_json, get_appdb, iso, local_today, local_tz, now_iso
 from hub_api.routers.expenses import ensure_schema as ensure_expenses
 from hub_api.routers.expenses import expense_out, summarise
@@ -37,6 +38,7 @@ CACHE_TTL_S = 3600
 LLM_TIMEOUT_S = 25.0
 DRIVE_TIMEOUT_S = 15.0
 COUNTER_TIMEOUT_S = 8.0
+CALENDAR_TIMEOUT_S = 8.0
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_digest_cache (key TEXT PRIMARY KEY, payload TEXT NOT NULL, generated_at TEXT NOT NULL)",
@@ -110,6 +112,9 @@ def fallback_text(period: str, start: date, end: date, stats: dict[str, Any]) ->
         highlights.append(f"{tasks['done']} task{'s' if tasks['done'] != 1 else ''} done.")
     if notes["created"]:
         highlights.append(f"{notes['created']} note{'s' if notes['created'] != 1 else ''} written ({notes['voice']} by voice).")
+    events = (stats.get("calendar") or {}).get("events")
+    if events:
+        highlights.append(f"{events} calendar event{'s' if events != 1 else ''}.")
     if drive["uploaded_files"]:
         highlights.append(f"{drive['uploaded_files']} file{'s' if drive['uploaded_files'] != 1 else ''} uploaded ({_fmt_bytes(drive['uploaded_bytes'])}).")
     if not highlights:
@@ -217,6 +222,22 @@ async def _drive_stats(state: HubState, start: date) -> dict[str, Any]:
     return {"uploaded_files": files, "uploaded_bytes": size}
 
 
+async def _calendar_stats(state: HubState, start: date, end: date) -> dict[str, Any] | None:
+    """Google Calendar events in the period (OmniFree's own task events left out); None when not set up."""
+    if not gcal.load_config(state.settings.secret).configured:
+        return None
+    try:
+        events, errors = await asyncio.wait_for(
+            gcal.events_between(state, *gcal.day_bounds(start, (end - start).days + 1)), CALENDAR_TIMEOUT_S
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info("calendar events for the digest failed: %r", exc)
+        return {"events": None}
+    if errors and not events:
+        return {"events": None}
+    return {"events": len(events), "all_day": sum(1 for e in events if e["all_day"])}
+
+
 async def _llm_stats(state: HubState, period: str, start: date, end: date) -> dict[str, Any]:
     """Successful LLM requests per provider from the router counters (UTC day/month windows)."""
     quota = state.router.quota
@@ -277,14 +298,15 @@ async def _write_up(state: HubState, period: str, start: date, end: date, stats:
 
 async def build_digest(state: HubState, db: AppDB, period: str, today: date) -> dict[str, Any]:
     start, end = period_range(period, today)
-    expenses, tasks, notes, drive, llm = await asyncio.gather(
+    expenses, tasks, notes, drive, llm, calendar = await asyncio.gather(
         _expense_stats(db, start, end),
         _task_stats(db, start, today),
         _note_stats(db, start),
         _drive_stats(state, start),
         _llm_stats(state, period, start, end),
+        _calendar_stats(state, start, end),
     )
-    stats = {"expenses": expenses, "tasks": tasks, "notes": notes, "drive": drive, "llm": llm}
+    stats = {"expenses": expenses, "tasks": tasks, "notes": notes, "drive": drive, "llm": llm, "calendar": calendar}
     text = await _write_up(state, period, start, end, stats)
     return {
         "period": period,
