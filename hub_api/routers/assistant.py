@@ -63,6 +63,7 @@ from hub_api.appdata import AppDB, extract_json, get_appdb, local_now, new_id, n
 from hub_api.rag_extract import ExtractionError, _pdf_pages
 from hub_api.receipts import vision_candidates
 from hub_api.routers.drive import normalise_key
+from hub_api.routers.saved import deadline_scope
 from hub_api.state import HubState, get_state
 
 __all__ = ["router", "MEMORY_SCHEMA", "TOOL_CALL_LIMIT", "TIME_BUDGET_S"]
@@ -298,7 +299,10 @@ async def _tool_specs(server: Any) -> list[dict[str, Any]]:
 async def call_tool(server: Any, name: str, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
     """Run one MCP tool in-process; errors come back as ``{"error": ...}`` for the model to read."""
     try:
-        result = await asyncio.wait_for(server.call_tool(name, args), timeout_s)
+        # Tools that scale their stages to the time left (the Saved library's save / search / ask) finish within
+        # the tool timeout instead of being cancelled half-way (a save cut after its insert, before its index).
+        with deadline_scope(timeout_s - 1.0):
+            result = await asyncio.wait_for(server.call_tool(name, args), timeout_s)
     except TimeoutError:
         return {"error": f"{name} timed out"}
     except Exception as exc:  # ToolError (bad arguments, HTTP errors mapped by the MCP guard) and the rest

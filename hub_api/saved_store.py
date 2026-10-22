@@ -38,6 +38,11 @@ SCHEMA = (
     " id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT, emoji TEXT, position INTEGER NOT NULL DEFAULT 0,"
     " created_at TEXT NOT NULL)",
     "CREATE UNIQUE INDEX IF NOT EXISTS app_saved_collections_name ON app_saved_collections (name COLLATE NOCASE)",
+    # One item per canonical URL even when two saves of the same link race (the share sheet's "Hide", then a
+    # second share): older duplicates, if any, lose their canonical first so the unique index can be built.
+    "UPDATE app_saved SET canonical = NULL WHERE canonical IS NOT NULL AND rowid NOT IN"
+    " (SELECT MAX(rowid) FROM app_saved WHERE canonical IS NOT NULL GROUP BY canonical)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS app_saved_canonical_unique ON app_saved (canonical) WHERE canonical IS NOT NULL",
 )
 ITEM_COLUMNS: tuple[str, ...] = (
     "id", "kind", "url", "canonical", "title", "description", "site", "site_name", "favicon", "image_url", "thumb_key",

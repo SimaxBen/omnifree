@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon, type IconName } from '../components/icons';
 import QuickTaskSheet from '../components/QuickTaskSheet';
 import { Button, Card, cx, haptic, riseStyle } from '../components/ui';
@@ -25,7 +25,7 @@ import {
   type SharedPayload,
 } from '../lib/share';
 import type { ShortLink } from '../lib/types';
-import { saveRequestFromShare, savedFileKey, type SaveResult, type SaveRequest } from '../lib/saved';
+import { isRetryableSaveError, queuePendingSave, saveRequestFromShare, savedFileKey, type SaveResult, type SaveRequest } from '../lib/saved';
 import { requestFocus } from '../lib/focus';
 import SharedSaveCard from './saved/SharedSaveCard';
 
@@ -50,6 +50,8 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
   const [link, setLink] = useState<ShortLink | null>(null);
   const [taskOpen, setTaskOpen] = useState(false);
   const [saved, setSaved] = useState<SaveResult | null>(null);
+  // "Hide" during a save: the screen closes and the shared payload is cleared, the save goes on in the background.
+  const hidden = useRef(false);
   const failed = /[?&]error=1/.test(window.location.hash);
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
 
   const run = async (a: ShareAction) => {
     if (!payload || busy) return;
+    let saveReq: SaveRequest | null = null;
     haptic(8);
     if (a === 'task') {
       setTaskOpen(true);
@@ -118,7 +121,9 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
           req = { key: up.key, ...(up.provider ? { provider: up.provider } : {}), ...(note ? { note: note.slice(0, 4000) } : {}) };
         } else req = saveRequestFromShare(payload);
         if (!req) throw new Error('Nothing to save in what was shared');
-        const res = await client.savedSave(req);
+        saveReq = req;
+        // keepalive: the request survives the PWA going to the background after "Hide" (a link or text is tiny).
+        const res = await client.savedSave(req, undefined, { keepalive: !req.key });
         announce('saved');
         haptic(14);
         setSaved(res);
@@ -131,7 +136,11 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
         notify(copied ? 'Short link copied' : 'Short link created', 'ok');
       }
     } catch (err) {
-      notify(errorText(err), 'error');
+      if (a === 'save' && hidden.current && saveReq && !saveReq.key && isRetryableSaveError(err)) {
+        // The shared payload is already cleared: keep the link so the next visit to Home or Saved sends it again.
+        queuePendingSave(saveReq);
+        notify('Could not save right now: it will be retried next time you open OmniFree', 'info');
+      } else notify(errorText(err), 'error');
     } finally {
       setBusy(null);
     }
@@ -178,7 +187,13 @@ export default function ShareScreen({ onClose }: { onClose: (after?: () => void)
               <Card className="flex items-center gap-3 p-4">
                 <span className="spin h-5 w-5 shrink-0 rounded-full border-2 border-signal border-t-transparent" />
                 <p className="min-w-0 flex-1 text-[14px] text-ink-300">Saving and reading the page…</p>
-                <Button variant="ghost" onClick={() => finish()}>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    hidden.current = true;
+                    finish();
+                  }}
+                >
                   Hide
                 </Button>
               </Card>

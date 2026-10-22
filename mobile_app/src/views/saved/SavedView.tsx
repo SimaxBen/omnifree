@@ -9,6 +9,8 @@ import { errorText, useHub, useHubData } from '../../lib/hub';
 import { usePullRefresh } from '../../lib/nav';
 import {
   TYPE_ICON,
+  flushPendingSaves,
+  matchesFilter,
   sortCollections,
   type SavedAnswer,
   type SavedCollection,
@@ -17,7 +19,7 @@ import {
   type SavedSearchResponse,
 } from '../../lib/saved';
 import CollectionsSheet, { type SavedFilter } from './CollectionsSheet';
-import { CollectionDot, CollectionPicker, SavedRow } from './parts';
+import { CollectionDot, CollectionPicker, ExampleChip, SavedRow } from './parts';
 import SavedItemSheet, { moveItem } from './SavedItemSheet';
 import SaveSheet from './SaveSheet';
 
@@ -49,6 +51,10 @@ export default function SavedView() {
   const collections = useHubData((c, s) => c.savedCollections(s), []);
   const listing = useHubData((c, s) => c.savedList({ ...filterQuery(filter), limit: PAGE }, s), [JSON.stringify(filter)]);
   const [extra, setExtra] = useState<SavedItem[]>([]);
+  // The cursor after the last page loaded (undefined: the first page's). Deletes, moves and new saves in
+  // between neither skip nor repeat items, as an offset would.
+  const [cursor, setCursor] = useState<string | null | undefined>(undefined);
+  const [searchTry, setSearchTry] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [search, setSearch] = useState<{ loading: boolean; data?: SavedSearchResponse; error?: string }>({ loading: false });
   const [answer, setAnswer] = useState<{ loading: boolean; data?: SavedAnswer; error?: string; question?: string }>({ loading: false });
@@ -69,12 +75,24 @@ export default function SavedView() {
     collections.reload();
     listing.reload();
     setExtra([]);
+    setCursor(undefined);
   };
   useTopic(['saved'], reload);
   usePullRefresh(reload);
   useEffect(() => {
     setExtra([]);
+    setCursor(undefined);
   }, [filter]);
+  // The collection being shown was deleted (here or on another screen): back to everything.
+  useEffect(() => {
+    if (filter.kind === 'collection' && collections.data && !collections.data.collections.some((c) => c.id === filter.id)) setFilter({ kind: 'all' });
+  }, [collections.data, filter]);
+  // Shares hidden while saving that failed: send them again.
+  useEffect(() => {
+    void flushPendingSaves((req) => client.savedSave(req)).then((n) => {
+      if (n) announce('saved');
+    });
+  }, [client]);
 
   // Global search, the Home section or a share opened an item / a collection.
   useFocusRequest<{ filter?: SavedFilter; item?: SavedItem }>('saved', (req) => {
@@ -116,7 +134,7 @@ export default function SavedView() {
       window.clearTimeout(t);
       ctrl.abort();
     };
-  }, [term, mode, client]);
+  }, [term, mode, client, searchTry]);
 
   const ask = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -131,13 +149,15 @@ export default function SavedView() {
     }
   };
 
+  const nextCursor = cursor === undefined ? listing.data?.next_cursor ?? null : cursor;
+
   const loadMore = async () => {
-    const offset = listing.data?.next_offset;
-    if (offset == null || loadingMore) return;
+    if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const more: SavedListing = await client.savedList({ ...filterQuery(filter), limit: PAGE, offset: offset + extra.length });
+      const more: SavedListing = await client.savedList({ ...filterQuery(filter), limit: PAGE, cursor: nextCursor });
       setExtra((x) => [...x, ...more.items]);
+      setCursor(more.next_cursor ?? null);
     } catch (err) {
       notify(errorText(err), 'error');
     } finally {
@@ -146,8 +166,11 @@ export default function SavedView() {
   };
 
   const replace = (item: SavedItem) => {
-    listing.setData((l) => (l ? { ...l, items: l.items.map((i) => (i.id === item.id ? { ...i, ...item } : i)) } : l));
-    setExtra((x) => x.map((i) => (i.id === item.id ? { ...i, ...item } : i)));
+    // Moved out of the collection being shown: it leaves this list (it is still in its new collection).
+    const keep = matchesFilter(item, filter);
+    const swap = (list: SavedItem[]) => (keep ? list.map((i) => (i.id === item.id ? { ...i, ...item } : i)) : list.filter((i) => i.id !== item.id));
+    listing.setData((l) => (l ? { ...l, items: swap(l.items), total: keep || !l.items.some((i) => i.id === item.id) ? l.total : l.total - 1 } : l));
+    setExtra((x) => swap(x));
     setSearch((s) => (s.data ? { ...s, data: { ...s.data, results: s.data.results.map((r) => (r.item.id === item.id ? { ...r, item } : r)) } } : s));
     setDetail((d) => (d && d.item.id === item.id ? { ...d, item } : d));
   };
@@ -255,9 +278,7 @@ export default function SavedView() {
               <p className="px-1 text-[14px] text-ink-400">Answers come only from what you saved, with links to the items.</p>
               <div className="flex flex-wrap gap-2">
                 {ASK_EXAMPLES.map((ex) => (
-                  <Chip key={ex} onClick={() => setQ(ex)}>
-                    {ex}
-                  </Chip>
+                  <ExampleChip key={ex} text={ex} onPick={setQ} />
                 ))}
               </div>
             </div>
@@ -310,7 +331,7 @@ export default function SavedView() {
       {searching && (
         <section aria-live="polite" className="space-y-2">
           {search.loading && !search.data && <SkeletonList rows={3} />}
-          {search.error && <ErrorNote message={search.error} />}
+          {search.error && <ErrorNote message={search.error} onRetry={() => setSearchTry((n) => n + 1)} />}
           {search.data && search.data.results.length === 0 && !search.loading && (
             <EmptyState
               icon="search"
@@ -433,7 +454,7 @@ export default function SavedView() {
               />
             )}
             <div className="space-y-2">{items.map((item, i) => row(item, i))}</div>
-            {listing.data?.next_offset != null && items.length < (listing.data?.total ?? 0) && (
+            {nextCursor && items.length < (listing.data?.total ?? 0) && (
               <Button variant="ghost" className="mt-2 w-full" onClick={() => void loadMore()} disabled={loadingMore}>
                 {loadingMore ? 'Loading…' : 'Load more'}
               </Button>

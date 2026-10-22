@@ -27,8 +27,8 @@ describe('canonicalUrl (same rules as the hub dedupe)', () => {
     expect(canonicalUrl('https://youtu.be/abcdefghijk?si=SHARE')).toBe('https://youtube.com/watch?v=abcdefghijk');
     expect(canonicalUrl('https://m.youtube.com/shorts/abcdefghijk?feature=share')).toBe('https://youtube.com/watch?v=abcdefghijk');
     expect(canonicalUrl('https://www.youtube.com/watch?v=abcdefghijk&t=42s')).toBe('https://youtube.com/watch?v=abcdefghijk');
-    expect(canonicalUrl('https://twitter.com/Jack/status/20?s=20&t=abc')).toBe('https://x.com/jack/status/20');
-    expect(canonicalUrl('https://mobile.x.com/jack/status/20')).toBe('https://x.com/jack/status/20');
+    expect(canonicalUrl('https://twitter.com/Jack/status/20?s=20&t=abc')).toBe('https://x.com/i/status/20');
+    expect(canonicalUrl('https://mobile.x.com/jack/status/20')).toBe('https://x.com/i/status/20');
     expect(canonicalUrl('https://play.google.com/store/apps/details?id=com.app&hl=fr&gl=MA')).toBe('https://play.google.com/store/apps/details?id=com.app');
     expect(youtubeId('https://youtube.com/embed/abcdefghijk')).toBe('abcdefghijk');
     expect(youtubeId('https://vimeo.com/1')).toBeNull();

@@ -22,6 +22,25 @@ export function SavedThumb({ item, size = 56, className }: { item: Pick<SavedIte
   );
 }
 
+/**
+ * A tappable example question. Unlike `Chip` (one line, never shrinks) it wraps: a long example such as
+ * "C'est quoi l'app pour marcher que j'ai gardée ?" is wider than a 375 px screen and pushed the page sideways.
+ */
+export function ExampleChip({ text, onPick }: { text: string; onPick: (text: string) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        haptic(5);
+        onPick(text);
+      }}
+      className="press inline-flex min-h-[36px] max-w-full min-w-0 items-center rounded-[18px] bg-ink-850 px-3.5 py-1.5 text-left text-[14px] leading-snug text-ink-300 ring-1 ring-inset ring-ink-700 [overflow-wrap:anywhere] hover:text-ink-100"
+    >
+      {text}
+    </button>
+  );
+}
+
 export function CollectionDot({ color, className }: { color: string | null | undefined; className?: string }) {
   return <span aria-hidden="true" className={cx('inline-block h-2.5 w-2.5 shrink-0 rounded-full', className)} style={{ background: color || '#5A6197' }} />;
 }

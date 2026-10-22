@@ -1,18 +1,22 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Icon } from '../../components/icons';
 import { Chip, SectionTitle, riseStyle } from '../../components/ui';
-import { useTopic } from '../../lib/bus';
+import { announce, useTopic } from '../../lib/bus';
 import { requestFocus } from '../../lib/focus';
-import { useHubData } from '../../lib/hub';
+import { useHub, useHubData } from '../../lib/hub';
 import { useNav, usePullRefresh } from '../../lib/nav';
-import { sortCollections } from '../../lib/saved';
+import { flushPendingSaves, sortCollections } from '../../lib/saved';
 import type { SavedFilter } from './CollectionsSheet';
 import { CollectionDot, SavedRow } from './parts';
+
+/** Items shown on Home: three rows keep the section about a third of a phone screen tall (See all opens the rest). */
+export const HOME_RECENT = 3;
 
 /** Home: "Browse by collection" chips and the last few saved items, each opening the Saved screen. */
 export default function RecentlySaved() {
   const { go } = useNav();
-  const recent = useHubData((c, s) => c.savedList({ limit: 4 }, s), []);
+  const { client } = useHub();
+  const recent = useHubData((c, s) => c.savedList({ limit: HOME_RECENT }, s), []);
   const collections = useHubData((c, s) => c.savedCollections(s), []);
   useTopic(['saved'], () => {
     recent.reload();
@@ -22,6 +26,12 @@ export default function RecentlySaved() {
     recent.reload();
     collections.reload();
   });
+  // A share hidden while it was saving and that failed (offline, hub asleep): send it again now.
+  useEffect(() => {
+    void flushPendingSaves((req) => client.savedSave(req)).then((n) => {
+      if (n) announce('saved');
+    });
+  }, [client]);
   const cols = useMemo(() => sortCollections(collections.data?.collections ?? []).filter((c) => c.count > 0).slice(0, 8), [collections.data]);
 
   const openFilter = (filter: SavedFilter) => {

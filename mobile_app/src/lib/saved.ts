@@ -2,6 +2,7 @@
 // dedupe, the share-sheet payload -> save request, "site · date" lines, type icons). No React, no I/O.
 
 import type { IconName } from '../components/icons';
+import { readPref, writePref } from './settings';
 import { sharedText, sharedUrl, type SharedPayload } from './share';
 
 export type SavedType =
@@ -84,6 +85,8 @@ export interface SavedListing {
   items: SavedItem[];
   total: number;
   next_offset: number | null;
+  /** Continue after the last item of this page (stable when items are deleted, moved or saved meanwhile). */
+  next_cursor?: string | null;
 }
 
 export interface SaveRequest {
@@ -220,6 +223,8 @@ const TRACKING = new Set([
 const X_HOSTS = new Set(['twitter.com', 'x.com', 'mobile.twitter.com', 'mobile.x.com', 'fxtwitter.com', 'vxtwitter.com', 'fixupx.com', 'fixvx.com', 'nitter.net']);
 const YT_HOSTS = new Set(['youtube.com', 'music.youtube.com', 'youtube-nocookie.com', 'youtu.be']);
 const YT_ID = /^[A-Za-z0-9_-]{11}$/;
+// Sites whose path alone names the item: every query parameter is share-sheet noise.
+const PATH_ONLY_HOSTS = ['tiktok.com', 'instagram.com', 'threads.net', 'open.spotify.com'];
 
 function bareHost(host: string): string {
   let h = host.toLowerCase().replace(/\.+$/, '');
@@ -270,7 +275,7 @@ export function canonicalUrl(raw: string): string | null {
   let host = bareHost(u.hostname);
   if (X_HOSTS.has(host)) {
     const m = /\/status(?:es)?\/(\d{1,25})/.exec(u.pathname);
-    if (m) return `https://x.com/${(u.pathname.split('/').filter(Boolean)[0] || 'i').toLowerCase()}/status/${m[1]}`;
+    if (m) return `https://x.com/i/status/${m[1]}`; // the post id alone: /jack/status/1 = /i/web/status/1
     host = 'x.com';
   }
   const port = u.port && u.port !== '80' && u.port !== '443' ? `:${u.port}` : '';
@@ -279,6 +284,7 @@ export function canonicalUrl(raw: string): string | null {
   let params = [...u.searchParams.entries()].filter(([k, v]) => v !== '' && !isTracking(k));
   if (host === 'play.google.com') params = params.filter(([k]) => k === 'id');
   if (host === 'x.com') params = params.filter(([k]) => k !== 's' && k !== 't');
+  if (PATH_ONLY_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) params = [];
   params.sort(([a, av], [b, bv]) => (a === b ? (av < bv ? -1 : av > bv ? 1 : 0) : a < b ? -1 : 1));
   const query = params.length ? `?${new URLSearchParams(params).toString()}` : '';
   return `https://${host}${port}${path}${query}`;
@@ -361,7 +367,78 @@ export function sortCollections(cols: SavedCollection[]): SavedCollection[] {
   return [...cols].sort((a, b) => Number(b.count > 0) - Number(a.count > 0) || a.position - b.position || a.name.localeCompare(b.name));
 }
 
+/** The Saved screen's list filter: everything, one collection, Uncategorised or one content type. */
+export type SavedListFilter = { kind: 'all' } | { kind: 'collection'; id: string } | { kind: 'none' } | { kind: 'type'; type: SavedType };
+
+/** True when `item` belongs in the list shown for `filter` (a move out of the collection drops it from the list). */
+export function matchesFilter(item: Pick<SavedItem, 'collection_id' | 'type'>, filter: SavedListFilter): boolean {
+  if (filter.kind === 'collection') return item.collection_id === filter.id;
+  if (filter.kind === 'none') return !item.collection_id;
+  if (filter.kind === 'type') return item.type === filter.type;
+  return true;
+}
+
 /** True when `text` looks like a single link (the Save sheet previews it). */
 export function looksLikeUrl(text: string): boolean {
   return /^https?:\/\/\S+$/i.test(text.trim());
+}
+
+// ------------------------------------------------------------------ saves waiting for a retry (share screen "Hide")
+
+const PENDING_KEY = 'saved.pending';
+const PENDING_MAX = 20;
+
+export interface PendingSave {
+  req: SaveRequest;
+  at: string;
+  tries: number;
+}
+
+/** True when a failed save is worth retrying later: offline / unreachable hub, a timeout or a server error. */
+export function isRetryableSaveError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const status = (err as { status?: unknown }).status;
+  if (typeof status !== 'number') return err instanceof TypeError;
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
+export function pendingSaves(): PendingSave[] {
+  const list = readPref<PendingSave[]>(PENDING_KEY, []);
+  return Array.isArray(list) ? list.filter((p) => p && typeof p === 'object' && p.req && typeof p.req === 'object') : [];
+}
+
+/**
+ * Keeps a link or text whose save failed after the share screen was hidden (its shared payload is gone by
+ * then): the next visit to Home or Saved sends it again. The hub dedupes links, so a save that did land
+ * before the error only moves to the top. Files are not queued (their bytes are not kept).
+ */
+export function queuePendingSave(req: SaveRequest, now: Date = new Date()): void {
+  if (req.key || !(req.url || req.text)) return;
+  const list = pendingSaves().filter((p) => !(req.url ? p.req.url === req.url : p.req.text === req.text));
+  writePref(PENDING_KEY, [...list, { req, at: now.toISOString(), tries: 0 }].slice(-PENDING_MAX));
+}
+
+let flushing: Promise<number> | null = null;
+
+/** Sends the queued saves once; resolves to how many went through (retryable failures stay, at most 5 tries). */
+export function flushPendingSaves(save: (req: SaveRequest) => Promise<unknown>): Promise<number> {
+  if (flushing) return flushing;
+  flushing = (async () => {
+    let done = 0;
+    for (const p of pendingSaves()) {
+      let keep: PendingSave | null = null;
+      try {
+        await save(p.req);
+        done += 1;
+      } catch (err) {
+        if (isRetryableSaveError(err) && p.tries < 4) keep = { ...p, tries: p.tries + 1 };
+      }
+      const rest = pendingSaves().filter((x) => !(x.at === p.at && x.req.url === p.req.url && x.req.text === p.req.text));
+      writePref(PENDING_KEY, keep ? [...rest, keep] : rest);
+    }
+    return done;
+  })().finally(() => {
+    flushing = null;
+  });
+  return flushing;
 }
