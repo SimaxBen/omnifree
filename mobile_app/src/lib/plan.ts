@@ -15,6 +15,8 @@ export interface PlanBlock {
   reason: string;
   /** A calendar event or a task with its own time: not moved by the planner. */
   fixed: boolean;
+  /** Task blocks: the task has been ticked since the plan was made. */
+  done?: boolean;
 }
 
 export interface DayPlan {
@@ -28,6 +30,10 @@ export interface DayPlan {
   window: { start: string; end: string } | null;
   generated_at: string | null;
   calendar: { configured: boolean; writable: boolean } | null;
+  /** Set when Google Calendar could not be read: the plan ignores the day's events. */
+  agenda_error: string | null;
+  /** After a re-plan of a booked plan: whether its calendar blocks were all removed. */
+  cleared_previous?: boolean;
   errors?: string[];
 }
 
@@ -43,6 +49,8 @@ export function normalizePlan(body: unknown): DayPlan {
     window: b.window ?? null,
     generated_at: b.generated_at ?? null,
     calendar: b.calendar ?? null,
+    agenda_error: typeof b.agenda_error === 'string' && b.agenda_error ? b.agenda_error : null,
+    cleared_previous: typeof b.cleared_previous === 'boolean' ? b.cleared_previous : undefined,
     errors: Array.isArray(b.errors) ? b.errors : undefined,
   };
 }
@@ -80,17 +88,19 @@ export function durationLabel(block: Pick<PlanBlock, 'start' | 'end'>): string {
 }
 
 /** Counts for the card header: planned task blocks, focus minutes, events. */
-export function planStats(plan: DayPlan): { tasks: number; focusMinutes: number; events: number } {
+export function planStats(plan: DayPlan): { tasks: number; focusMinutes: number; events: number; done: number } {
   let tasks = 0;
   let focus = 0;
   let events = 0;
+  let done = 0;
   for (const b of plan.blocks) {
     if (b.kind === 'task') {
       tasks++;
       focus += Math.max(0, minutesOf(b.end) - minutesOf(b.start));
+      if (b.done) done++;
     } else if (b.kind === 'event') events++;
   }
-  return { tasks, focusMinutes: focus, events };
+  return { tasks, focusMinutes: focus, events, done };
 }
 
 /** Index of the block happening at `now` (HH:MM), else of the next one; -1 when the day's blocks are over. */
@@ -99,6 +109,17 @@ export function currentBlockIndex(blocks: PlanBlock[], now: string): number {
   const at = blocks.findIndex((b) => minutesOf(b.start) <= t && t < minutesOf(b.end));
   if (at >= 0) return at;
   return blocks.findIndex((b) => minutesOf(b.start) > t);
+}
+
+/**
+ * The collapsed timeline: `size` blocks around the live one (one finished block kept for context), the last ones
+ * when the day's blocks are over. `current` is the live block's index in `blocks` (-1: none).
+ */
+export function visibleWindow(blocks: PlanBlock[], now: string, size: number): { start: number; end: number; current: number } {
+  const current = currentBlockIndex(blocks, now);
+  if (blocks.length <= size) return { start: 0, end: blocks.length, current };
+  const from = current < 0 ? blocks.length - size : Math.min(Math.max(0, current - 1), blocks.length - size);
+  return { start: from, end: from + size, current };
 }
 
 /** Whether the plan can still go to Google Calendar: writable calendar and at least one flexible task block. */

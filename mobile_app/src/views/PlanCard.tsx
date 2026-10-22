@@ -6,7 +6,7 @@ import { clockTime } from '../lib/apps';
 import { announce, useTopic } from '../lib/bus';
 import { errorText, useHub, useHubData } from '../lib/hub';
 import { useNav } from '../lib/nav';
-import { acceptPlan, canBook, clearPlan, currentBlockIndex, durationLabel, getPlan, makePlan, planStats, type DayPlan, type PlanBlock } from '../lib/plan';
+import { acceptPlan, canBook, clearPlan, durationLabel, getPlan, makePlan, planStats, visibleWindow, type DayPlan, type PlanBlock } from '../lib/plan';
 
 const COLLAPSED = 6;
 
@@ -16,8 +16,8 @@ const KIND_STYLE: Record<PlanBlock['kind'], { dot: string; text: string; icon: '
   break: { dot: 'bg-ink-500', text: 'text-ink-400', icon: 'clock' },
 };
 
-function Timeline({ blocks, now, onTask }: { blocks: PlanBlock[]; now: string; onTask: () => void }) {
-  const current = currentBlockIndex(blocks, now);
+/** `current` is the live block's index in `blocks` (computed on the whole day, not on the shown slice). */
+function Timeline({ blocks, current, onTask }: { blocks: PlanBlock[]; current: number; onTask: () => void }) {
   return (
     <ol className="relative mt-3 space-y-1" aria-label="Today's plan">
       <span aria-hidden="true" className="absolute bottom-3 left-[61px] top-3 w-px bg-ink-800" />
@@ -29,8 +29,9 @@ function Timeline({ blocks, now, onTask }: { blocks: PlanBlock[]; now: string; o
             <span className="w-[46px] shrink-0 pt-0.5 text-right font-display text-[13px] font-semibold tabular-nums text-ink-300">{b.start}</span>
             <span className={cx('relative z-[1] mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-ink-900', k.dot, live && 'animate-pulse')} />
             <span className="min-w-0 flex-1">
-              <span className={cx('flex items-center gap-1.5 text-[15px] leading-snug', b.kind === 'break' ? 'text-ink-400' : 'text-ink-100')}>
-                <span className="truncate">{b.title}</span>
+              <span className={cx('flex items-center gap-1.5 text-[15px] leading-snug', b.kind === 'break' || b.done ? 'text-ink-400' : 'text-ink-100')}>
+                <span className={cx('truncate', b.done && 'line-through decoration-ink-500')}>{b.title}</span>
+                {b.done && <Icon name="check" size={12} className="shrink-0 text-mint-400" aria-label="Done" />}
                 {b.fixed && b.kind === 'task' && <Icon name="pin" size={12} className="shrink-0 text-ink-500" aria-label="Fixed time" />}
               </span>
               <span className="block truncate text-[12px] text-ink-500">
@@ -68,9 +69,8 @@ export default function PlanCard() {
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => clockTime());
 
-  useTopic(['tasks'], () => {
-    if (plan.data?.status === 'none') plan.reload();
-  });
+  // A ticked task shows as done in the timeline (the hub flags it), and a new one can make "Plan my day" useful.
+  useTopic(['tasks'], () => plan.reload());
   useEffect(() => {
     const t = window.setInterval(() => setNow(clockTime()), 60_000);
     return () => window.clearInterval(t);
@@ -90,7 +90,23 @@ export default function PlanCard() {
     }
   };
 
-  const doPlan = () => run('plan', () => makePlan(client), () => setExpanded(false));
+  const doPlan = async (p?: DayPlan | null) => {
+    // Re-planning a booked plan removes its Google Calendar blocks (the hub clears them first).
+    if (p?.status === 'accepted' && p.booked > 0) {
+      const ok = await confirm({
+        title: 'Re-plan today?',
+        body: `Re-planning removes the ${p.booked} block${p.booked === 1 ? '' : 's'} from Google Calendar. Accept the new plan to book again.`,
+        confirmLabel: 'Re-plan',
+        tone: 'danger',
+      });
+      if (!ok) return;
+    }
+    await run('plan', () => makePlan(client), (res) => {
+      setExpanded(false);
+      if (res?.cleared_previous === false) notify('Old calendar blocks not all removed: check Google Calendar', 'error');
+      else if (res?.cleared_previous) notify('Calendar blocks removed: accept to book again', 'ok');
+    });
+  };
   const doAccept = (p: DayPlan) =>
     run('accept', () => acceptPlan(client, book && canBook(p)), (res) => {
       if (!res) return;
@@ -118,7 +134,8 @@ export default function PlanCard() {
   const p = plan.data;
   const stats = p ? planStats(p) : null;
   const blocks = p?.blocks ?? [];
-  const shown = expanded ? blocks : blocks.slice(0, COLLAPSED);
+  const win = visibleWindow(blocks, now, expanded ? blocks.length : COLLAPSED);
+  const shown = blocks.slice(win.start, win.end);
 
   return (
     <section aria-label="Plan my day" className="rise rounded-card bg-ink-900 p-4 ring-1 ring-inset ring-ink-800" style={riseStyle(3)}>
@@ -161,7 +178,7 @@ export default function PlanCard() {
           <p className="text-[14px] leading-snug text-ink-400">
             Overdue, due-today and high-priority tasks, placed in the free time between your calendar events (08:00–21:00), with breaks.
           </p>
-          <Button variant="primary" icon="spark" className="w-full" onClick={() => void doPlan()} disabled={busy !== null}>
+          <Button variant="primary" icon="spark" className="w-full" onClick={() => void doPlan(p)} disabled={busy !== null}>
             Plan my day
           </Button>
         </div>
@@ -171,13 +188,25 @@ export default function PlanCard() {
         <>
           {stats && (
             <p className="mt-2 text-[13px] text-ink-400">
-              {stats.tasks} task{stats.tasks === 1 ? '' : 's'} · {Math.round((stats.focusMinutes / 60) * 10) / 10} h of focus
+              {stats.tasks} task{stats.tasks === 1 ? '' : 's'}
+              {stats.done ? ` (${stats.done} done)` : ''} · {Math.round((stats.focusMinutes / 60) * 10) / 10} h of focus
               {stats.events ? ` · ${stats.events} event${stats.events === 1 ? '' : 's'}` : ''}
               {p.window ? ` · from ${p.window.start}` : ''}
             </p>
           )}
+          {p.agenda_error && (
+            <p className="mt-2 flex items-start gap-1.5 text-[13px] leading-snug text-amber-400" role="status">
+              <Icon name="calendar" size={14} className="mt-0.5 shrink-0" />
+              Couldn’t read Google Calendar: events were not considered. Re-plan to try again.
+            </p>
+          )}
+          {win.start > 0 && (
+            <p className="mt-2 px-1 text-[12px] text-ink-500">
+              {win.start} earlier block{win.start === 1 ? '' : 's'}
+            </p>
+          )}
           {blocks.length ? (
-            <Timeline blocks={shown} now={now} onTask={() => go('notes', 'tasks')} />
+            <Timeline blocks={shown} current={win.current - win.start} onTask={() => go('notes', 'tasks')} />
           ) : (
             <p className="mt-3 text-[14px] text-ink-400">Nothing to place today{p.window && p.window.start >= p.window.end ? ': the day is over' : ''}.</p>
           )}
@@ -214,7 +243,7 @@ export default function PlanCard() {
                 {busy === 'clear' ? 'Clearing…' : 'Clear plan'}
               </Button>
             )}
-            <Button icon="refresh" onClick={() => void doPlan()} disabled={busy !== null} aria-label="Plan again">
+            <Button icon="refresh" onClick={() => void doPlan(p)} disabled={busy !== null} aria-label="Plan again">
               Re-plan
             </Button>
           </div>

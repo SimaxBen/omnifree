@@ -1,7 +1,7 @@
 """/plan: an AI-proposed plan for today (Google agenda + open tasks -> ordered time blocks).
 
 * ``POST /plan/today``: build a new plan for today and cache it in D1 (``app_plans``, one row per day). Inputs are
-  today's Google Calendar events (:func:`hub_api.gcal.agenda_day`), the open tasks that matter today (overdue, due
+  today's Google Calendar events (:func:`hub_api.gcal.events_between`), the open tasks that matter today (overdue, due
   today, high priority due within a week; an estimate written in the title/details such as ``(45m)`` or
   ``~1h30`` is honoured, 30 minutes otherwise) and the free time between 08:00 and 21:00 Africa/Casablanca (from
   now, rounded up to the next quarter hour, when planning later in the day). ONE bounded LLM call orders the tasks
@@ -15,8 +15,10 @@
   ``omnifreeKind=plan`` and ``omnifreePlanDay=<YYYY-MM-DD>`` (bounded so the call fits the 60 s limit).
 * ``DELETE /plan/today``: "Clear plan": deletes the tagged calendar events of the day and the cached plan.
 
-Blocks: ``{start, end, kind: event|task|break, ref_id, title, reason, fixed}``; ``start``/``end`` are local
-``HH:MM``. The morning push shows a short "Plan :" line when today's plan exists (:func:`morning_line`).
+Blocks: ``{start, end, kind: event|task|break, ref_id, title, reason, fixed}`` (task blocks get ``done: true`` once
+the task is ticked); ``start``/``end`` are local ``HH:MM``. ``agenda_error`` is set when the calendar could not be
+read (the plan then ignores events). The morning push shows a short "Plan :" line when today's plan exists
+(:func:`morning_line`).
 """
 
 from __future__ import annotations
@@ -65,13 +67,16 @@ SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_plans ("
     " day TEXT PRIMARY KEY, blocks TEXT NOT NULL, unscheduled TEXT NOT NULL DEFAULT '[]',"
     " source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed', events TEXT NOT NULL DEFAULT '[]',"
-    " window_start TEXT, window_end TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    " window_start TEXT, window_end TEXT, agenda_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
 )
+# Added after the first version of the table: ALTER TABLE ... ADD COLUMN when missing (see AppDB.add_columns).
+PLAN_COLUMNS = (("agenda_error", "TEXT"),)
 
 
 async def ensure_schema(db: AppDB) -> AppDB:
     await ensure_notes(db)
     await db.ensure("plans", SCHEMA)
+    await db.add_columns("plans_v2_agenda_error", "app_plans", PLAN_COLUMNS)
     return db
 
 
@@ -367,7 +372,7 @@ def _loads(value: Any, default: Any) -> Any:
 def _plan_out(row: dict[str, Any] | None, day: date, calendar: dict[str, bool] | None = None) -> dict[str, Any]:
     if row is None:
         return {"day": day.isoformat(), "status": "none", "source": None, "blocks": [], "unscheduled": [],
-                "booked": 0, "window": None, "generated_at": None, "calendar": calendar}
+                "booked": 0, "window": None, "generated_at": None, "calendar": calendar, "agenda_error": None}
     events = _loads(row.get("events"), [])
     return {
         "day": row["day"],
@@ -379,7 +384,22 @@ def _plan_out(row: dict[str, Any] | None, day: date, calendar: dict[str, bool] |
         "window": {"start": row.get("window_start"), "end": row.get("window_end")} if row.get("window_start") else None,
         "generated_at": row.get("created_at"),
         "calendar": calendar,
+        "agenda_error": row.get("agenda_error"),  # the calendar could not be read: events were not considered
     }
+
+
+async def _mark_done(db: AppDB, out: dict[str, Any]) -> dict[str, Any]:
+    """Flags the task blocks whose task is done now (the stored blocks are a snapshot of the morning)."""
+    ids = list({str(b["ref_id"]) for b in out["blocks"] if b.get("kind") == "task" and b.get("ref_id")})
+    done: set[str] = set()
+    for i in range(0, len(ids), 90):  # D1 binds at most 100 parameters per statement
+        chunk = ids[i:i + 90]
+        rows = await db.fetch(f"SELECT id FROM app_tasks WHERE done = 1 AND id IN ({', '.join('?' for _ in chunk)})", chunk)
+        done |= {r["id"] for r in rows}
+    for b in out["blocks"]:
+        if b.get("kind") == "task":
+            b["done"] = b.get("ref_id") in done
+    return out
 
 
 async def _get(db: AppDB, day: date) -> dict[str, Any] | None:
@@ -389,6 +409,18 @@ async def _get(db: AppDB, day: date) -> dict[str, Any] | None:
 def _calendar(state: HubState) -> dict[str, bool]:
     cfg = gcal.load_config(state.settings.secret)
     return {"configured": cfg.configured, "writable": cfg.writable}
+
+
+async def _agenda(state: HubState, day: date) -> tuple[list[dict[str, Any]], str | None]:
+    """Today's events and, when the calendar could not be read (fully or for one calendar), why."""
+    try:
+        events, errors = await asyncio.wait_for(gcal.events_between(state, *gcal.day_bounds(day)), AGENDA_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - plan anyway, but say the events are missing
+        log.warning("google calendar agenda unavailable for the plan: %r", exc)
+        return [], "timed out" if isinstance(exc, TimeoutError) else (str(exc) or type(exc).__name__)[:200]
+    if errors:
+        return events, "; ".join(f"{e['calendar']}: {e['error']}" for e in errors)[:200]
+    return events, None
 
 
 async def _clear_events(state: HubState, day: date, known: list[str]) -> tuple[int, str | None]:
@@ -426,12 +458,15 @@ async def build_plan(state: HubState, db: AppDB, *, use_llm: bool = True) -> dic
     previous = await _get(db, today)
     booked_before = _loads(previous.get("events"), []) if previous else []
     cleared_error: str | None = None
-    if booked_before:
-        _, cleared_error = await _clear_events(state, today, booked_before)
+    deleted = 0
+    calendar = _calendar(state)
+    if booked_before or calendar["writable"]:  # by tag too: blocks left by a failed clear or a cut-off accept
+        deleted, cleared_error = await _clear_events(state, today, booked_before)
 
     window = (max(DAY_START, _now_minutes(now, today)), DAY_END)
-    events = await gcal.agenda_day(state, today, AGENDA_TIMEOUT_S)
-    events = [e for e in events if e.get("id") not in set(booked_before)]
+    events, agenda_error = await _agenda(state, today)
+    # Our own plan blocks are never busy time, even when deleting them failed.
+    events = [e for e in events if e.get("id") not in set(booked_before) and e.get("kind") != PLAN_KIND]
     event_blocks: list[dict[str, Any]] = []
     busy: list[tuple[int, int]] = []
     busy_titles: list[dict[str, Any]] = []
@@ -478,7 +513,7 @@ async def build_plan(state: HubState, db: AppDB, *, use_llm: bool = True) -> dic
     row = {
         "day": today.isoformat(), "blocks": json.dumps(blocks, ensure_ascii=False),
         "unscheduled": json.dumps(unscheduled, ensure_ascii=False), "source": source, "status": "proposed",
-        "events": "[]", "window_start": hhmm(window[0]), "window_end": hhmm(window[1]),
+        "events": "[]", "window_start": hhmm(window[0]), "window_end": hhmm(window[1]), "agenda_error": agenda_error,
         "created_at": stamp, "updated_at": stamp,
     }
     cols = list(row)
@@ -487,8 +522,8 @@ async def build_plan(state: HubState, db: AppDB, *, use_llm: bool = True) -> dic
         " ON CONFLICT(day) DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in cols if c != "day"),
         [row[c] for c in cols],
     )
-    out = _plan_out(row, today, _calendar(state))
-    if booked_before:
+    out = await _mark_done(db, _plan_out(row, today, calendar))
+    if booked_before or deleted or cleared_error:
         out["cleared_previous"] = cleared_error is None
     return out
 
@@ -496,7 +531,7 @@ async def build_plan(state: HubState, db: AppDB, *, use_llm: bool = True) -> dic
 @router.get("/today")
 async def get_plan(state: HubState = Depends(get_state), db: AppDB = Depends(_db)) -> dict[str, Any]:
     today = local_now().date()
-    return _plan_out(await _get(db, today), today, _calendar(state))
+    return await _mark_done(db, _plan_out(await _get(db, today), today, _calendar(state)))
 
 
 @router.post("/today")
@@ -555,7 +590,7 @@ async def accept_plan(
         "UPDATE app_plans SET status = 'accepted', events = ?, updated_at = ? WHERE day = ?",
         [json.dumps(booked), now_iso(), today.isoformat()],
     )
-    out = _plan_out(await _get(db, today), today, _calendar(state))
+    out = await _mark_done(db, _plan_out(await _get(db, today), today, _calendar(state)))
     out["errors"] = errors
     return out
 

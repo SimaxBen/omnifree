@@ -502,7 +502,8 @@ def _parse_dt(value: str) -> datetime | None:
 
 
 def normalise_event(item: dict[str, Any], calendar_id: str, calendar_name: str | None) -> dict[str, Any] | None:
-    """``{id, calendar, calendar_id, title, start, end, all_day, location, link}``; times in Africa/Casablanca."""
+    """``{id, calendar, calendar_id, title, start, end, all_day, location, link}``; times in Africa/Casablanca.
+    Events OmniFree wrote with an ``omnifreeKind`` tag also get ``kind`` (``"plan"`` for a plan block)."""
     start, end = item.get("start") or {}, item.get("end") or {}
     if start.get("dateTime"):
         s = _parse_dt(str(start["dateTime"]))
@@ -515,6 +516,7 @@ def normalise_event(item: dict[str, Any], calendar_id: str, calendar_name: str |
         start_out, end_out, all_day = str(start["date"]), str(end.get("date") or start["date"]), True
     else:
         return None
+    kind = ((item.get("extendedProperties") or {}).get("private") or {}).get("omnifreeKind")
     return {
         "id": str(item.get("id") or ""),
         "calendar": calendar_name or calendar_id,
@@ -525,6 +527,7 @@ def normalise_event(item: dict[str, Any], calendar_id: str, calendar_name: str |
         "all_day": all_day,
         "location": item.get("location") or None,
         "link": item.get("htmlLink") or None,
+        **({"kind": str(kind)} if kind else {}),
     }
 
 

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { Icon } from '../../components/icons';
 import { RecordButton, canRecord, formatClock, useRecorder } from '../../components/Recorder';
-import { Sheet } from '../../components/Sheet';
-import { Badge, Button, Chip, ErrorNote, Segmented, riseStyle } from '../../components/ui';
+import { Sheet, useConfirm } from '../../components/Sheet';
+import { Badge, Button, Chip, ErrorNote, Segmented, cx, riseStyle } from '../../components/ui';
 import { formatMoney } from '../../lib/apps';
 import { plainText } from '../../lib/markdown';
 import { announce } from '../../lib/bus';
 import { errorText, useHub, useHubData } from '../../lib/hub';
+import { loadPendingMeeting } from '../../lib/meeting';
 import { voiceMoneySummary } from '../../lib/money';
 import { readPref, writePref } from '../../lib/settings';
 import type { Expense, Income, Note, Task, VoiceMode, VoiceMoneyKind, VoiceNoteResult } from '../../lib/types';
@@ -71,6 +72,10 @@ export default function VoiceSheet({
   const [undoing, setUndoing] = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [meeting, setMeeting] = useState(false);
+  const [meetingRecording, setMeetingRecording] = useState(false);
+  // A meeting whose note was never written (sheet closed, app reloaded): the meeting panel offers to finish it.
+  const [pendingMeeting] = useState(() => loadPendingMeeting() !== null);
+  const confirm = useConfirm();
   const abort = useRef<AbortController | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const touched = useRef(false);
@@ -158,12 +163,26 @@ export default function VoiceSheet({
     }
   };
 
+  // A stray swipe, backdrop tap or Back during a meeting must not end it unasked; once confirmed, the recording
+  // stops and MeetingPanel finishes the last part and the note in the background.
+  const close = async () => {
+    if (meeting && meetingRecording) {
+      const ok = await confirm({
+        title: 'End the meeting?',
+        body: 'Recording stops. What was recorded is still transcribed and the note is written in the background.',
+        confirmLabel: 'End meeting',
+      });
+      if (!ok) return;
+    }
+    onClose();
+  };
+
   const notebooks = Array.from(new Set(['Inbox', ...(books.data?.notebooks.map((b) => b.name) ?? [])]));
 
   return (
-    <Sheet open={open} onClose={onClose} title={meeting ? 'Meeting' : result ? 'Captured' : mode === 'money' ? 'Voice money' : 'Voice note'}>
+    <Sheet open={open} onClose={() => void close()} title={meeting ? 'Meeting' : result ? 'Captured' : mode === 'money' ? 'Voice money' : 'Voice note'}>
       {meeting ? (
-        <MeetingPanel onOpenNote={onOpenNote} onClose={onClose} />
+        <MeetingPanel onOpenNote={onOpenNote} onClose={onClose} onRecordingChange={setMeetingRecording} />
       ) : !result ? (
         <div className="flex flex-col items-center gap-5 pb-2">
           <div className="w-full space-y-2">
@@ -241,9 +260,9 @@ export default function VoiceSheet({
                 Use an audio file instead
               </button>
               {mode !== 'money' && (
-                <button type="button" onClick={() => setMeeting(true)} className="press flex min-h-[44px] items-center gap-1.5 text-[14px] font-semibold text-signal">
+                <button type="button" onClick={() => setMeeting(true)} className={cx('press flex min-h-[44px] items-center gap-1.5 text-[14px] font-semibold', pendingMeeting ? 'text-amber-400' : 'text-signal')}>
                   <Icon name="wave" size={16} />
-                  Record a meeting
+                  {pendingMeeting ? 'Finish the unfinished meeting' : 'Record a meeting'}
                 </button>
               )}
             </div>

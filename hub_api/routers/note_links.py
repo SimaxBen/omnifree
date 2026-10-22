@@ -56,14 +56,15 @@ async def note_titles(
     needle = q.strip()
     if needle:
         rows = await db.fetch(
-            "SELECT id, title, notebook, updated_at FROM app_notes WHERE title LIKE ? ESCAPE '\\'"
+            "SELECT id, title, notebook, updated_at FROM app_notes WHERE title LIKE ? ESCAPE '\\' AND trim(title) <> ''"
             " ORDER BY (title LIKE ? ESCAPE '\\') DESC, updated_at DESC LIMIT ?",
             [f"%{_like(needle)}%", f"{_like(needle)}%", limit],
             limit=limit,
         )
     else:
         rows = await db.fetch(
-            "SELECT id, title, notebook, updated_at FROM app_notes ORDER BY updated_at DESC LIMIT ?", [limit], limit=limit
+            "SELECT id, title, notebook, updated_at FROM app_notes WHERE trim(title) <> '' ORDER BY updated_at DESC LIMIT ?",
+            [limit], limit=limit,
         )
     return {"titles": [{"id": r["id"], "title": r["title"], "notebook": r["notebook"]} for r in rows]}
 

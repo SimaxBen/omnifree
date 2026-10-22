@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../../components/icons';
+import { useConfirm } from '../../components/Sheet';
 import { Markdown } from '../../components/Markdown';
 import { RecordButton, canRecord, extensionFor, formatClock } from '../../components/Recorder';
 import { Button, ErrorNote, Meter, cx, haptic, inputClass, riseStyle } from '../../components/ui';
@@ -9,14 +10,20 @@ import { errorText, useHub } from '../../lib/hub';
 import {
   AUDIO_BITS_PER_SECOND,
   PART_SECONDS,
+  clearPendingMeeting,
   finishMeeting,
+  loadPendingMeeting,
   meetingPartKey,
   meetingProgress,
   meetingStatusText,
   newSession,
   pickMime,
   postMeeting,
+  rememberPart,
+  savePendingMeeting,
+  type MeetingPart,
   type MeetingStatus,
+  type PendingMeeting,
 } from '../../lib/meeting';
 import type { Note, Task } from '../../lib/types';
 import { TaskRow } from './TaskRow';
@@ -25,7 +32,12 @@ type Phase = 'idle' | 'finishing' | 'done';
 
 interface WakeLockLike {
   release: () => Promise<void>;
+  released?: boolean;
+  addEventListener?: (type: 'release', fn: () => void) => void;
 }
+
+/** Recording stops after this long only with a confirmation (a stray tap on a phone lying on the table). */
+const CONFIRM_STOP_AFTER_S = 60;
 
 /**
  * Records in parts of PART_SECONDS: a new MediaRecorder starts on the same stream, then the previous one stops,
@@ -37,6 +49,8 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  /** null: the browser has no wake lock; false: not held (refused, or released while the page was hidden). */
+  const [screenOn, setScreenOn] = useState<boolean | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const current = useRef<MediaRecorder | null>(null);
   const index = useRef(0);
@@ -55,9 +69,37 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
     stream.current = null;
     void audioCtx.current?.close().catch(() => undefined);
     audioCtx.current = null;
-    void wake.current?.release().catch(() => undefined);
+    const w = wake.current;
     wake.current = null;
+    void w?.release().catch(() => undefined);
     setLevel(0);
+  }, []);
+
+  // Keeps the screen on: a long recording should not stop when the phone locks itself. The browser drops the lock
+  // whenever the page is hidden (notification shade, app switch), so it is asked again when the page comes back.
+  const requestWake = useCallback(async () => {
+    const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<WakeLockLike> } }).wakeLock;
+    if (!wl) {
+      setScreenOn(null);
+      return;
+    }
+    try {
+      const lock = await wl.request('screen');
+      if (!stream.current) {
+        void lock.release().catch(() => undefined); // stopped meanwhile
+        return;
+      }
+      wake.current = lock;
+      setScreenOn(true);
+      lock.addEventListener?.('release', () => {
+        if (wake.current === lock) {
+          wake.current = null;
+          setScreenOn(false);
+        }
+      });
+    } catch {
+      setScreenOn(false); // not granted (battery saver, hidden page): recording still works
+    }
   }, []);
 
   const startSegment = useCallback(() => {
@@ -99,6 +141,15 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
     return () => window.clearInterval(t);
   }, [recording, startSegment]);
 
+  useEffect(() => {
+    if (!recording) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !stopping.current && (!wake.current || wake.current.released)) void requestWake();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [recording, requestWake]);
+
   useEffect(
     () => () => {
       stopping.current = true;
@@ -136,13 +187,7 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
       } catch {
         // The level meter is decorative.
       }
-      try {
-        // Keeps the screen on: a long recording should not stop when the phone locks itself.
-        const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<WakeLockLike> } }).wakeLock;
-        if (wl) wake.current = await wl.request('screen');
-      } catch {
-        // Not granted (battery saver, desktop): recording still works.
-      }
+      await requestWake();
       started.current = Date.now();
       setElapsed(0);
       startSegment();
@@ -152,7 +197,7 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
       teardown();
       setError(`Microphone unavailable: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [startSegment, teardown]);
+  }, [requestWake, startSegment, teardown]);
 
   const stop = useCallback(() => {
     haptic(14);
@@ -160,12 +205,27 @@ function useSegmentedRecorder(onPart: (blob: Blob, index: number, seconds: numbe
     current.current?.stop();
   }, []);
 
-  return { recording, elapsed, level, error, start, stop };
+  return { recording, elapsed, level, error, screenOn, start, stop };
 }
 
-/** "Meeting" mode of the voice sheet: long recording -> parts in the Drive -> transcript, summary note, tasks. */
-export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: Note) => void; onClose: () => void }) {
+/**
+ * "Meeting" mode of the voice sheet: long recording -> parts in the Drive -> transcript, summary note, tasks.
+ * The work outlives the sheet: closing it (after a confirm while recording) stops the recording, and the last part,
+ * the transcription and the note still finish in the background (a toast says when). Every uploaded part is also
+ * kept in localStorage until the note exists, so a reload or a killed app can finish the meeting later.
+ */
+export default function MeetingPanel({
+  onOpenNote,
+  onClose,
+  onRecordingChange,
+}: {
+  onOpenNote: (n: Note) => void;
+  onClose: () => void;
+  /** Lets the voice sheet ask before closing while a meeting is being recorded. */
+  onRecordingChange?: (recording: boolean) => void;
+}) {
   const { client, notify } = useHub();
+  const confirm = useConfirm();
   const [phase, setPhase] = useState<Phase>('idle');
   const [title, setTitle] = useState('');
   const [status, setStatus] = useState<MeetingStatus | null>(null);
@@ -173,77 +233,138 @@ export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: 
   const [recorded, setRecorded] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [resume, setResume] = useState<PendingMeeting | null>(() => loadPendingMeeting());
   const session = useRef(newSession());
   const meetingId = useRef<string | null>(null);
+  const parts = useRef<MeetingPart[]>([]);
+  const resumed = useRef<PendingMeeting | null>(null);
   const queue = useRef<Promise<void>>(Promise.resolve());
-  const abort = useRef(new AbortController());
   const titleRef = useRef(title);
   titleRef.current = title;
 
-  useEffect(() => () => abort.current.abort(), []);
+  const remember = (part: MeetingPart | null) =>
+    savePendingMeeting(rememberPart(loadPendingMeeting(), session.current, part, meetingId.current, titleRef.current.trim() || undefined));
 
-  // Each part: upload to the Drive, then tell the hub (which transcribes it while the meeting goes on).
+  // Each part: upload to the Drive, then tell the hub (which transcribes it while the meeting goes on). Nothing is
+  // aborted when the sheet closes: the queue keeps running so the last part and the note are not lost.
   const onPart = (blob: Blob, index: number, seconds: number) => {
     setRecorded((n) => n + 1);
     queue.current = queue.current.then(async () => {
       const ext = extensionFor(blob.type);
       const key = meetingPartKey(session.current, index, ext, isoDay());
       const file = new File([blob], key.split('/').pop() as string, { type: blob.type || 'audio/webm' });
+      let part: MeetingPart | null = null;
       let lastErr: unknown = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 3 && !part; attempt++) {
         try {
           const up = await client.driveUploadFile(file, { key });
-          setUploaded((n) => n + 1);
-          const res = await postMeeting(
-            client,
-            {
-              ...(meetingId.current ? { meeting_id: meetingId.current } : {}),
-              audio_keys: [{ key: up.key, provider: up.provider || undefined, seconds: Math.round(seconds) }],
-              final: false,
-              ...(titleRef.current.trim() ? { title: titleRef.current.trim() } : {}),
-            },
-            abort.current.signal,
-          );
-          meetingId.current = res.meeting_id;
-          setStatus(res);
-          return;
+          part = { key: up.key, provider: up.provider || undefined, seconds: Math.round(seconds) };
         } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') return;
           lastErr = err;
           await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
         }
       }
-      setError(`Part ${index + 1} could not be saved: ${errorText(lastErr)}`);
+      if (!part) {
+        setError(`Part ${index + 1} could not be saved: ${errorText(lastErr)}`);
+        return;
+      }
+      parts.current.push(part);
+      setUploaded((n) => n + 1);
+      remember(part);
+      try {
+        const res = await postMeeting(client, {
+          ...(meetingId.current ? { meeting_id: meetingId.current } : {}),
+          audio_keys: [part],
+          final: false,
+          ...(titleRef.current.trim() ? { title: titleRef.current.trim() } : {}),
+        });
+        meetingId.current = res.meeting_id;
+        setStatus(res);
+        remember(null);
+      } catch {
+        // Not retried here: the final call sends every uploaded part again and the hub adds the ones it missed.
+      }
     });
   };
 
-  const onEnd = () => {
+  const finish = (pending?: PendingMeeting) => {
     setPhase('finishing');
+    setError(null);
     void queue.current.then(async () => {
-      if (!meetingId.current) {
+      const id = pending ? pending.meetingId : meetingId.current;
+      const keys = pending ? pending.parts : parts.current;
+      if (!id && !keys.length) {
         setError((e) => e ?? 'Nothing was recorded.');
         setPhase('idle');
         return;
       }
       try {
-        const done = await finishMeeting(client, meetingId.current, setStatus, abort.current.signal);
+        const done = await finishMeeting(
+          client,
+          id,
+          (s) => {
+            meetingId.current = s.meeting_id;
+            setStatus(s);
+          },
+          undefined,
+          undefined,
+          undefined,
+          keys,
+        );
+        clearPendingMeeting();
+        setResume(null);
         setTasks(done.tasks ?? []);
         setPhase('done');
         announce('notes', 'tasks');
-        notify('Meeting note ready', 'ok');
+        notify(`Meeting note ready${done.note?.title ? `: ${done.note.title}` : ''}`, 'ok');
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
         setError(errorText(err));
       }
     });
   };
 
-  const rec = useSegmentedRecorder(onPart, onEnd);
+  const rec = useSegmentedRecorder(onPart, () => finish());
+
+  useEffect(() => {
+    onRecordingChange?.(rec.recording);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rec.recording]);
+
+  const resumeMeeting = (p: PendingMeeting) => {
+    haptic(10);
+    resumed.current = p;
+    meetingId.current = p.meetingId;
+    finish(p);
+  };
+
+  const discard = async () => {
+    const ok = await confirm({
+      title: 'Discard the unfinished meeting?',
+      body: 'No note is written for it. Its audio parts stay in your Drive.',
+      confirmLabel: 'Discard',
+      tone: 'danger',
+    });
+    if (!ok) return;
+    clearPendingMeeting();
+    setResume(null);
+  };
+
+  const press = async () => {
+    if (!rec.recording) {
+      void rec.start();
+      return;
+    }
+    if (rec.elapsed >= CONFIRM_STOP_AFTER_S) {
+      const ok = await confirm({ title: 'End the meeting?', body: 'Recording stops and the summary note is written.', confirmLabel: 'End meeting' });
+      if (!ok) return;
+    }
+    rec.stop();
+  };
 
   const retry = () => {
-    if (!meetingId.current) return;
-    setError(null);
-    onEnd();
+    if (!meetingId.current && !parts.current.length && !resumed.current) return;
+    const p = resumed.current;
+    finish(p ? { ...p, meetingId: meetingId.current ?? p.meetingId } : undefined);
   };
 
   if (phase === 'done' && status?.note) {
@@ -301,6 +422,28 @@ export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: 
   const progress = meetingProgress(status);
   return (
     <div className="flex flex-col items-center gap-5 pb-2">
+      {phase === 'idle' && !rec.recording && resume && (
+        <div className="w-full rounded-card bg-ink-850 p-4 ring-1 ring-inset ring-amber-400/40">
+          <p className="flex items-center gap-2 font-display text-[16px] font-semibold text-ink-100">
+            <Icon name="clock" size={16} className="text-amber-400" />
+            Unfinished meeting
+          </p>
+          <p className="mt-1 text-[13px] text-ink-400">
+            {resume.title ? `${resume.title} · ` : ''}
+            {resume.startedAt ? `${new Date(resume.startedAt).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ` : ''}
+            {resume.parts.length} part{resume.parts.length === 1 ? '' : 's'} saved, no note yet.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <Button variant="primary" className="flex-1" icon="check" onClick={() => resumeMeeting(resume)}>
+              Finish meeting
+            </Button>
+            <Button variant="ghost" onClick={() => void discard()}>
+              Discard
+            </Button>
+          </div>
+        </div>
+      )}
+
       {phase === 'idle' && !rec.recording && (
         <div className="w-full space-y-2">
           <input aria-label="Meeting title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Meeting title (optional)" className={inputClass} />
@@ -319,11 +462,11 @@ export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: 
           </div>
           <p className="text-[15px] text-ink-200">{meetingStatusText(status)}</p>
           <Meter value={progress} tone="ok" className="mx-auto h-1.5 max-w-[260px]" />
-          <p className="text-[13px] text-ink-500">You can leave this open; long meetings take a minute or two.</p>
+          <p className="text-[13px] text-ink-500">Long meetings take a minute or two. You can close this: the note is still written and a notice tells you when.</p>
         </div>
       ) : canRecord() ? (
         <div className="relative flex flex-col items-center">
-          <RecordButton recording={rec.recording} level={rec.level} onPress={() => (rec.recording ? rec.stop() : void rec.start())} />
+          <RecordButton recording={rec.recording} level={rec.level} onPress={() => void press()} />
           <p className="mt-1 font-display text-[28px] font-semibold tabular-nums text-ink-100" aria-live="polite">
             {rec.recording ? formatClock(rec.elapsed) : 'Tap to start the meeting'}
           </p>
@@ -334,6 +477,13 @@ export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: 
               {status && status.parts_done > 0 && ` · ${status.parts_done} transcribed`}
             </p>
           )}
+          {rec.recording && (
+            <p className={cx('mt-2 max-w-[280px] text-center text-[12px] leading-snug', rec.screenOn === true ? 'text-ink-500' : 'text-amber-400')} role="status">
+              {rec.screenOn === true
+                ? 'Keep this screen open while recording.'
+                : 'The screen may turn off: keep this screen open and the phone awake while recording.'}
+            </p>
+          )}
         </div>
       ) : (
         <p className="py-10 text-center text-[14px] text-ink-400">This browser cannot record audio.</p>
@@ -342,7 +492,7 @@ export default function MeetingPanel({ onOpenNote, onClose }: { onOpenNote: (n: 
       {(rec.error || error) && (
         <div className="w-full space-y-2">
           <ErrorNote message={(rec.error || error) as string} />
-          {phase === 'finishing' && meetingId.current && (
+          {phase === 'finishing' && (meetingId.current || parts.current.length > 0 || resumed.current) && (
             <Button className="w-full" icon="refresh" onClick={retry}>
               Try again
             </Button>

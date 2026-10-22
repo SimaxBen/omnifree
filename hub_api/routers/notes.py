@@ -532,10 +532,17 @@ async def list_notes(
     sql = "SELECT * FROM app_notes"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT ?"
-    rows = await db.fetch(sql, [*params, limit], limit=limit)
-    if tag:  # the body LIKE also matches "#tagged": keep exact tags only
-        rows = [r for r in rows if tag in _note_out(r)["tags"] or tag in note_links.body_tags(r.get("body") or "")]
+    sql += " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT ? OFFSET ?"
+    if not tag:
+        rows = await db.fetch(sql, [*params, limit, 0], limit=limit)
+    else:  # the body LIKE also matches "#tagged": keep exact tags only, filtered before the limit is applied
+        rows, page = [], max(limit, 100)
+        for offset in range(0, 5 * page, page):
+            batch = await db.fetch(sql, [*params, page, offset], limit=page)
+            rows += [r for r in batch if tag in _note_out(r)["tags"] or tag in note_links.body_tags(r.get("body") or "")]
+            if len(rows) >= limit or len(batch) < page:
+                break
+        rows = rows[:limit]
     books = await db.fetch(
         "SELECT notebook AS name, COUNT(*) AS count FROM app_notes GROUP BY notebook ORDER BY notebook"
     )

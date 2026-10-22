@@ -4,9 +4,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { Markdown } from '../../components/Markdown';
 import type { HubClient } from '../api';
 import { completeWikiLink, parseBlocks, parseInline, plainText, wikiLinks, wikiQuery } from '../markdown';
-import { finishMeeting, meetingPartKey, meetingProgress, meetingStatusText, newSession, pickMime, type MeetingStatus } from '../meeting';
+import {
+  clearPendingMeeting,
+  finishMeeting,
+  loadPendingMeeting,
+  meetingPartKey,
+  meetingProgress,
+  meetingStatusText,
+  newSession,
+  pickMime,
+  rememberPart,
+  savePendingMeeting,
+  type MeetingStatus,
+} from '../meeting';
 import { normalizeTag, notesByTag, onTagFilter, requestTagFilter, takePendingTag } from '../noteLinks';
-import { canBook, currentBlockIndex, durationLabel, minutesOf, normalizePlan, planStats, type PlanBlock } from '../plan';
+import { canBook, currentBlockIndex, durationLabel, minutesOf, normalizePlan, planStats, visibleWindow, type PlanBlock } from '../plan';
 
 const html = (text: string, props: Partial<Parameters<typeof Markdown>[0]> = {}) => renderToStaticMarkup(createElement(Markdown, { text, ...props }));
 
@@ -103,6 +115,10 @@ describe('plan helpers', () => {
     expect(canBook(p)).toBe(true);
     expect(canBook({ ...p, calendar: { configured: true, writable: false } })).toBe(false);
     expect(canBook({ ...p, blocks: blocks.filter((b) => b.fixed) })).toBe(false);
+    expect(p.agenda_error).toBeNull();
+    expect(p.cleared_previous).toBeUndefined();
+    const q = normalizePlan({ agenda_error: 'timed out', cleared_previous: false });
+    expect([q.agenda_error, q.cleared_previous]).toEqual(['timed out', false]);
   });
 
   it('labels durations and counts focus time', () => {
@@ -110,7 +126,9 @@ describe('plan helpers', () => {
     expect(durationLabel(blocks[0])).toBe('1 h 30');
     expect(durationLabel(blocks[1])).toBe('15 min');
     expect(durationLabel(blocks[2])).toBe('1 h');
-    expect(planStats(normalizePlan({ blocks }))).toEqual({ tasks: 2, focusMinutes: 120, events: 1 });
+    expect(planStats(normalizePlan({ blocks }))).toEqual({ tasks: 2, focusMinutes: 120, events: 1, done: 0 });
+    const ticked = blocks.map((b, i) => (b.kind === 'task' && i === blocks.findIndex((x) => x.kind === 'task') ? { ...b, done: true } : b));
+    expect(planStats(normalizePlan({ blocks: ticked })).done).toBe(1);
   });
 
   it('finds the current or next block', () => {
@@ -118,6 +136,19 @@ describe('plan helpers', () => {
     expect(currentBlockIndex(blocks, '09:50')).toBe(2);
     expect(currentBlockIndex(blocks, '07:00')).toBe(0);
     expect(currentBlockIndex(blocks, '16:00')).toBe(-1);
+  });
+
+  it('centers the collapsed timeline on the live block', () => {
+    const day: PlanBlock[] = Array.from({ length: 10 }, (_, i) => ({
+      start: `${String(8 + i).padStart(2, '0')}:00`, end: `${String(8 + i).padStart(2, '0')}:45`, kind: 'task', ref_id: `t${i}`, title: `T${i}`, reason: '', fixed: false,
+    }));
+    expect(visibleWindow(day, '07:00', 6)).toEqual({ start: 0, end: 6, current: 0 });
+    expect(visibleWindow(day, '08:10', 6)).toEqual({ start: 0, end: 6, current: 0 });
+    expect(visibleWindow(day, '13:10', 6)).toEqual({ start: 4, end: 10, current: 5 }); // one finished block kept
+    expect(visibleWindow(day, '12:10', 6)).toEqual({ start: 3, end: 9, current: 4 });
+    expect(visibleWindow(day, '17:50', 6)).toEqual({ start: 4, end: 10, current: -1 }); // day over: the last ones
+    expect(visibleWindow(blocks, '15:10', 6)).toEqual({ start: 0, end: 4, current: 3 });
+    expect(visibleWindow(day, '13:10', 10)).toEqual({ start: 0, end: 10, current: 5 }); // expanded
   });
 });
 
@@ -183,5 +214,51 @@ describe('note links client', () => {
     expect(request).toHaveBeenCalledWith('GET', '/notes', { query: { tag: 'idea', notebook: undefined, limit: 10 }, signal: undefined });
     expect(res.notes).toHaveLength(1);
     expect(res.notebooks[0].name).toBe('Inbox');
+  });
+});
+
+describe('unfinished meetings', () => {
+  const mem = () => {
+    const m = new Map<string, string>();
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) };
+  };
+
+  it('remembers every uploaded part and the meeting id until the note exists', () => {
+    const kv = mem();
+    expect(loadPendingMeeting(kv)).toBeNull();
+    let p = rememberPart(null, 's1', { key: 'meetings/a/part-000.webm', seconds: 600 }, null, 'Weekly', 1000);
+    p = rememberPart(p, 's1', { key: 'meetings/a/part-000.webm', seconds: 600 }, 'm1');
+    p = rememberPart(p, 's1', { key: 'meetings/a/part-001.webm', seconds: 30 }, null);
+    savePendingMeeting(p, kv);
+    expect(loadPendingMeeting(kv)).toEqual({ meetingId: 'm1', session: 's1', title: 'Weekly', startedAt: 1000, parts: [{ key: 'meetings/a/part-000.webm', seconds: 600 }, { key: 'meetings/a/part-001.webm', seconds: 30 }] });
+    expect(rememberPart(p, 's2', null, null, undefined, 5).parts).toEqual([]); // a new meeting starts over
+    kv.setItem('omnifree.meeting.pending', '{broken');
+    expect(loadPendingMeeting(kv)).toBeNull();
+    savePendingMeeting(p, kv);
+    clearPendingMeeting(kv);
+    expect(loadPendingMeeting(kv)).toBeNull();
+    expect(loadPendingMeeting(null)).toBeNull();
+  });
+
+  it('sends every part with the first final call, and creates the meeting when it has no id yet', async () => {
+    const base = { final: true, parts_total: 2, parts_failed: 0, note_id: null, task_ids: [], error: null };
+    const answers: Partial<MeetingStatus>[] = [
+      { meeting_id: 'm9', status: 'transcribing', parts_done: 1, remaining: 1 },
+      { meeting_id: 'm9', status: 'done', parts_done: 2, remaining: 0, note_id: 'n1' },
+    ];
+    const request = vi.fn(async () => ({ ...base, ...answers.shift() }));
+    const parts = [{ key: 'meetings/a/part-000.webm' }, { key: 'meetings/a/part-001.webm' }];
+    const done = await finishMeeting({ request } as unknown as HubClient, null, () => undefined, undefined, async () => undefined, 5, parts);
+    expect(done.note_id).toBe('n1');
+    expect(request.mock.calls[0]).toEqual(['POST', '/notes/meeting', { json: { audio_keys: parts, final: true }, signal: undefined }]);
+    expect(request.mock.calls[1]).toEqual(['POST', '/notes/meeting', { json: { meeting_id: 'm9', final: true }, signal: undefined }]);
+  });
+});
+
+describe('tag filter with a search', () => {
+  it('passes the search words along with the tag', async () => {
+    const request = vi.fn(async () => ({ notes: [], notebooks: [] }));
+    await notesByTag({ request } as unknown as HubClient, 'idea', { limit: 5, q: '  garden ' });
+    expect(request).toHaveBeenCalledWith('GET', '/notes', { query: { tag: 'idea', notebook: undefined, limit: 5, q: 'garden' }, signal: undefined });
   });
 });

@@ -94,22 +94,89 @@ export function meetingStatusText(s: Pick<MeetingStatus, 'status' | 'parts_total
   return `Transcribing part ${Math.min(s.parts_done + 1, n)} of ${n}`;
 }
 
-/** Calls `POST /notes/meeting` (final) until the note is written; each call is one bounded hub run. */
+/**
+ * Calls `POST /notes/meeting` (final) until the note is written; each call is one bounded hub run. `parts` (every
+ * uploaded part) go with the first call: the hub ignores the keys it already has and adds any it missed (a part
+ * whose own call failed), and creates the meeting when `meetingId` is still null.
+ */
 export async function finishMeeting(
   client: HubClient,
-  meetingId: string,
+  meetingId: string | null,
   onStatus: (s: MeetingStatus) => void,
   signal?: AbortSignal,
   wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   maxCalls = 120,
+  parts: MeetingPart[] = [],
 ): Promise<MeetingStatus> {
   let last: MeetingStatus | null = null;
+  let id = meetingId;
   for (let i = 0; i < maxCalls; i++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    last = await postMeeting(client, { meeting_id: meetingId, final: true }, signal);
+    const keys = i === 0 && parts.length ? { audio_keys: parts } : {};
+    last = await postMeeting(client, { ...(id ? { meeting_id: id } : {}), ...keys, final: true }, signal);
+    id = last.meeting_id;
     onStatus(last);
     if (last.status === 'done') return last;
     if (last.busy) await wait(3000); // another call is still working on it
   }
   throw new Error(`The meeting is still being processed (${last?.parts_done ?? 0}/${last?.parts_total ?? 0} parts); open it again later`);
+}
+
+// ------------------------------------------------------------------ unfinished meetings (survive a closed sheet or a reload)
+
+/** A meeting whose note is not written yet: kept in localStorage until the hub answers `done`. */
+export interface PendingMeeting {
+  meetingId: string | null;
+  session: string;
+  title?: string;
+  startedAt: number;
+  parts: MeetingPart[];
+}
+
+const PENDING_KEY = 'omnifree.meeting.pending';
+
+type KV = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+
+function store(): KV | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function loadPendingMeeting(kv: KV | null = store()): PendingMeeting | null {
+  try {
+    const raw = kv?.getItem(PENDING_KEY);
+    const p = raw ? (JSON.parse(raw) as Partial<PendingMeeting>) : null;
+    if (!p || typeof p.session !== 'string' || !Array.isArray(p.parts)) return null;
+    const parts = p.parts.filter((x): x is MeetingPart => !!x && typeof x.key === 'string');
+    if (!parts.length && !p.meetingId) return null;
+    return { meetingId: typeof p.meetingId === 'string' ? p.meetingId : null, session: p.session, title: p.title, startedAt: Number(p.startedAt) || 0, parts };
+  } catch {
+    return null;
+  }
+}
+
+export function savePendingMeeting(p: PendingMeeting, kv: KV | null = store()): void {
+  try {
+    kv?.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {
+    // Storage full or blocked: only the resume entry is lost.
+  }
+}
+
+export function clearPendingMeeting(kv: KV | null = store()): void {
+  try {
+    kv?.removeItem(PENDING_KEY);
+  } catch {
+    // Same as above.
+  }
+}
+
+/** Records one more uploaded part (and the hub's meeting id once known) for `session`. */
+export function rememberPart(p: PendingMeeting | null, session: string, part: MeetingPart | null, meetingId: string | null, title?: string, now = Date.now()): PendingMeeting {
+  const base = p && p.session === session ? p : { meetingId: null, session, startedAt: now, parts: [] };
+  const parts = part && !base.parts.some((x) => x.key === part.key) ? [...base.parts, part] : base.parts;
+  return { ...base, meetingId: meetingId ?? base.meetingId, parts, ...(title ? { title } : {}) };
 }

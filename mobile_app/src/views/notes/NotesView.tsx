@@ -62,7 +62,7 @@ function NotesPanel() {
   const list = useHubData(
     (c, s) =>
       tag
-        ? notesByTag(c, tag, { notebook: notebook || undefined, limit: 100 }, s)
+        ? notesByTag(c, tag, { notebook: notebook || undefined, limit: 100, q: debounced || undefined }, s)
         : c.notes({ notebook: notebook || undefined, q: debounced || undefined, limit: 100 }, s),
     [notebook, debounced, tag],
   );
@@ -121,7 +121,7 @@ function NotesPanel() {
     <div className="space-y-4">
       <div className="relative">
         <Icon name="search" size={18} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-500" />
-        <input type="search" aria-label="Search notes" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search titles, text and tags" className={cx(inputClass, 'pl-11')} />
+        <input type="search" aria-label="Search notes" value={q} onChange={(e) => setQ(e.target.value)} placeholder={tag ? `Search the notes tagged #${tag}` : 'Search titles, text and tags'} className={cx(inputClass, 'pl-11')} />
       </div>
 
       {tag && (
@@ -155,7 +155,7 @@ function NotesPanel() {
       {list.data && notes.length === 0 && (
         <EmptyState
           icon="note"
-          title={tag ? `No notes tagged #${tag}` : debounced ? 'No notes match' : notebook ? `${notebook} is empty` : 'No notes yet'}
+          title={tag ? (debounced ? `No notes tagged #${tag} match` : `No notes tagged #${tag}`) : debounced ? 'No notes match' : notebook ? `${notebook} is empty` : 'No notes yet'}
           hint={debounced ? 'Try another word, or search a tag without the #.' : 'Write one, or record a voice note and let it be written for you.'}
           action={
             !debounced && (

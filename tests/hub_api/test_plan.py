@@ -163,7 +163,7 @@ def test_plan_greedy_fallback_cached_and_morning_line(app_hub, monkeypatch: pyte
     assert len(fa.CHAT_LOG) == 1  # one LLM call per plan
 
     out = app_hub.post("/notify/run?kind=morning&preview=1").json()
-    assert "Plan : 08:00 Old thing (1h) · 09:00 Pay rent · 09:45 Urgent idea (+1)"  # break after 90 min in out["message"].splitlines()
+    assert "Plan : 08:00 Old thing (1h) · 09:00 Pay rent · 09:45 Urgent idea (+1)" in out["message"].splitlines()  # break after 90 min
 
     assert app_hub.delete("/plan/today").json()["cleared"] is True
     assert app_hub.get("/plan/today").json()["status"] == "none"
@@ -226,7 +226,7 @@ def test_plan_with_google_agenda_booking_and_clear(make_hub, google: FakeGoogle)
     assert standup["title"] == "Standup" and standup["start"] == local and standup["fixed"] is True
     assert not any(b["title"] == "Holiday" for b in plan["blocks"])
     _no_overlap(plan["blocks"])
-    assert plan["calendar"] == {"configured": True, "writable": True}
+    assert plan["calendar"] == {"configured": True, "writable": True} and plan["agenda_error"] is None
 
     out = hub.post("/plan/today/accept", json={"book": True}).json()
     assert out["status"] == "accepted" and out["booked"] == 1 and out["errors"] == []
@@ -250,3 +250,60 @@ def test_plan_with_google_agenda_booking_and_clear(make_hub, google: FakeGoogle)
     cleared = hub.delete("/plan/today").json()
     assert cleared["deleted_events"] == 1 and cleared["error"] is None
     assert live[0]["status"] == "cancelled"
+
+
+def test_plan_says_when_the_agenda_could_not_be_read(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    _task(app_hub, "Report", DAY.isoformat())
+
+    async def down(*_a: Any, **_k: Any) -> Any:
+        raise TimeoutError
+
+    monkeypatch.setattr(gcal, "events_between", down)
+    plan = app_hub.post("/plan/today", json={"use_llm": False}).json()
+    assert plan["agenda_error"] == "timed out" and [b["title"] for b in _tasks_of(plan)] == ["Report"]
+    assert app_hub.get("/plan/today").json()["agenda_error"] == "timed out"  # kept with the cached plan
+
+    async def partly(*_a: Any, **_k: Any) -> Any:
+        return [], [{"calendar": "owner@gmail.com", "error": "403 forbidden"}]
+
+    monkeypatch.setattr(gcal, "events_between", partly)
+    plan = app_hub.post("/plan/today", json={"use_llm": False}).json()
+    assert plan["agenda_error"] == "owner@gmail.com: 403 forbidden"
+
+
+def test_plan_blocks_left_in_the_calendar_are_removed_and_never_busy(make_hub, google: FakeGoogle) -> None:
+    hub = make_hub(fa.apps_plugins())
+    _task(hub, "Report (1h)", DAY.isoformat())
+    hub.post("/plan/today", json={"use_llm": False})
+    assert hub.post("/plan/today/accept", json={"book": True}).json()["booked"] == 1
+    fa.sql("DELETE FROM app_plans")  # a clear whose calendar part failed: the block stays, the plan row is gone
+    ghost = next(e for e in google.events[CAL].values() if e.get("status") != "cancelled"
+                 and e["extendedProperties"]["private"].get("omnifreeKind") == "plan")
+    # and one the tag search cannot reach (copied into another calendar): still not busy time
+    private = {"omnifreeKind": "plan", "omnifreePlanDay": DAY.isoformat()}
+    google.add_owner_event("▸ Copy", "2030-03-12T08:00:00+00:00", "2030-03-12T12:00:00+00:00",
+                           extendedProperties={"private": private})
+
+    plan = hub.post("/plan/today", json={"use_llm": False}).json()
+    assert ghost["status"] == "cancelled" and plan["cleared_previous"] is True
+    assert [b["kind"] for b in plan["blocks"]].count("event") == 0
+    assert _tasks_of(plan)[0]["start"] == "08:00"
+
+
+def test_plan_marks_ticked_tasks_done(app_hub) -> None:
+    t = _task(app_hub, "Report", DAY.isoformat())
+    _task(app_hub, "Call", DAY.isoformat())
+    plan = app_hub.post("/plan/today", json={"use_llm": False}).json()
+    assert [b["done"] for b in _tasks_of(plan)] == [False, False]
+    assert app_hub.patch(f"/tasks/{t['id']}", json={"done": True}).status_code == 200
+    blocks = _tasks_of(app_hub.get("/plan/today").json())
+    assert {b["title"]: b["done"] for b in blocks} == {"Report": True, "Call": False}
+
+
+def test_plan_table_from_before_agenda_error_gets_the_column(app_hub) -> None:
+    fa.sql("CREATE TABLE app_plans (day TEXT PRIMARY KEY, blocks TEXT NOT NULL, unscheduled TEXT NOT NULL DEFAULT '[]',"
+           " source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed', events TEXT NOT NULL DEFAULT '[]',"
+           " window_start TEXT, window_end TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    _task(app_hub, "Report", DAY.isoformat())
+    plan = app_hub.post("/plan/today", json={"use_llm": False}).json()
+    assert plan["agenda_error"] is None and _tasks_of(plan)[0]["title"] == "Report"

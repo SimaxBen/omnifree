@@ -96,3 +96,51 @@ def test_notes_tag_filter(app_hub) -> None:
     got = app_hub.get("/notes", params={"tag": "#Idea"}).json()["notes"]
     assert sorted(n["id"] for n in got) == sorted([a["id"], b["id"]])
     assert app_hub.get("/notes", params={"tag": "ideas"}).json()["notes"][0]["title"] == "C"
+
+
+def test_titles_skip_untitled_notes(app_hub) -> None:
+    _note(app_hub, title="Named", body="x")
+    fa.sql(
+        "INSERT INTO app_notes (id, title, body, notebook, tags, source, pinned, created_at, updated_at)"
+        " VALUES ('blank1', '  ', 'no title', 'Inbox', '[]', 'text', 0, '2999-01-01T00:00:00Z', '2999-01-01T00:00:00Z')"
+    )
+    assert [t["title"] for t in app_hub.get("/notes/links/titles").json()["titles"]] == ["Named"]
+    assert [t["title"] for t in app_hub.get("/notes/links/titles", params={"q": " "}).json()["titles"]] == ["Named"]
+
+
+def test_link_index_writes_in_batches_and_rebuilds_in_pages(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hub_api import note_links as nl
+
+    body = " ".join(f"[[Page {i}]]" for i in range(nl.MAX_LINKS + 10))
+    src = _note(app_hub, title="Hub", body=body)
+    assert fa.sql("SELECT COUNT(*) FROM app_note_links WHERE src_id = ?", [src["id"]])[0][0] == nl.MAX_LINKS == 50
+
+    app_hub.delete(f"/notes/{src['id']}")
+    fa.sql("DELETE FROM app_note_links")
+    fa.sql("DELETE FROM app_note_links_meta")
+    for i in range(5):
+        fa.sql(
+            "INSERT INTO app_notes (id, title, body, notebook, tags, source, pinned, created_at, updated_at)"
+            " VALUES (?, ?, '[[Target]]', 'Inbox', '[]', 'text', 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+            [f"old{i}", f"Old {i}"],
+        )
+    target = _note(app_hub, title="Target", body="t")
+    monkeypatch.setattr(nl, "INDEX_PAGE", 2)
+    monkeypatch.setattr(nl, "INDEX_BUDGET_S", -1.0)  # one page per call, as if each call ran out of time
+    seen = []
+    for _ in range(6):
+        seen.append(len(app_hub.get(f"/notes/{target['id']}/backlinks").json()["backlinks"]))
+    assert seen[:3] == [2, 4, 5] and seen[-1] == 5  # resumes where it stopped, never restarts
+    assert fa.sql("SELECT value FROM app_note_links_meta WHERE key = 'indexed'")[0][0] == "1"
+    assert fa.sql("SELECT COUNT(*) FROM app_note_links_meta WHERE key = 'cursor'")[0][0] == 0
+
+
+def test_notes_tag_filter_is_not_cut_short_by_false_matches(app_hub) -> None:
+    for i in range(6):
+        _note(app_hub, title=f"Noise {i}", body="lots of #ideas")
+    real = _note(app_hub, title="Real", body="an #idea")
+    fa.sql("UPDATE app_notes SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?", [real["id"]])  # listed last
+    got = app_hub.get("/notes", params={"tag": "idea", "limit": 3}).json()["notes"]
+    assert [n["id"] for n in got] == [real["id"]]
+    got = app_hub.get("/notes", params={"tag": "ideas", "q": "Noise 1", "limit": 3}).json()["notes"]
+    assert [n["title"] for n in got] == ["Noise 1"]

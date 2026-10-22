@@ -55,9 +55,10 @@ export function openNoteLink(client: HubClient, title: string, notebook?: string
   return client.request('POST', '/notes/links/open', { json: { title, create: true, ...(notebook ? { notebook } : {}) } });
 }
 
-/** `GET /notes?tag=`: notes with a tag (in their tag list or written as #tag in the body). */
-export async function notesByTag(client: HubClient, tag: string, opts: { notebook?: string; limit?: number } = {}, signal?: AbortSignal): Promise<NoteListing> {
-  const body = await client.request<unknown>('GET', '/notes', { query: { tag: normalizeTag(tag), notebook: opts.notebook, limit: opts.limit }, signal });
+/** `GET /notes?tag=`: notes with a tag (in their tag list or written as #tag in the body), narrowed by `q` when set. */
+export async function notesByTag(client: HubClient, tag: string, opts: { notebook?: string; limit?: number; q?: string } = {}, signal?: AbortSignal): Promise<NoteListing> {
+  const q = opts.q?.trim() || undefined;
+  const body = await client.request<unknown>('GET', '/notes', { query: { tag: normalizeTag(tag), notebook: opts.notebook, limit: opts.limit, ...(q ? { q } : {}) }, signal });
   const books = typeof body === 'object' && body !== null && Array.isArray((body as { notebooks?: unknown }).notebooks) ? (body as { notebooks: NotebookCount[] }).notebooks : [];
   return { notes: listOf<Note>(body, 'notes'), notebooks: books };
 }

@@ -33,14 +33,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.interfaces import ChatMessage, ChatRequest, TranscriptionRequest
+from core.interfaces import ChatMessage, ChatRequest, ProviderKind, TranscriptionRequest
 from hub_api import gcal
 from hub_api.appdata import AppDB, extract_json, get_appdb, iso, local_now, new_id, now_iso
+from hub_api.deps import spec_of_kind
 from hub_api.routers import notes as notes_router
 from hub_api.routers.drive import normalise_key
 from hub_api.state import HubState, get_state
 
-__all__ = ["router", "SCHEMA", "meeting_body", "parse_summary", "clip_transcript"]
+__all__ = ["router", "SCHEMA", "meeting_body", "parse_summary", "clip_transcript", "merge_parts"]
 
 log = logging.getLogger("omnifree.hub.meetings")
 
@@ -58,6 +59,8 @@ LEASE_S = 58
 MAX_ATTEMPTS = 2  # per part
 MAX_TRANSCRIPT_CHARS = 48_000  # sent to the LLM (head and tail kept when longer)
 MAX_ACTIONS = 20
+KEY_PREFIX = "meetings/"  # where the PWA puts the parts (meetingPartKey): nothing else goes to the transcriber
+AUDIO_EXTENSIONS = ("webm", "ogg", "oga", "opus", "mp4", "m4a", "mp3", "mpeg", "wav", "aac", "flac")
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS app_meetings ("
@@ -243,8 +246,12 @@ async def _transcribe_part(state: HubState, part: dict[str, Any], language: str 
         provider = obj.backend
         part["provider"] = provider
     stat = await state.router.storage_stat(key, provider)
-    if stat is not None and stat.size and stat.size > WHISPER_MAX_BYTES:
+    if stat is None:
+        raise FileNotFoundError(f"{key} is not on {provider}")
+    if stat.size > WHISPER_MAX_BYTES:
         raise ValueError(f"part is {stat.size} bytes, over the 25 MB transcription limit")
+    if not stat.size:
+        return ""  # empty, or a size the backend does not report: never downloaded blind
     audio = await state.router.storage_get(key, provider)
     if len(audio) > WHISPER_MAX_BYTES:
         raise ValueError(f"part is {len(audio)} bytes, over the 25 MB transcription limit")
@@ -275,6 +282,18 @@ async def _summarise(state: HubState, transcript: str, now: datetime) -> dict[st
 
 async def _finish(state: HubState, db: AppDB, row: dict[str, Any], parts: list[dict[str, Any]],
                   started: float) -> dict[str, Any]:
+    """Writes the note, then the tasks. Each one is saved as soon as it exists, so a call that fails or is cut off
+    half-way is completed by the next one without a second note, a second LLM call or duplicate tasks."""
+    if row.get("note_id"):
+        note_row = await db.fetch_one("SELECT * FROM app_notes WHERE id = ?", [row["note_id"]])
+        if note_row is not None:  # resumed: only the action items without a task yet are created
+            stored = _stored_result(row)
+            tasks = await _tasks_of(db, row)
+            tasks += await _add_tasks(state, db, row["id"], stored["actions"][len(_loads(row.get("task_ids"))):],
+                                      stored["title"] or note_row.get("title") or "", note_row["id"], tasks, started)
+            await _save(db, row["id"], status="done")
+            return {"note": notes_router._note_out(note_row), "tasks": tasks,
+                    "summary": stored["summary"], "decisions": stored["decisions"]}
     now = local_now()
     transcript = "\n\n".join(p.get("text") or "" for p in parts if p.get("text")).strip()
     result = await _summarise(state, transcript, now)
@@ -285,20 +304,69 @@ async def _finish(state: HubState, db: AppDB, row: dict[str, Any], parts: list[d
         db, body=body, title=result["title"], notebook=row.get("notebook") or NOTEBOOK,
         tags=["meeting", *result["tags"]], pinned=False, source="meeting", audio_key=parts[0]["key"] if parts else None,
     )
+    await _save(db, row["id"], note_id=note["id"], task_ids="[]", error=(
+                    None if result["llm"] or not transcript else "the summary could not be written; transcript saved"),
+                summary=json.dumps({k: result[k] for k in ("title", "summary", "decisions", "actions")}, ensure_ascii=False))
+    tasks = await _add_tasks(state, db, row["id"], result["actions"], result["title"], note["id"], [], started)
+    await _save(db, row["id"], status="done")
+    return {"note": note, "tasks": tasks, "summary": result["summary"], "decisions": result["decisions"]}
+
+
+async def _add_tasks(state: HubState, db: AppDB, meeting_id: str, actions: list[dict[str, Any]], title: str,
+                     note_id: str, existing: list[dict[str, Any]], started: float) -> list[dict[str, Any]]:
+    """One task per action item; ``task_ids`` is saved after each so a cut-off call never creates one twice."""
+    ids = [t["id"] for t in existing]
     tasks: list[dict[str, Any]] = []
-    for a in result["actions"]:
-        details = "\n".join(b for b in (a["owner"] and f"Owner: {a['owner']}", f"From the meeting: {result['title']}") if b)
+    for a in actions:
+        details = "\n".join(b for b in (a.get("owner") and f"Owner: {a['owner']}", f"From the meeting: {title}") if b)
         task = await notes_router._insert_task(
-            db, title=a["title"], details=details, due=a["due"], due_time=a["due_time"], priority=a["priority"],
-            note_id=note["id"],
+            db, title=a["title"], details=details, due=a.get("due"), due_time=a.get("due_time"),
+            priority=a.get("priority") or "normal", note_id=note_id,
         )
+        tasks.append(task)
+        ids.append(task["id"])
+        await _save(db, meeting_id, task_ids=json.dumps(ids))
         if _time.monotonic() - started < TASK_PUSH_BEFORE_S:
             await gcal.push_task(state, db, task["id"], task, created=True)  # bounded (~4 s), best effort
-        tasks.append(task)
-    await _save(db, row["id"], status="done", note_id=note["id"], task_ids=json.dumps([t["id"] for t in tasks]),
-                summary=json.dumps({k: result[k] for k in ("summary", "decisions")}, ensure_ascii=False),
-                error=None if result["llm"] or not transcript else "the summary could not be written; transcript saved")
-    return {"note": note, "tasks": tasks, "summary": result["summary"], "decisions": result["decisions"]}
+    return tasks
+
+
+def _stored_result(row: dict[str, Any]) -> dict[str, Any]:
+    """The summary, decisions, title and action items stored with a meeting once its note is written."""
+    try:
+        stored = json.loads(row.get("summary") or "{}")
+    except ValueError:
+        stored = {}
+    stored = stored if isinstance(stored, dict) else {}
+    decisions, actions = stored.get("decisions"), stored.get("actions")
+    return {
+        "title": str(stored.get("title") or ""),
+        "summary": str(stored.get("summary") or ""),
+        "decisions": [str(d) for d in decisions] if isinstance(decisions, list) else [],
+        "actions": [a for a in actions if isinstance(a, dict) and a.get("title")] if isinstance(actions, list) else [],
+    }
+
+
+def _summary_of(row: dict[str, Any]) -> dict[str, Any]:
+    stored = _stored_result(row)
+    return {"summary": stored["summary"], "decisions": stored["decisions"]}
+
+
+async def _tasks_of(db: AppDB, row: dict[str, Any]) -> list[dict[str, Any]]:
+    ids = [str(i) for i in _loads(row.get("task_ids"))][:MAX_ACTIONS]
+    if not ids:
+        return []
+    rows = await db.fetch(f"SELECT * FROM app_tasks WHERE id IN ({', '.join('?' for _ in ids)})", ids)
+    by_id = {r["id"]: notes_router._task_out(r) for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def merge_parts(stored: list[dict[str, Any]], mine: list[dict[str, Any]], touched: set[str]) -> list[dict[str, Any]]:
+    """The stored parts, with this call's version of the ones it worked on: parts a concurrent
+    ``POST /notes/meeting`` appended meanwhile are kept (a whole-list write would drop them)."""
+    by_key = {p["key"]: p for p in mine if p.get("key") in touched}
+    out = [by_key.pop(p.get("key"), p) for p in stored]
+    return out + list(by_key.values())  # a touched part missing from the row (should not happen) is kept
 
 
 async def _work(state: HubState, db: AppDB, meeting_id: str, started: float) -> dict[str, Any]:
@@ -306,6 +374,8 @@ async def _work(state: HubState, db: AppDB, meeting_id: str, started: float) -> 
     parts = _loads(row.get("parts"))
     language = row.get("language")
     worked = 0
+    touched: set[str] = set()
+    merged = parts
     for part in parts:
         if part.get("status") in ("done", "failed"):
             continue
@@ -322,7 +392,12 @@ async def _work(state: HubState, db: AppDB, meeting_id: str, started: float) -> 
             permanent = isinstance(exc, (ValueError, FileNotFoundError))
             part["status"] = "failed" if permanent or part["attempts"] >= MAX_ATTEMPTS else "pending"
             log.warning("meeting %s part %s: %s", meeting_id, part["key"], part["error"])
-        await _save(db, meeting_id, parts=json.dumps(parts, ensure_ascii=False))
+        touched.add(part["key"])
+        # Re-read before writing: a concurrent call may have appended parts since this call's first read.
+        row = await _get(db, meeting_id)
+        merged = merge_parts(_loads(row.get("parts")), parts, touched)
+        await _save(db, meeting_id, parts=json.dumps(merged, ensure_ascii=False))
+    parts = merged  # the stored list, with this call's progress
     pending = [p for p in parts if p.get("status") not in ("done", "failed")]
     extra: dict[str, Any] = {}
     if pending:
@@ -359,24 +434,38 @@ class MeetingRequest(BaseModel):
     notebook: str | None = Field(None, max_length=100)
 
 
-def _parts_in(body: MeetingRequest) -> list[dict[str, Any]]:
+def _part_key(key: str) -> str:
+    """Only meeting audio goes to the transcription provider: a key under ``meetings/`` with an audio extension."""
+    key = normalise_key(key)
+    name = key.rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if not key.startswith(KEY_PREFIX) or ext not in AUDIO_EXTENSIONS:
+        raise HTTPException(422, detail=f"{key!r} is not a meeting recording ({KEY_PREFIX}... audio file expected)")
+    return key
+
+
+def _parts_in(state: HubState, body: MeetingRequest) -> list[dict[str, Any]]:
     raw: list[AudioPart] = [AudioPart(key=p) if isinstance(p, str) else p for p in body.audio_keys]
     if body.audio_key:
         raw.append(AudioPart(key=body.audio_key))
-    return [{"key": normalise_key(p.key), "provider": p.provider or None, "seconds": p.seconds, "status": "pending"}
-            for p in raw]
+    out: list[dict[str, Any]] = []
+    for p in raw:
+        provider = spec_of_kind(state, p.provider, ProviderKind.STORAGE).name if p.provider else None
+        out.append({"key": _part_key(p.key), "provider": provider, "seconds": p.seconds, "status": "pending"})
+    return out
 
 
 @router.post("/notes/meeting")
 async def meeting(body: MeetingRequest, state: HubState = Depends(get_state), db: AppDB = Depends(_db)) -> dict[str, Any]:
     started = _time.monotonic()
-    incoming = _parts_in(body)
+    incoming = _parts_in(state, body)
     if body.meeting_id:
         row = await _get(db, body.meeting_id)
         meeting_id = row["id"]
-        if row["status"] == "done":
+        if row["status"] == "done":  # a retried final call gets the whole result again
             note = await db.fetch_one("SELECT * FROM app_notes WHERE id = ?", [row.get("note_id") or ""])
-            return _status_out(row, {"note": notes_router._note_out(note) if note else None})
+            return _status_out(row, {"note": notes_router._note_out(note) if note else None,
+                                     "tasks": await _tasks_of(db, row), **_summary_of(row)})
         parts = _loads(row.get("parts"))
         known = {p["key"] for p in parts}
         added = [p for p in incoming if p["key"] not in known]

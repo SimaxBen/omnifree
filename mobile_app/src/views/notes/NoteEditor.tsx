@@ -175,7 +175,7 @@ export default function NoteEditor({
     const ctrl = new AbortController();
     const t = window.setTimeout(() => {
       noteTitles(client, wq.query, ctrl.signal)
-        .then((h) => setHits(h.filter((x) => x.id !== idRef.current)))
+        .then((h) => setHits(h.filter((x) => x.id !== idRef.current && x.title.trim() !== '')))
         .catch(() => setHits([]));
     }, 150);
     return () => {
@@ -210,6 +210,19 @@ export default function NoteEditor({
       if (res.created) notify(`Created “${res.note.title}”`, 'ok');
       if (changed.current || res.created) announce('notes');
       actions.openNote(res.note);
+    } catch (err) {
+      notify(errorText(err), 'error');
+    }
+  };
+
+  // Backlinks open by id: a linking note may be untitled, or share its title with another note.
+  const openById = async (noteId: string) => {
+    haptic(8);
+    await flush();
+    try {
+      const note = await client.note(noteId);
+      if (changed.current) announce('notes');
+      actions.openNote(note);
     } catch (err) {
       notify(errorText(err), 'error');
     }
@@ -410,9 +423,9 @@ export default function NoteEditor({
             </h3>
             <div className="divide-y divide-ink-800 overflow-hidden rounded-card bg-ink-850">
               {links.data!.backlinks.map((b) => (
-                <button key={b.id} type="button" onClick={() => void openLink(b.title)} className="press block w-full px-4 py-3 text-left active:bg-ink-800">
+                <button key={b.id} type="button" onClick={() => void openById(b.id)} className="press block w-full px-4 py-3 text-left active:bg-ink-800">
                   <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate font-display text-[15px] font-semibold text-ink-100">{b.title}</span>
+                    <span className={cx('truncate font-display text-[15px] font-semibold', b.title ? 'text-ink-100' : 'text-ink-400')}>{b.title || 'Untitled'}</span>
                     <span className="shrink-0 text-[12px] text-ink-500">{b.notebook}</span>
                   </span>
                   <span className="mt-0.5 line-clamp-2 block text-[13px] leading-snug text-ink-400">{b.snippet}</span>

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time as _time
 
 from hub_api.appdata import AppDB, now_iso
 
@@ -31,7 +32,10 @@ SCHEMA = (
     "CREATE INDEX IF NOT EXISTS app_note_links_target ON app_note_links (target_key)",
     "CREATE TABLE IF NOT EXISTS app_note_links_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 )
-MAX_LINKS = 200  # per note
+MAX_LINKS = 50  # per note
+_ROWS_PER_INSERT = 20  # 4 parameters a row: D1 binds at most 100 per statement
+INDEX_PAGE = 50  # notes per page of the one-off rebuild...
+INDEX_BUDGET_S = 15.0  # ...which stops after this long and carries on at the next call (60 s serverless limit)
 _INDEX_VERSION = "1"
 
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^ {0,3}\1[`~]*[ \t]*$|\Z)", re.M | re.S)
@@ -78,11 +82,16 @@ async def index_note(db: AppDB, note_id: str, body: str) -> None:
     await _ensure_schema(db)
     await db.execute("DELETE FROM app_note_links WHERE src_id = ?", [note_id])
     stamp = now_iso()
-    for title in extract_links(body):
+    titles = extract_links(body)
+    for i in range(0, len(titles), _ROWS_PER_INSERT):  # a few multi-row statements, not one round trip per link
+        chunk = titles[i:i + _ROWS_PER_INSERT]
+        params: list[str] = []
+        for title in chunk:
+            params += [note_id, title_key(title), title[:200], stamp]
         await db.execute(
-            "INSERT INTO app_note_links (src_id, target_key, target_title, created_at) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(src_id, target_key) DO NOTHING",
-            [note_id, title_key(title), title[:200], stamp],
+            "INSERT INTO app_note_links (src_id, target_key, target_title, created_at) VALUES "
+            + ", ".join("(?, ?, ?, ?)" for _ in chunk) + " ON CONFLICT(src_id, target_key) DO NOTHING",
+            params,
         )
 
 
@@ -102,20 +111,41 @@ async def safe_index(db: AppDB, note_id: str, body: str | None) -> None:
         log.warning("note link index update failed for %s: %r", note_id, exc)
 
 
-async def ensure_index(db: AppDB) -> None:
-    """Index every note once (the notes written before the index existed). Notes must exist (notes schema)."""
-    await _ensure_schema(db)
-    done = await db.fetch_one("SELECT value FROM app_note_links_meta WHERE key = 'indexed'")
-    if done is not None and done.get("value") == _INDEX_VERSION:
-        return
-    rows = await db.fetch("SELECT id, body FROM app_notes WHERE body LIKE '%[[%'")
-    for row in rows:
-        await index_note(db, row["id"], row.get("body") or "")
+async def _meta_set(db: AppDB, key: str, value: str) -> None:
     await db.execute(
-        "INSERT INTO app_note_links_meta (key, value) VALUES ('indexed', ?)"
-        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [_INDEX_VERSION],
+        "INSERT INTO app_note_links_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key, value],
     )
+
+
+async def ensure_index(db: AppDB, budget_s: float | None = None) -> bool:
+    """Index the notes written before the index existed, once. Notes must exist (notes schema).
+
+    Runs in pages of :data:`INDEX_PAGE` notes in id order and saves the last id after each page, so a call stops
+    after ``budget_s`` (:data:`INDEX_BUDGET_S`) and the next one carries on where it stopped instead of starting
+    over. Returns whether the index is complete."""
+    await _ensure_schema(db)
+    meta = {r["key"]: r["value"] for r in await db.fetch(
+        "SELECT key, value FROM app_note_links_meta WHERE key IN ('indexed', 'cursor')")}
+    if meta.get("indexed") == _INDEX_VERSION:
+        return True
+    deadline = _time.monotonic() + (INDEX_BUDGET_S if budget_s is None else budget_s)
+    cursor = meta.get("cursor") or ""
+    while True:
+        rows = await db.fetch(
+            "SELECT id, body FROM app_notes WHERE id > ? AND body LIKE '%[[%' ORDER BY id LIMIT ?", [cursor, INDEX_PAGE]
+        )
+        for row in rows:
+            await index_note(db, row["id"], row.get("body") or "")
+        if len(rows) < INDEX_PAGE:
+            await _meta_set(db, "indexed", _INDEX_VERSION)
+            await db.execute("DELETE FROM app_note_links_meta WHERE key = 'cursor'")
+            return True
+        cursor = rows[-1]["id"]
+        await _meta_set(db, "cursor", cursor)
+        if _time.monotonic() >= deadline:
+            log.info("note link index: rebuild paused after %s, continued at the next call", cursor)
+            return False
 
 
 def snippet(body: str, title: str, width: int = 140) -> str:
