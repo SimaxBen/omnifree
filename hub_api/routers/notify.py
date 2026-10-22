@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 
 from hub_api import notifier
@@ -575,6 +575,8 @@ async def notify_run(
     force: bool = Query(False, description="Send even if this kind was already pushed today/this week/month"),
     preview: bool = Query(False, description="Compose the push without sending it"),
     ahead: int = Query(15, ge=5, le=24 * 60, description="reminders: minutes ahead to cover (= the schedule interval)"),
+    ahead_header: int | None = Header(None, alias="X-OmniFree-Ahead", ge=5, le=24 * 60,
+                                      description="Same as ?ahead= (QStash targets cannot carry a second query parameter)"),
     state: HubState = Depends(get_state),
     db: AppDB = Depends(_db),
 ) -> dict[str, Any]:
@@ -583,7 +585,8 @@ async def notify_run(
         return {"kind": kind, "sent": False, "skipped": "turned off in the app", "title": None, "message": None}
     if kind == "reminders":
         try:
-            return await run_reminders(state, db, preview=preview, force=force, ahead=timedelta(minutes=ahead))
+            minutes = ahead_header or ahead
+            return await run_reminders(state, db, preview=preview, force=force, ahead=timedelta(minutes=minutes))
         except notifier.NotifyError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     today = local_today()

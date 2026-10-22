@@ -234,3 +234,10 @@ def test_reminders_every_three_hours_cover_the_next_three_hours(app_hub, sent) -
     out = app_hub.post("/notify/run?kind=reminders&ahead=180").json()
     assert out["count"] == 1 and [m["title"] for m in sent] == ["⏰ Dans 2 h 50"]
     assert app_hub.post("/notify/run?kind=reminders&ahead=2000").status_code == 422
+
+
+def test_reminders_window_from_header(app_hub, sent) -> None:
+    # QStash targets keep a single query parameter, so the 3-hour schedule sends the window as a header.
+    _task(app_hub, "Dans 2 h 50", "2026-10-21", "17:40")
+    out = app_hub.post("/notify/run?kind=reminders", headers={"X-OmniFree-Ahead": "185"}).json()
+    assert out["count"] == 1
