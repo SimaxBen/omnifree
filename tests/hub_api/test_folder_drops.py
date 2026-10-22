@@ -135,12 +135,50 @@ def test_big_folder_zip_goes_through_storage(app_hub, monkeypatch: pytest.Monkey
     exp = int(time.time()) + 300
     r = _public(app_hub, "GET", f"/d/{d['code']}/zip?t={exp}.{zip_sig(TOKEN, d['code'], exp)}")
     assert r.status_code == 302
-    key = f"_shares/zips/{d['code']}.zip"
+    [key] = [k for k in fakes.STORES["r2"] if k.startswith(f"_shares/zips/{d['code']}-")]
     assert r.headers["location"] == f"https://signed.example/r2/{key}?exp=600"
-    assert key in fakes.STORES["r2"]
     # The stored ZIP never shows in the folder page, and goes away with the drop.
     assert app_hub.delete(f"/drops/{d['code']}").status_code == 204
     assert key not in fakes.STORES["r2"]
+
+
+def test_big_folder_zip_is_built_once(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(links, "ZIP_INLINE_MAX", 10)
+    d = app_hub.post("/drops/folder", json={"prefix": "trip", "provider": "r2"}).json()
+    exp = int(time.time()) + 300
+    url = f"/d/{d['code']}/zip?t={exp}.{zip_sig(TOKEN, d['code'], exp)}"
+    built = []
+    real = links._build_zip
+
+    async def counting(*a, **kw):
+        built.append(1)
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(links, "_build_zip", counting)
+    first = _public(app_hub, "GET", url)
+    again = _public(app_hub, "GET", url)
+    assert first.status_code == again.status_code == 302 and first.headers["location"] == again.headers["location"]
+    assert len(built) == 1  # replaying the link does not rebuild nor re-upload
+    # A shared file changed: a new ZIP replaces the old one.
+    fakes.STORES["r2"]["trip/photo 1.jpg"] = (b"JPEG-1-edited", "image/jpeg")
+    third = _public(app_hub, "GET", url)
+    assert third.headers["location"] != first.headers["location"] and len(built) == 2
+    assert len([k for k in fakes.STORES["r2"] if k.startswith("_shares/zips/")]) == 1
+
+
+def test_stored_zips_of_ended_drops_are_swept(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(links, "ZIP_INLINE_MAX", 10)
+    codes = [app_hub.post("/drops/folder", json={"prefix": "trip", "provider": "r2"}).json()["code"] for _ in range(3)]
+    exp = int(time.time()) + 300
+    for c in codes:
+        assert _public(app_hub, "GET", f"/d/{c}/zip?t={exp}.{zip_sig(TOKEN, c, exp)}").status_code == 302
+    expired, used_up, live = codes
+    fa.sql("UPDATE app_drops SET expires_at = '2020-01-01T00:00:00Z' WHERE code = ?", [expired])
+    fa.sql("UPDATE app_drops SET max_downloads = 1, downloads = 1 WHERE code = ?", [used_up])
+    fakes.STORES["r2"]["_shares/zips/GoneDrop-0123456789abcdef.zip"] = (b"PK", "application/zip")  # drop deleted
+    assert app_hub.get("/drops").status_code == 200
+    left = sorted(k for k in fakes.STORES["r2"] if k.startswith("_shares/zips/"))
+    assert len(left) == 1 and left[0].startswith(f"_shares/zips/{live}-")
 
 
 def test_too_big_folder_hides_zip(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,3 +199,30 @@ def test_folder_page_escapes_names(app_hub) -> None:
 
 def test_folder_route_requires_token(app_hub) -> None:
     assert _public(app_hub, "POST", "/drops/folder", json={"prefix": "trip"}).status_code == 401
+
+
+def test_folder_drop_shares_only_the_files_present_at_creation(app_hub) -> None:
+    d = app_hub.post("/drops/folder", json={"prefix": "trip"}).json()
+    assert d["file_count"] == 3
+    # Added after sharing, on the same backend and on another one: never published.
+    fakes.STORES["r2"]["trip/later.txt"] = (b"private", "text/plain")
+    fakes.STORES["plain"]["trip/day2/later2.txt"] = (b"private", "text/plain")
+    # The same key showing up on an earlier backend does not replace the shared copy either.
+    fakes.STORES["plain"]["trip/photo 1.jpg"] = (b"other", "image/jpeg")
+    del fakes.STORES["r2"]["trip/day2/notes.txt"]  # gone since: no longer listed
+    page = _public(app_hub, "GET", f"/d/{d['code']}").text
+    assert "later" not in page and "notes.txt" not in page
+    assert 'href="https://signed.example/r2/trip/photo 1.jpg?exp=600"' in page and "plain.txt" in page
+    assert "2 files" in page
+
+    r2 = app_hub.post("/drops/folder", json={"prefix": "trip", "provider": "r2"}).json()
+    fakes.STORES["r2"]["trip/later3.txt"] = (b"private", "text/plain")
+    page = _public(app_hub, "GET", f"/d/{r2['code']}").text
+    r = _public(app_hub, "GET", _zip_href(page))
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert sorted(zf.namelist()) == ["later.txt", "photo 1.jpg"]
+
+    # A row without a snapshot shares nothing.
+    fa.sql("UPDATE app_drops SET file_keys = NULL WHERE code = ?", [d["code"]])
+    page = _public(app_hub, "GET", f"/d/{d['code']}").text
+    assert "photo" not in page and "no longer in this folder" in page and "not listed" not in page

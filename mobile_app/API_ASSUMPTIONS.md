@@ -150,8 +150,11 @@ when offline (or on a network failure) and replayed in order. Creates send a cli
 `A-Z a-z 0-9 _ -`); voice uploads send an `idempotency_key` form field. The hub answers a replay of the same id / key with
 200 and `Idempotent-Replayed: true` instead of creating twice (an `Idempotency-Key` header works too, for non-browser
 clients: CORS does not allow it from the PWA). Replay outcomes: 2xx (and 404 on DELETE) = synced; 404/409/422 and other
-4xx = conflict shown in the sync sheet (retry / discard); network errors, 408/429/5xx = retry later (a 5xx five times
-becomes a conflict); 401/403 = stop.
+4xx = conflict shown in the sync sheet (retry / discard); network errors, 408/429 = retry later; a 5xx backs that row
+off (30 s doubling, "Sync now" skips the wait) while other rows go on, and five 5xx make it a conflict; 401/403 = stop,
+with a "Sync paused — the hub rejected the token" banner (not "Offline"). Only ids are kept for key replays: a voice
+replay answers `{"replayed": true, ...}` with the created rows as `{"id"}` and an empty transcript, and a key replay of a
+create deleted since answers 410. Saved data and queued writes carry the hub URL: another hub never sees them.
 | `GET /money/sms/setup`, `GET /money/sms/log?limit=` | `smsSetup()`, `smsLog()` | Money > Bank SMS sheet: forwarder setup (webhook URL with the SMS token behind a reveal toggle, header name, JSON template, sender filter) and the last 20 SMS with their status |
 | `POST /money/sms?dry_run=true` `{from, text}` | `testSms()` | Bank SMS "Test an SMS" box (nothing saved). The same route without `dry_run` is the webhook the phone app calls (hub token, `X-OmniFree-Token` header or `?token=`) |
 

@@ -77,7 +77,7 @@ export function FolderDropSheet({ open, folder, files, size, onClose }: { open: 
             <div className="min-w-0">
               <p className="truncate text-[15px] text-ink-100">{name}</p>
               <p className="text-[13px] text-ink-400">
-                {files} file{files === 1 ? '' : 's'}, {formatBytes(size)}. The page always lists the folder as it is now.
+                {files} file{files === 1 ? '' : 's'}, {formatBytes(size)}. Only these files are shared; files added to the folder later are not.
               </p>
             </div>
           </div>

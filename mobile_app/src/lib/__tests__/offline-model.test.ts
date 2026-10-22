@@ -155,10 +155,37 @@ describe('overlay of pending writes on GET bodies', () => {
 describe('queue coalescing', () => {
   const create = { ...item({ kind: 'task', op: 'create', resourceId: 'o1', body: { id: 'o1', title: 'A' } }), seq: 1 };
 
-  it('folds updates into the queued create', () => {
-    const plan = planEnqueue([create], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { done: true } }));
+  it('folds updates into the queued create, only with the fields POST accepts', () => {
+    const plan = planEnqueue([create], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { title: 'B', priority: 'high' } }));
     expect(plan.add).toBeUndefined();
-    expect(plan.update).toMatchObject({ seq: 1, op: 'create', body: { id: 'o1', title: 'A', done: true } });
+    expect(plan.update).toMatchObject({ seq: 1, op: 'create', body: { id: 'o1', title: 'B', priority: 'high' } });
+    // `done` is not a TaskCreate field: it follows the create as its own PATCH.
+    const tick = planEnqueue([create], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { title: 'C', done: true } }));
+    expect(tick.update?.body).toEqual({ id: 'o1', title: 'C' });
+    expect(tick.add).toMatchObject({ op: 'update', method: 'PATCH', body: { done: true } });
+    // Clearing the day of a queued create clears its time too (POST refuses a time without a day).
+    const timed = { ...create, body: { id: 'o1', title: 'A', due: '2026-10-22', due_time: '09:00' } };
+    expect(planEnqueue([timed], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { due: null } })).update?.body).toEqual({ id: 'o1', title: 'A', due: null, due_time: null });
+  });
+
+  it('never folds into an entry being sent', () => {
+    const plan = planEnqueue([{ ...create, inFlight: true }], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { title: 'B' } }));
+    expect(plan.update).toBeUndefined();
+    expect(plan.add).toMatchObject({ op: 'update', body: { title: 'B' } });
+  });
+
+  it('lets a create the hub refused absorb its edits and its delete', () => {
+    const refused = { ...create, status: 'conflict' as const };
+    expect(planEnqueue([refused], item({ kind: 'task', op: 'update', resourceId: 'o1', body: { title: 'B' } })).update).toMatchObject({ seq: 1, status: 'conflict', body: { title: 'B' } });
+    expect(planEnqueue([refused], item({ kind: 'task', op: 'delete', resourceId: 'o1' }))).toEqual({ drop: [1] });
+  });
+
+  it('shows a task ticked before its create synced as done', () => {
+    const tick = { ...item({ kind: 'task', op: 'update', resourceId: 'o1', body: { done: true } }), seq: 2 };
+    const out = overlay('/tasks', { status: 'done' }, { tasks: [] }, [create, tick]) as { tasks: Record<string, unknown>[] };
+    expect(out.tasks.map((t) => [t.id, t.done])).toEqual([['o1', true]]);
+    const open = overlay('/tasks', { status: 'open' }, { tasks: [] }, [create, tick]) as { tasks: unknown[] };
+    expect(open.tasks).toEqual([]);
   });
 
   it('folds consecutive updates of one row', () => {

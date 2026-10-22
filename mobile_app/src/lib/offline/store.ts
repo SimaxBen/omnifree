@@ -8,12 +8,15 @@ export interface CacheEntry {
   key: string;
   body: unknown;
   savedAt: number;
+  /** The hub URL the body came from (never served for another hub). */
+  hub?: string;
 }
 
 export interface OfflineStore {
   cacheGet(key: string): Promise<CacheEntry | undefined>;
-  cachePut(key: string, body: unknown, savedAt: number): Promise<void>;
+  cachePut(key: string, body: unknown, savedAt: number, hub?: string): Promise<void>;
   cacheAll(): Promise<CacheEntry[]>;
+  cacheDelete(key: string): Promise<void>;
   queueAll(): Promise<QueueItem[]>;
   /** Adds an entry and answers its sequence number (enqueue order). */
   queueAdd(item: QueueItem): Promise<number>;
@@ -34,8 +37,8 @@ export class MemoryStore implements OfflineStore {
     return this.cache.get(key);
   }
 
-  async cachePut(key: string, body: unknown, savedAt: number) {
-    this.cache.set(key, { key, body, savedAt });
+  async cachePut(key: string, body: unknown, savedAt: number, hub?: string) {
+    this.cache.set(key, { key, body, savedAt, ...(hub ? { hub } : {}) });
     if (this.cache.size > CACHE_LIMIT) {
       const oldest = [...this.cache.values()].sort((a, b) => a.savedAt - b.savedAt).slice(0, this.cache.size - CACHE_LIMIT);
       for (const e of oldest) this.cache.delete(e.key);
@@ -44,6 +47,10 @@ export class MemoryStore implements OfflineStore {
 
   async cacheAll() {
     return [...this.cache.values()];
+  }
+
+  async cacheDelete(key: string) {
+    this.cache.delete(key);
   }
 
   async queueAll() {
@@ -131,13 +138,17 @@ export class IdbStore implements OfflineStore {
     return this.run<CacheEntry | undefined>('cache', 'readonly', (s) => s.get(key), (m) => m.cacheGet(key));
   }
 
-  async cachePut(key: string, body: unknown, savedAt: number) {
-    await this.run('cache', 'readwrite', (s) => s.put({ key, body, savedAt }), (m) => m.cachePut(key, body, savedAt).then(() => key));
+  async cachePut(key: string, body: unknown, savedAt: number, hub?: string) {
+    await this.run('cache', 'readwrite', (s) => s.put({ key, body, savedAt, ...(hub ? { hub } : {}) }), (m) => m.cachePut(key, body, savedAt, hub).then(() => key));
     const all = await this.cacheAll();
     if (all.length > CACHE_LIMIT) {
       const oldest = all.sort((a, b) => a.savedAt - b.savedAt).slice(0, all.length - CACHE_LIMIT);
-      for (const e of oldest) await this.run<undefined>('cache', 'readwrite', (s) => s.delete(e.key), async () => undefined);
+      for (const e of oldest) await this.cacheDelete(e.key);
     }
+  }
+
+  async cacheDelete(key: string) {
+    await this.run<undefined>('cache', 'readwrite', (s) => s.delete(key), (m) => m.cacheDelete(key).then(() => undefined));
   }
 
   cacheAll() {

@@ -30,6 +30,12 @@ export interface QueueItem {
   createdAt: number;
   status: 'pending' | 'conflict';
   attempts: number;
+  /** Being sent by a replay right now: later writes are queued apart instead of folded into it. */
+  inFlight?: boolean;
+  /** After a server error: not retried before this time (ms), unless a sync is forced. */
+  nextAttemptAt?: number;
+  /** The hub URL the write was made for: it is only ever replayed there. */
+  hub?: string;
   httpStatus?: number;
   error?: string;
   label: string;
@@ -138,8 +144,8 @@ export function optimisticCreate(kind: Kind, id: string, body: Obj, createdAt: n
   switch (kind) {
     case 'task':
       return {
-        details: null, due: null, due_time: null, priority: 'normal', note_id: null, done_at: null,
-        ...body, id, title: String(body.title ?? '').trim(), done: false, created_at: iso, [PENDING]: true,
+        details: null, due: null, due_time: null, priority: 'normal', note_id: null, done_at: body.done === true ? iso : null,
+        ...body, id, title: String(body.title ?? '').trim(), done: body.done === true, created_at: iso, [PENDING]: true,
       };
     case 'note': {
       const text = String(body.body ?? '');
@@ -242,15 +248,19 @@ export function overlay(path: string, query: Record<string, QueryValue> | undefi
   let list = (src[field] as Obj[]).slice();
   let changed = false;
   const today = localDay(new Date(now));
+  const local = new Set<string>(); // rows created offline: built once, with their queued edits applied
   for (const it of pending) {
     if (it.kind !== kind) continue;
     if (it.op === 'create') {
       if (list.some((x) => x.id === it.resourceId)) continue; // synced already, not yet removed
-      const obj = optimisticCreate(kind, it.resourceId, it.body ?? {}, it.createdAt);
+      const obj = rowFromQueue(pending, kind, it.resourceId);
+      if (!obj) continue;
+      local.add(it.resourceId);
       if (!accepts(kind, obj, q, today)) continue;
       list = kind === 'note' ? [obj, ...list] : [...list, obj];
       changed = true;
     } else if (it.op === 'update') {
+      if (local.has(it.resourceId)) continue;
       list = list.map((x) => {
         if (x.id !== it.resourceId) return x;
         changed = true;
@@ -269,16 +279,48 @@ export function overlay(path: string, query: Record<string, QueryValue> | undefi
   return out;
 }
 
-/** A queued create of row ``id``, if any (to answer GET /notes/{id} before the hub knows it). */
-export function pendingCreate(items: QueueItem[], kind: Kind, id: string): Obj | null {
+/** Row ``id`` as its queued create with the edits queued after it applied, or null. */
+function rowFromQueue(items: QueueItem[], kind: Kind, id: string): Obj | null {
   let out: Obj | null = null;
   for (const it of items) {
-    if (it.status !== 'pending' || it.kind !== kind || it.resourceId !== id) continue;
+    if (it.kind !== kind || it.resourceId !== id) continue;
     if (it.op === 'create') out = optimisticCreate(kind, id, it.body ?? {}, it.createdAt);
     else if (it.op === 'update' && out) out = optimisticUpdate(kind, out, it.body ?? {}, it.createdAt);
     else if (it.op === 'delete') out = null;
   }
   return out;
+}
+
+/**
+ * A queued create of row ``id``, if any (to answer GET /notes/{id} before the hub knows it, and as
+ * the base of later edits). A create the hub refused (conflict) still counts: the row exists here.
+ */
+export function pendingCreate(items: QueueItem[], kind: Kind, id: string): Obj | null {
+  return rowFromQueue(items.filter((i) => i.status === 'pending' || (i.status === 'conflict' && i.op === 'create')), kind, id);
+}
+
+/** Fields each create endpoint accepts (TaskCreate, NoteCreate, ExpenseCreate, IncomeCreate); pydantic drops the rest. */
+const CREATE_FIELDS: Record<Kind, ReadonlySet<string>> = {
+  task: new Set(['title', 'details', 'due', 'due_time', 'priority', 'note_id']),
+  note: new Set(['title', 'body', 'notebook', 'tags', 'pinned']),
+  expense: new Set(['date', 'merchant', 'total', 'currency', 'category', 'items', 'note', 'receipt_key']),
+  income: new Set(['date', 'amount', 'currency', 'source', 'category', 'note', 'recurring', 'end_month']),
+};
+
+/**
+ * Folds an edit into the queued create of the same row: the fields POST accepts go into the create
+ * (clearing the day also clears the time, as PATCH does); the others (task ``done``, note ``source``...)
+ * come back as ``rest``, to be sent as a PATCH after the create.
+ */
+export function foldIntoCreate(kind: Kind, create: Obj, patch: Obj): { create: Obj; rest: Obj | null } {
+  const merged: Obj = { ...create };
+  const rest: Obj = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (CREATE_FIELDS[kind].has(k)) merged[k] = v;
+    else if (k !== 'id') rest[k] = v;
+  }
+  if (kind === 'task' && 'due' in patch && !patch.due) merged.due_time = null;
+  return { create: merged, rest: Object.keys(rest).length ? rest : null };
 }
 
 export interface EnqueuePlan {
@@ -291,15 +333,25 @@ export interface EnqueuePlan {
 }
 
 /**
- * Coalescing: an update folds into the queued create (or the last queued update) of the same row;
- * deleting a row whose create is still queued drops both, and nothing is sent at all.
+ * Coalescing: an update folds into the queued create of the same row (the fields POST accepts; the
+ * rest is queued as a PATCH after it) or into its last queued update; deleting a row whose create is
+ * still queued drops both, and nothing is sent at all. A create the hub refused (conflict) still
+ * absorbs its row's edits and deletes. An entry being sent right now (inFlight) is never touched.
  */
 export function planEnqueue(queue: QueueItem[], next: QueueItem): EnqueuePlan {
-  const same = queue.filter((i) => i.status === 'pending' && i.kind === next.kind && i.resourceId === next.resourceId && i.seq !== undefined);
+  const same = queue.filter(
+    (i) =>
+      i.seq !== undefined && !i.inFlight && i.kind === next.kind && i.resourceId === next.resourceId &&
+      (i.status === 'pending' || (i.status === 'conflict' && i.op === 'create')),
+  );
   if (next.op === 'update') {
     const last = same[same.length - 1];
-    if (last && (last.op === 'create' || last.op === 'update')) {
-      return { drop: [], update: { ...last, body: { ...(last.body ?? {}), ...(next.body ?? {}) }, label: last.op === 'create' ? last.label : next.label } };
+    if (last && last.op === 'create' && last.kind !== 'voice') {
+      const { create, rest } = foldIntoCreate(last.kind, last.body ?? {}, next.body ?? {});
+      return { drop: [], update: { ...last, body: create }, ...(rest ? { add: { ...next, body: rest } } : {}) };
+    }
+    if (last && last.op === 'update') {
+      return { drop: [], update: { ...last, body: { ...(last.body ?? {}), ...(next.body ?? {}) }, label: next.label } };
     }
     return { drop: [], add: next };
   }
@@ -322,8 +374,13 @@ export function classify(method: Method, status: number): Outcome {
   return 'conflict';
 }
 
-/** After this many 5xx answers an entry becomes a conflict instead of blocking the queue forever. */
+/** After this many 5xx answers an entry becomes a conflict instead of being retried forever. */
 export const MAX_SERVER_ERRORS = 5;
+
+/** Wait before retrying an entry after its ``attempts``-th server error: 30 s, doubling, at most 5 min. */
+export function retryDelayMs(attempts: number): number {
+  return Math.min(30_000 * 2 ** Math.max(attempts - 1, 0), 5 * 60_000);
+}
 
 const NOUN: Record<OpKind, string> = { task: 'task', note: 'note', expense: 'expense', income: 'income', voice: 'voice recording' };
 
@@ -366,11 +423,19 @@ export interface BannerInput {
   pending: number;
   conflicts: number;
   syncing: boolean;
+  /** The hub answered 401/403 to a replay: the token needs fixing, the network is fine. */
+  authError?: boolean;
 }
 
 /** The offline banner's line and tone, or null when everything is live and synced. */
-export function bannerText(s: BannerInput): { text: string; tone: 'offline' | 'sync' | 'conflict' } | null {
+export function bannerText(s: BannerInput): { text: string; tone: 'offline' | 'sync' | 'conflict' | 'paused' } | null {
   const parts: string[] = [];
+  if (s.authError) {
+    parts.push('Sync paused — the hub rejected the token (Settings)');
+    if (s.pending) parts.push(`${s.pending} pending sync`);
+    if (s.conflicts) parts.push(`${s.conflicts} need${s.conflicts === 1 ? 's' : ''} attention`);
+    return { text: parts.join(' · '), tone: 'paused' };
+  }
   if (s.cachedAt !== null) parts.push(`Offline — showing saved data from ${clockOf(s.cachedAt)}`);
   else if (!s.online) parts.push('Offline — changes sync when you are back online');
   if (s.pending) parts.push(s.syncing ? `syncing ${s.pending}…` : `${s.pending} pending sync`);

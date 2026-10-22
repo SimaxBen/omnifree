@@ -7,7 +7,9 @@ compared in constant time; downloads are 10-minute presigned GET URLs on the sto
 
 A folder drop (``POST /drops/folder``, ``kind = 'folder'``, ``key`` = the prefix ending in ``/``)
 opens a page listing the files under the prefix with per-file presigned links; each opening counts
-as one download. When the folder is small (``ZIP_MAX_BYTES``), the page also offers a ZIP built by the
+as one download. Only the files present when the drop was created are shared (``file_keys``, a JSON
+list of ``[backend, key]``): files added to the folder later never show. When the folder is small
+(``ZIP_MAX_BYTES``), the page also offers a ZIP built by the
 hub, behind a 10-minute signed link: answered inline when small, otherwise stored under
 ``ZIP_PREFIX`` on a presign-capable backend and redirected to.
 """
@@ -19,11 +21,13 @@ import hashlib
 import hmac
 import html
 import io
+import json
 import logging
 import re
 import secrets
 import time
 import zipfile
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -54,8 +58,9 @@ SCHEMA = (
     " size INTEGER, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, max_downloads INTEGER,"
     " downloads INTEGER NOT NULL DEFAULT 0, password_hash TEXT)",
 )
-# Migration v2 (folder drops): kind 'file' (NULL on older rows) or 'folder'; a folder's file count at creation.
-DROP_COLUMNS = (("kind", "TEXT"), ("file_count", "INTEGER"))
+# Migration v2 (folder drops): kind 'file' (NULL on older rows) or 'folder'; a folder's file count at creation;
+# the files it shares, snapshotted at creation (JSON list of [backend, key]).
+DROP_COLUMNS = (("kind", "TEXT"), ("file_count", "INTEGER"), ("file_keys", "TEXT"))
 
 LINK_CODE_LEN = 6
 DROP_CODE_LEN = 8
@@ -254,6 +259,7 @@ class DropCreate(BaseModel):
 @router.get("/drops")
 async def list_drops(state: HubState = Depends(get_state), db: AppDB = Depends(_db)) -> dict[str, Any]:
     rows = await db.fetch("SELECT * FROM app_drops ORDER BY created_at DESC, code")
+    await _sweep_zips(state, rows)
     return {"drops": [_drop_out(r, state) for r in rows]}
 
 
@@ -303,8 +309,13 @@ class FolderDropCreate(BaseModel):
     password: str | None = Field(None, max_length=200)
 
 
-async def _folder_files(state: HubState, provider: str, prefix: str) -> tuple[list[StoredObject], int, dict[str, str]]:
-    """Files under ``prefix`` (one entry per key, first backend in chain order wins): (files, hidden, errors)."""
+async def _folder_files(
+    state: HubState, provider: str, prefix: str, keep: set[tuple[str, str]] | None = None
+) -> tuple[list[StoredObject], int, dict[str, str]]:
+    """Files under ``prefix`` (one entry per key, first backend in chain order wins): (files, hidden, errors).
+
+    ``keep``: only these ``(backend, key)`` pairs (a folder drop's snapshot), whatever else is there now.
+    """
     providers = None if provider == ALL_BACKENDS else [provider]
     raw = await state.router.storage_list(prefix, providers=providers, limit=FOLDER_MAX_FILES * 2)
     seen: dict[str, StoredObject] = {}
@@ -317,6 +328,8 @@ async def _folder_files(state: HubState, provider: str, prefix: str) -> tuple[li
             if not obj.key.startswith(prefix) or obj.key.endswith("/") or obj.key.startswith(ZIP_PREFIX):
                 continue
             obj.backend = obj.backend or name
+            if keep is not None and (obj.backend, obj.key) not in keep:
+                continue
             seen.setdefault(obj.key, obj)
     files = sorted(seen.values(), key=lambda o: o.key)
     return files[:FOLDER_MAX_FILES], max(len(files) - FOLDER_MAX_FILES, 0), errors
@@ -326,7 +339,7 @@ async def _folder_files(state: HubState, provider: str, prefix: str) -> tuple[li
 async def create_folder_drop(
     body: FolderDropCreate, state: HubState = Depends(get_state), db: AppDB = Depends(_db)
 ) -> dict[str, Any]:
-    """A public page at /d/{code} listing the files under ``prefix`` (live); password and expiry as file drops."""
+    """A public page at /d/{code} listing the files under ``prefix`` now (snapshot); password and expiry as file drops."""
     prefix = normalise_key(body.prefix) + "/"
     provider = ALL_BACKENDS
     if body.provider:
@@ -353,6 +366,7 @@ async def create_folder_drop(
         "password_hash": hash_password(body.password) if body.password else None,
         "kind": "folder",
         "file_count": len(files) + hidden,
+        "file_keys": json.dumps([[f.backend, f.key] for f in files], separators=(",", ":")),
     }
     cols = list(row)
     await db.execute(
@@ -368,13 +382,41 @@ async def delete_drop(code: str, state: HubState = Depends(get_state), db: AppDB
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="drop not found")
     await db.execute("DELETE FROM app_drops WHERE code = ?", [code])
     if row.get("kind") == "folder":  # the ZIP kept for a big folder, if one was built
-        try:
-            obj = await state.router.storage_locate(f"{ZIP_PREFIX}{code}.zip")
-            if obj is not None:
-                await state.router.storage_delete(obj.key, obj.backend)
-        except ProviderError as exc:
-            log.info("could not remove the ZIP of folder drop %s: %s", code, exc)
+        await _remove_zips(state, lambda obj: _zip_code(obj.key) == code)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _zip_code(key: str) -> str:
+    """The drop code of a stored ZIP key (``_shares/zips/<code>-<fingerprint>.zip`` or ``<code>.zip``)."""
+    return key[len(ZIP_PREFIX):].removesuffix(".zip").split("-", 1)[0]
+
+
+async def _remove_zips(state: HubState, doomed: Callable[[StoredObject], bool]) -> None:
+    """Delete the stored folder ZIPs ``doomed`` picks, on every backend (best effort)."""
+    try:
+        raw = await state.router.storage_list(ZIP_PREFIX)
+    except ProviderError as exc:
+        log.info("could not list the stored ZIPs: %s", exc)
+        return
+    for name, result in raw.items():
+        if isinstance(result, str):
+            continue
+        for obj in result:
+            if obj.key.startswith(ZIP_PREFIX) and doomed(obj):
+                try:
+                    await state.router.storage_delete(obj.key, obj.backend or name)
+                except ProviderError as exc:
+                    log.info("could not remove the stored ZIP %s: %s", obj.key, exc)
+
+
+async def _sweep_zips(state: HubState, rows: list[dict[str, Any]]) -> None:
+    """Stored ZIPs only live as long as their drop: those of expired, used-up or deleted drops go."""
+    live = {
+        r["code"] for r in rows
+        if r.get("kind") == "folder" and not _expired(r.get("expires_at"))
+        and (r.get("max_downloads") is None or int(r.get("downloads") or 0) < int(r["max_downloads"]))
+    }
+    await _remove_zips(state, lambda obj: _zip_code(obj.key) not in live)
 
 
 # --------------------------------------------------------------------------- public pages
@@ -525,10 +567,20 @@ async def _presign_all(state: HubState, files: list[StoredObject]) -> list[str |
     return list(await asyncio.gather(*(one(f) for f in files)))
 
 
+async def _shared_files(state: HubState, row: dict[str, Any]) -> tuple[list[StoredObject], int]:
+    """The files a folder drop shares: its creation snapshot, minus files gone since; (files, not listed)."""
+    try:
+        keep = {(str(b), str(k)) for b, k in json.loads(row.get("file_keys") or "[]")}
+    except (ValueError, TypeError):
+        keep = set()
+    files, _hidden, _errors = await _folder_files(state, row["provider"], row["key"], keep)
+    return files, max(int(row.get("file_count") or 0) - len(keep), 0) if keep else 0
+
+
 async def _folder_page(state: HubState, db: AppDB, row: dict[str, Any]) -> Response:
     prefix = row["key"]
     try:
-        files, hidden, _errors = await _folder_files(state, row["provider"], prefix)
+        files, hidden = await _shared_files(state, row)
         links = await _presign_all(state, files)
     except ProviderError as exc:
         log.warning("listing failed for folder drop %s: %s", row["code"], exc)
@@ -553,7 +605,7 @@ async def _folder_page(state: HubState, db: AppDB, row: dict[str, Any]) -> Respo
         name = html.escape(f.key[len(prefix):])
         label = f'<a href="{html.escape(url)}" rel="noreferrer" download>{name}</a>' if url else name
         items.append(f"<li><span>{label}</span><small>{_human(int(f.size or 0))}</small></li>")
-    parts.append(f"<ul>{''.join(items)}</ul>" if items else "<p>This folder is empty now.</p>")
+    parts.append(f"<ul>{''.join(items)}</ul>" if items else "<p>The shared files are no longer in this folder.</p>")
     if hidden:
         parts.append(f'<p class="muted">and {hidden} more file{"s" if hidden != 1 else ""} not listed.</p>')
     parts.append('<p class="muted">Download links stay valid for 10 minutes; reload the page for new ones.</p>')
@@ -572,9 +624,31 @@ async def _build_zip(state: HubState, files: list[StoredObject], prefix: str, de
     return buf.getvalue()
 
 
-async def _store_zip(state: HubState, row: dict[str, Any], data: bytes) -> str:
+def _zip_key(code: str, files: list[StoredObject]) -> str:
+    """Where a folder's big ZIP is kept: named after the drop and a fingerprint of the shared files,
+    so it is built once and reused (until a shared file changes or goes)."""
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f"{f.backend}|{f.key}|{f.size}|{f.etag or ''}|{f.last_modified or ''};".encode())
+    return f"{ZIP_PREFIX}{code}-{h.hexdigest()[:16]}.zip"
+
+
+async def _stored_zip(state: HubState, row: dict[str, Any], key: str) -> str | None:
+    """A presigned link to the ZIP built earlier for the same files, if it is still there."""
+    candidates = [row["provider"]] if row["provider"] != ALL_BACKENDS else state.registry.chain(ProviderKind.STORAGE)
+    for name in candidates:
+        try:
+            if not (await state.router.adapter(name)).supports(Capability.PRESIGN):
+                continue
+            if await state.router.storage_stat(key, name) is not None:
+                return await state.router.storage_presign(key, name, PRESIGN_TTL_S, "GET")
+        except ProviderError as exc:
+            log.debug("no stored ZIP %s on %s: %s", key, name, exc)
+    return None
+
+
+async def _store_zip(state: HubState, row: dict[str, Any], data: bytes, key: str) -> str:
     """Keep a big ZIP on a presign-capable backend (the folder's own when pinned) and presign it."""
-    key = f"{ZIP_PREFIX}{row['code']}.zip"
     candidates = [row["provider"]] if row["provider"] != ALL_BACKENDS else state.registry.chain(ProviderKind.STORAGE)
     last: ProviderError | None = None
     for name in candidates:
@@ -582,7 +656,10 @@ async def _store_zip(state: HubState, row: dict[str, Any], data: bytes) -> str:
             if not (await state.router.adapter(name)).supports(Capability.PRESIGN):
                 continue
             obj = await state.router.storage_put(key, data, "application/zip", None, provider=name, allow_fallback=False)
-            return await state.router.storage_presign(key, obj.backend or name, PRESIGN_TTL_S, "GET")
+            url = await state.router.storage_presign(key, obj.backend or name, PRESIGN_TTL_S, "GET")
+            # Older ZIPs of this drop (built before a shared file changed) are dead weight now.
+            await _remove_zips(state, lambda o: _zip_code(o.key) == row["code"] and o.key != key)
+            return url
         except ProviderError as exc:
             last = exc
     raise last or ProviderError("no storage backend can presign the ZIP", provider="drops", status_code=503)
@@ -609,15 +686,18 @@ async def folder_zip(
         return _not_found()
     started = time.monotonic()
     try:
-        files, hidden, _errors = await _folder_files(state, row["provider"], row["key"])
+        files, hidden = await _shared_files(state, row)
         total = sum(int(f.size or 0) for f in files)
         if not files or hidden or total > ZIP_MAX_BYTES or len(files) > ZIP_MAX_FILES:
             return _message("Too large to zip", "Download the files one by one from the folder page.", 413)
+        key = _zip_key(code, files)
+        if total > ZIP_INLINE_MAX and (url := await _stored_zip(state, row, key)):
+            return _redirect(url)  # built already: no rebuild, no re-upload
         data = await _build_zip(state, files, row["key"], started + ZIP_BUDGET_S)
         if data is None:
             return _message("Too slow to zip", "Download the files one by one from the folder page.", status.HTTP_503_SERVICE_UNAVAILABLE)
         if len(data) > ZIP_INLINE_MAX:
-            return _redirect(await _store_zip(state, row, data))
+            return _redirect(await _store_zip(state, row, data, key))
     except ProviderError as exc:
         log.warning("zip failed for folder drop %s: %s", code, exc)
         return _message("Temporarily unavailable", "The ZIP could not be prepared, try again later.", status.HTTP_502_BAD_GATEWAY)

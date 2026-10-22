@@ -73,11 +73,13 @@ def test_idempotency_key_header(app_hub) -> None:
     note = app_hub.post("/notes", json={"body": "plants"}, headers=headers)
     assert note.status_code == 201
 
-    # Deleted since: the first response is answered again, nothing is re-created.
+    # Deleted since: nothing is re-created, and the deleted content does not come back either.
     app_hub.delete(f"/tasks/{first.json()['id']}")
     third = app_hub.post("/tasks", json={"title": "Water plants"}, headers=headers)
-    assert third.status_code == 200 and third.json()["id"] == first.json()["id"]
+    assert third.status_code == 410 and "Water plants" not in third.text
     assert app_hub.get("/tasks").json()["tasks"] == []
+    stored = [r[0] for r in fa.sql("SELECT response FROM app_idempotency")]
+    assert stored and not any("plants" in x for x in stored)  # only ids are kept
 
     assert app_hub.post("/tasks", json={"title": "x"}, headers={"Idempotency-Key": "bad key"}).status_code == 422
 
@@ -102,9 +104,15 @@ def test_voice_note_replay_with_form_key(app_hub) -> None:
     first = app_hub.post("/notes/voice", files=files, data=data)
     assert first.status_code == 201, first.text
     second = app_hub.post("/notes/voice", files={"file": ("v.ogg", b"OggS-audio", "audio/ogg")}, data=data)
-    assert second.status_code == 200 and second.json() == first.json()
+    assert second.status_code == 200
+    a, b = first.json(), second.json()
+    assert b["note"] == {"id": a["note"]["id"]} and b["tasks"] == [{"id": t["id"]} for t in a["tasks"]]
+    assert b["audio_key"] == a["audio_key"] and b["transcript"] == "" and b["replayed"] is True
     assert len(fa.TRANSCRIBE_LOG) == 1  # transcribed once
     assert len(app_hub.get("/tasks").json()["tasks"]) == 1
+    # The transcript and note body are not copied into the idempotency table.
+    stored = " ".join(r[0] for r in fa.sql("SELECT response FROM app_idempotency"))
+    assert "bread" not in stored.lower()
 
 
 def test_money_voice_replay_with_header(app_hub) -> None:
@@ -115,5 +123,39 @@ def test_money_voice_replay_with_header(app_hub) -> None:
     first = app_hub.post("/money/voice", files={"file": ("m.ogg", b"OggS", "audio/ogg")}, headers=headers)
     assert first.status_code == 201, first.text
     second = app_hub.post("/money/voice", files={"file": ("m.ogg", b"OggS", "audio/ogg")}, headers=headers)
-    assert second.status_code == 200 and second.json()["expenses"] == first.json()["expenses"]
+    assert second.status_code == 200
+    assert second.json()["expenses"] == [{"id": e["id"]} for e in first.json()["expenses"]]
     assert len(fa.TRANSCRIBE_LOG) == 1
+
+
+def _pwa_create_fields() -> dict[str, set[str]]:
+    """CREATE_FIELDS from the PWA's offline model: the fields it folds into a queued create."""
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "mobile_app/src/lib/offline/model.ts").read_text(encoding="utf-8")
+    block = src[src.index("const CREATE_FIELDS"):]
+    block = block[: block.index("};")]
+    return {k: set(re.findall(r"'([a-z_]+)'", v)) for k, v in re.findall(r"(\w+): new Set\(\[([^\]]*)\]\)", block)}
+
+
+def test_pwa_folds_only_fields_the_create_models_accept() -> None:
+    from hub_api.routers.expenses import ExpenseCreate
+    from hub_api.routers.money import IncomeCreate
+    from hub_api.routers.notes import NoteCreate, TaskCreate
+
+    models = {"task": TaskCreate, "note": NoteCreate, "expense": ExpenseCreate, "income": IncomeCreate}
+    fields = _pwa_create_fields()
+    assert set(fields) == set(models)
+    for kind, model in models.items():
+        assert fields[kind] == set(model.model_fields) - {"id"}, kind
+
+
+def test_offline_task_ticked_before_sync_ends_done(app_hub) -> None:
+    # What the queue sends for "create offline, tick it, then sync": the create (create fields only)
+    # and the PATCH carrying `done`, which TaskCreate would silently drop.
+    r = app_hub.post("/tasks", json={"id": "oOfflineTask001", "title": "Call the bank", "due": None, "due_time": None})
+    assert r.status_code == 201, r.text
+    assert app_hub.patch("/tasks/oOfflineTask001", json={"done": True}).status_code == 200
+    done = {t["id"]: t for t in app_hub.get("/tasks?status=done").json()["tasks"]}
+    assert done["oOfflineTask001"]["done"] is True

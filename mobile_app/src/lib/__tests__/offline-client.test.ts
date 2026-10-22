@@ -85,9 +85,30 @@ describe('read cache', () => {
     down = false;
     const refreshed = vi.fn();
     manager.onRefresh(refreshed);
-    await client.tasks({ status: 'open' });
-    expect(manager.state).toMatchObject({ online: true, cachedAt: null });
+    // Known out of reach: the saved copy answers at once, the live answer arrives in the background.
+    expect((await client.tasks({ status: 'open' })).map((t) => t.title)).toEqual(['Live']);
+    await vi.waitFor(() => expect(manager.state).toMatchObject({ online: true, cachedAt: null }));
     expect(refreshed).toHaveBeenCalled();
+  });
+
+  it('never serves the saved data of another hub', async () => {
+    const { client, manager } = setup();
+    reply = () => ({ body: { tasks: [task('a', 'From A')] } });
+    await client.tasks({ status: 'open' });
+    const other = new OfflineHubClient({ hubUrl: 'https://other.example', token: 'tok2' }, manager, 5_000);
+    down = true;
+    await expect(other.tasks({ status: 'open' })).rejects.toMatchObject({ status: 0 });
+  });
+
+  it('does not wait for the timeout again once the hub is known to be out of reach', async () => {
+    const { client, manager } = setup(5_000);
+    reply = () => ({ body: { tasks: [task('a', 'Saved')] } });
+    await client.tasks({ status: 'open' });
+    manager.unreachable();
+    reply = () => 'hang'; // captive portal: the browser says online, nothing answers
+    const started = Date.now();
+    expect((await client.tasks({ status: 'open' })).map((t) => t.title)).toEqual(['Saved']);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('caches notes, opened notes, expenses, the money overview, the agenda and chats', async () => {

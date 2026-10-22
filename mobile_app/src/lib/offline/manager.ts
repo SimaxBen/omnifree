@@ -14,6 +14,8 @@ export interface OfflineState {
   conflicts: number;
   syncing: boolean;
   lastSync: number | null;
+  /** The hub refused the token during the last replay (401/403): sync is paused, not offline. */
+  authError: boolean;
 }
 
 export const SYNC_EVERY_MS = 30_000;
@@ -25,13 +27,15 @@ function browserOnline(): boolean {
 }
 
 export class OfflineManager {
-  state: OfflineState = { online: true, cachedAt: null, pending: 0, conflicts: 0, syncing: false, lastSync: null };
+  state: OfflineState = { online: true, cachedAt: null, pending: 0, conflicts: 0, syncing: false, lastSync: null, authError: false };
   private listeners = new Set<Listener>();
   private refreshers = new Set<() => void>();
   private send: Send | null = null;
   private running: Promise<ReplayResult | null> | null = null;
   private reachable = true;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** The hub URL in the settings: writes queued for it, saved data from it. */
+  private hub = '';
 
   constructor(
     readonly store: OfflineStore,
@@ -42,6 +46,24 @@ export class OfflineManager {
   /** The hub to replay against (the current HubClient's address and token). */
   setSender(send: Send): void {
     this.send = send;
+  }
+
+  /**
+   * The settings changed: writes are only replayed to the hub they were made for, and saved data
+   * from another hub is dropped (all of it when the token was removed). Queued writes for another
+   * hub stay dormant until that hub is configured again.
+   */
+  async bindHub(hub: string, hasToken: boolean): Promise<void> {
+    this.hub = hub;
+    const entries = await this.store.cacheAll().catch(() => []);
+    for (const e of entries) {
+      if (!hasToken || (e.hub && e.hub !== hub)) await this.store.cacheDelete(e.key).catch(() => undefined);
+    }
+    await this.counts().catch(() => undefined);
+  }
+
+  private mine(i: QueueItem): boolean {
+    return !i.hub || i.hub === this.hub;
   }
 
   isOnline(): boolean {
@@ -73,21 +95,22 @@ export class OfflineManager {
     for (const r of [...this.refreshers]) r();
   }
 
+  /** The queue entries of the current hub. */
   async items(): Promise<QueueItem[]> {
-    return this.store.queueAll();
+    return (await this.store.queueAll()).filter((i) => this.mine(i));
   }
 
   async pendingItems(): Promise<QueueItem[]> {
-    return (await this.store.queueAll()).filter((i) => i.status === 'pending');
+    return (await this.items()).filter((i) => i.status === 'pending');
   }
 
   async counts(): Promise<void> {
-    const all = await this.store.queueAll();
+    const all = await this.items();
     this.set({ pending: all.filter((i) => i.status === 'pending').length, conflicts: all.filter((i) => i.status === 'conflict').length });
   }
 
   async enqueue(item: QueueItem): Promise<void> {
-    await enqueue(this.store, item);
+    await enqueue(this.store, { ...item, hub: item.hub ?? this.hub });
     await this.counts();
     void this.sync();
   }
@@ -107,36 +130,47 @@ export class OfflineManager {
   /** A live response arrived: leave offline mode, reload what showed saved data, replay the queue. */
   reached(): void {
     this.reachable = true;
-    if (this.state.online && this.state.cachedAt === null) return;
+    if (this.state.online && this.state.cachedAt === null) {
+      if (this.state.authError) {
+        this.set({ authError: false }); // the token works again: retry the paused queue
+        void this.sync();
+      }
+      return;
+    }
     this.set({ online: true, cachedAt: null });
     this.refresh();
     void this.sync();
   }
 
-  /** Replays the queue (a call during a run waits for it, then runs again for what was queued meanwhile). */
-  sync(): Promise<ReplayResult | null> {
-    if (this.running) return this.running.then(() => this.sync());
+  /**
+   * Replays the queue (a call during a run waits for it, then runs again for what was queued meanwhile).
+   * ``force`` also retries entries waiting out a server-error backoff.
+   */
+  sync(force = false): Promise<ReplayResult | null> {
+    if (this.running) return this.running.then(() => this.sync(force));
     // Started on the next microtask, so `running` is set before the run can clear it.
     this.running = Promise.resolve().then(async () => {
       let total: ReplayResult | null = null;
       try {
-        if (this.send && this.isBrowserOnline() && (await this.store.queueAll()).some((i) => i.status === 'pending')) {
+        if (this.send && this.isBrowserOnline() && (await this.pendingItems()).length) {
           this.set({ syncing: true });
-          total = await replay(this.store, this.send);
-          this.reachable = !total.stopped;
+          total = await replay(this.store, this.send, { now: this.now(), force, hub: this.hub });
+          // Only "no answer at all" means offline; a 5xx or 401 came from a reachable hub.
+          this.reachable = !total.unreachable;
         }
       } finally {
         this.running = null;
         await this.counts().catch(() => undefined);
         const patch: Partial<OfflineState> = { syncing: false };
         const wasCached = this.state.cachedAt !== null;
-        if (total && !total.stopped) {
-          patch.lastSync = this.now();
+        if (total && !total.unreachable) {
+          if (!total.authError) patch.lastSync = this.now();
+          patch.authError = total.authError;
           patch.online = this.isBrowserOnline();
           patch.cachedAt = null; // the hub answered: screens reload live data below
-        } else if (total?.stopped) patch.online = false;
+        } else if (total?.unreachable) patch.online = false;
         this.set(patch);
-        if (total && (total.synced > 0 || total.conflicts > 0 || (wasCached && !total.stopped))) this.refresh();
+        if (total && (total.synced > 0 || total.conflicts > 0 || (wasCached && !total.unreachable))) this.refresh();
       }
       return total;
     });

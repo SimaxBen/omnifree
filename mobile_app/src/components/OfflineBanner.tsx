@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { offline, type OfflineState } from '../lib/offline/manager';
 import { bannerText, clockOf, isPending, type QueueItem } from '../lib/offline/model';
 import { Icon } from './icons';
-import { Sheet } from './Sheet';
+import { Sheet, useConfirm } from './Sheet';
 import { Badge, Button, cx, haptic } from './ui';
 
 /** Live offline state (connectivity, saved data on screen, queue counters). */
@@ -28,6 +28,7 @@ export function PendingBadge({ item, className }: { item: unknown; className?: s
 
 function SyncSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const state = useOffline();
+  const confirm = useConfirm();
   const [items, setItems] = useState<QueueItem[]>([]);
   const load = useCallback(() => void offline.items().then(setItems, () => setItems([])), []);
   useEffect(() => {
@@ -41,6 +42,12 @@ function SyncSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
     await fn();
     load();
   };
+  // Discarding cannot be undone: a voice recording or a create typed offline exists nowhere else.
+  const discard = async (i: QueueItem) => {
+    const what = i.kind === 'voice' ? 'This recording is only on this phone; it will be lost.' : i.op === 'create' ? 'It was never sent to the hub; it will be lost.' : 'This change will not reach the hub.';
+    if (!(await confirm({ title: `Discard "${i.label}"?`, body: what, confirmLabel: 'Discard', tone: 'danger' }))) return;
+    await act(() => offline.discard(i.seq as number));
+  };
 
   const row = (i: QueueItem) => (
     <li key={i.seq} className="flex items-start gap-3 py-3">
@@ -53,13 +60,13 @@ function SyncSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
           {i.status === 'pending' && i.attempts > 0 ? ` · ${i.attempts} attempt${i.attempts === 1 ? '' : 's'}${i.error ? `, ${i.error}` : ''}` : ''}
         </span>
       </span>
-      <span className="flex shrink-0 gap-1">
+      <span className="flex shrink-0 gap-3">
         {i.status === 'conflict' && (
-          <Button variant="subtle" className="min-h-[36px] px-3 text-[13px]" onClick={() => void act(() => offline.retry(i.seq as number))}>
+          <Button variant="subtle" className="min-h-[44px] px-3 text-[13px]" onClick={() => void act(() => offline.retry(i.seq as number))}>
             Retry
           </Button>
         )}
-        <Button variant="ghost" className="min-h-[36px] px-3 text-[13px]" onClick={() => void act(() => offline.discard(i.seq as number))}>
+        <Button variant="ghost" className="min-h-[44px] px-3 text-[13px] text-danger-400" onClick={() => void discard(i)}>
           Discard
         </Button>
       </span>
@@ -72,14 +79,16 @@ function SyncSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
       onClose={onClose}
       title="Offline & sync"
       footer={
-        <Button variant="primary" icon="refresh" className="w-full" disabled={state.syncing || !pending.length} onClick={() => void act(async () => void (await offline.sync()))}>
+        <Button variant="primary" icon="refresh" className="w-full" disabled={state.syncing || !pending.length} onClick={() => void act(async () => void (await offline.sync(true)))}>
           {state.syncing ? 'Syncing…' : 'Sync now'}
         </Button>
       }
     >
       <div className="space-y-5">
         <p className="text-[14px] text-ink-400">
-          {state.cachedAt !== null
+          {state.authError
+            ? 'The hub rejected the token, so sync is paused. Check the token in Settings; nothing queued is lost.'
+            : state.cachedAt !== null
             ? `The hub is out of reach. Lists show what was saved at ${clockOf(state.cachedAt)}.`
             : state.online
               ? state.lastSync
@@ -121,13 +130,13 @@ export function OfflineBanner() {
           onClick={() => setOpen(true)}
           className={cx(
             'screen-in-up mx-4 mb-2 flex min-h-[40px] w-[calc(100%-2rem)] items-center gap-2 rounded-row px-4 py-2 text-left text-[14px]',
-            banner.tone === 'conflict' && 'bg-danger-400/15 text-danger-400',
+            (banner.tone === 'conflict' || banner.tone === 'paused') && 'bg-danger-400/15 text-danger-400',
             banner.tone === 'offline' && 'bg-ink-850 text-ink-200 ring-1 ring-inset ring-ink-700',
             banner.tone === 'sync' && 'bg-amber-400/15 text-amber-400',
           )}
           aria-label={`${banner.text}. Open sync details`}
         >
-          <Icon name={banner.tone === 'conflict' ? 'x' : banner.tone === 'offline' ? 'wave' : 'refresh'} size={16} className={cx('shrink-0', state.syncing && 'spin')} />
+          <Icon name={banner.tone === 'conflict' || banner.tone === 'paused' ? 'x' : banner.tone === 'offline' ? 'wave' : 'refresh'} size={16} className={cx('shrink-0', state.syncing && 'spin')} />
           <span className="min-w-0 flex-1">{banner.text}</span>
           <Icon name="right" size={14} className="shrink-0 opacity-70" />
         </button>

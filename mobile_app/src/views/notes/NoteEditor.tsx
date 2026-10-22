@@ -7,10 +7,11 @@ import { announce } from '../../lib/bus';
 import { formatDateTime } from '../../lib/format';
 import { errorText, useHub, useHubData } from '../../lib/hub';
 import { toggleCheckbox } from '../../lib/markdown';
+import { isPending } from '../../lib/offline/model';
 import type { Note, NotePatch } from '../../lib/types';
 import { TaskRow } from './TaskRow';
 
-type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+type SaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'queued' | 'error';
 
 interface Draft {
   title: string;
@@ -121,7 +122,8 @@ export default function NoteEditor({
         }
         changed.current = true;
         setUpdatedAt(res.updated_at);
-        setSave('saved');
+        // Answered by the offline queue: kept on the phone, not on the hub yet.
+        setSave(isPending(res) ? 'queued' : 'saved');
       } catch (err) {
         setSave('error');
         notify(`Not saved: ${errorText(err)}`, 'error');
@@ -170,7 +172,7 @@ export default function NoteEditor({
     }
   };
 
-  const status = { idle: '', pending: 'Editing', saving: 'Saving…', saved: 'Saved', error: 'Not saved' }[save];
+  const status = { idle: '', pending: 'Editing', saving: 'Saving…', saved: 'Saved', queued: 'Saved on phone · pending sync', error: 'Not saved' }[save];
   const notebooks = books.data?.notebooks.map((b) => b.name) ?? [];
 
   return (
@@ -182,7 +184,7 @@ export default function NoteEditor({
         <span className="flex items-center gap-2 text-[15px] font-normal text-ink-400">
           <Icon name="book" size={16} />
           <span className="truncate">{draft.notebook}</span>
-          {status && <span className={cx('text-[13px]', save === 'error' ? 'text-danger-400' : save === 'saved' ? 'text-mint-400' : 'text-ink-500')}>{status}</span>}
+          {status && <span className={cx('text-[13px]', save === 'error' ? 'text-danger-400' : save === 'saved' ? 'text-mint-400' : save === 'queued' ? 'text-amber-400' : 'text-ink-500')}>{status}</span>}
         </span>
       }
       headerAction={
