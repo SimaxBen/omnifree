@@ -2,19 +2,28 @@
 
 import type { StoredObject } from './types';
 
-export type FileKind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'code' | 'sheet' | 'doc' | 'archive' | 'other';
+export type FileKind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'code' | 'sheet' | 'doc' | 'slides' | 'archive' | 'other';
 
 const EXT_KIND: Record<string, FileKind> = {
-  jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', avif: 'image', svg: 'image', bmp: 'image', heic: 'image', heif: 'image',
-  mp4: 'video', webm: 'video', mov: 'video', m4v: 'video', mkv: 'video',
-  mp3: 'audio', m4a: 'audio', aac: 'audio', ogg: 'audio', oga: 'audio', opus: 'audio', wav: 'audio', flac: 'audio',
+  jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', webp: 'image', avif: 'image', svg: 'image', bmp: 'image', heic: 'image', heif: 'image', ico: 'image',
+  mp4: 'video', webm: 'video', mov: 'video', m4v: 'video', mkv: 'video', '3gp': 'video',
+  mp3: 'audio', m4a: 'audio', aac: 'audio', ogg: 'audio', oga: 'audio', opus: 'audio', wav: 'audio', flac: 'audio', amr: 'audio', weba: 'audio',
   pdf: 'pdf',
-  txt: 'text', md: 'text', markdown: 'text', log: 'text', rtf: 'text',
-  json: 'code', js: 'code', ts: 'code', tsx: 'code', jsx: 'code', py: 'code', html: 'code', css: 'code', xml: 'code', yaml: 'code', yml: 'code',
-  toml: 'code', sh: 'code', sql: 'code', go: 'code', rs: 'code', java: 'code', c: 'code', cpp: 'code', ini: 'code', env: 'code',
-  csv: 'sheet', tsv: 'sheet', xls: 'sheet', xlsx: 'sheet', ods: 'sheet',
-  doc: 'doc', docx: 'doc', odt: 'doc', ppt: 'doc', pptx: 'doc', key: 'doc', pages: 'doc',
-  zip: 'archive', rar: 'archive', '7z': 'archive', tar: 'archive', gz: 'archive', tgz: 'archive', bz2: 'archive',
+  txt: 'text', md: 'text', markdown: 'text', log: 'text', rtf: 'text', text: 'text',
+  json: 'code', jsonc: 'code', js: 'code', mjs: 'code', cjs: 'code', ts: 'code', tsx: 'code', jsx: 'code', py: 'code', html: 'code', htm: 'code',
+  css: 'code', scss: 'code', less: 'code', xml: 'code', yaml: 'code', yml: 'code', toml: 'code', sh: 'code', bash: 'code', zsh: 'code', sql: 'code',
+  go: 'code', rs: 'code', java: 'code', kt: 'code', kts: 'code', c: 'code', h: 'code', cpp: 'code', cc: 'code', hpp: 'code', cs: 'code', php: 'code',
+  rb: 'code', swift: 'code', ini: 'code', cfg: 'code', conf: 'code', env: 'code', properties: 'code', gradle: 'code', dockerfile: 'code',
+  vue: 'code', svelte: 'code', lua: 'code', ps1: 'code', bat: 'code',
+  csv: 'sheet', tsv: 'sheet', xls: 'sheet', xlsx: 'sheet', xlsm: 'sheet', xlsb: 'sheet', ods: 'sheet', numbers: 'sheet',
+  doc: 'doc', docx: 'doc', odt: 'doc', pages: 'doc',
+  ppt: 'slides', pptx: 'slides', odp: 'slides', key: 'slides',
+  zip: 'archive', rar: 'archive', '7z': 'archive', tar: 'archive', gz: 'archive', tgz: 'archive', bz2: 'archive', xz: 'archive', zst: 'archive',
+};
+
+/** Extension-less files known by their (lower-cased) name. */
+const NAME_KIND: Record<string, FileKind> = {
+  dockerfile: 'code', makefile: 'code', '.env': 'code', '.gitignore': 'code', '.editorconfig': 'code', license: 'text', readme: 'text',
 };
 
 /** Last path segment of a key. */
@@ -43,7 +52,7 @@ export function displayName(key: string): string {
 }
 
 export function fileKind(key: string, contentType?: string | null): FileKind {
-  const byExt = EXT_KIND[extensionOf(key)];
+  const byExt = EXT_KIND[extensionOf(key)] ?? NAME_KIND[baseName(key).toLowerCase()];
   if (byExt) return byExt;
   const ct = (contentType ?? '').toLowerCase();
   if (ct.startsWith('image/')) return 'image';
@@ -62,7 +71,67 @@ export function isIndexable(key: string): boolean {
 
 /** Previews that read the bytes as text (small files only). */
 export function isTextual(kind: FileKind): boolean {
-  return kind === 'text' || kind === 'code' || kind === 'sheet';
+  return kind === 'text' || kind === 'code';
+}
+
+/** Which previewer opens a file (components/preview/PreviewBody.tsx). */
+export type PreviewerId =
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'docx'
+  | 'odt'
+  | 'sheet'
+  | 'csv'
+  | 'pptx'
+  | 'zip'
+  | 'markdown'
+  | 'code'
+  | 'text'
+  | 'legacy'
+  | 'archive'
+  | 'none';
+
+const EXT_PREVIEWER: Record<string, PreviewerId> = {
+  docx: 'docx', odt: 'odt',
+  xlsx: 'sheet', xlsm: 'sheet', xlsb: 'sheet', xls: 'sheet', ods: 'sheet',
+  csv: 'csv', tsv: 'csv',
+  pptx: 'pptx', zip: 'zip',
+  md: 'markdown', markdown: 'markdown',
+  doc: 'legacy', ppt: 'legacy',
+  rtf: 'none', pages: 'none', numbers: 'none', key: 'none', odp: 'none', heic: 'none', heif: 'none',
+};
+
+export function previewerOf(key: string, contentType?: string | null): PreviewerId {
+  const byExt = EXT_PREVIEWER[extensionOf(key)];
+  if (byExt) return byExt;
+  const kind = fileKind(key, contentType);
+  if (kind === 'archive') return 'archive';
+  if (kind === 'other' || !EXT_KIND[extensionOf(key)]) {
+    // No known extension: Office types first (their MIME types contain "xml").
+    const ct = (contentType ?? '').toLowerCase();
+    if (ct.includes('wordprocessingml')) return 'docx';
+    if (ct.includes('spreadsheetml')) return 'sheet';
+    if (ct.includes('presentationml')) return 'pptx';
+    if (ct === 'application/zip' || ct === 'application/x-zip-compressed') return 'zip';
+  }
+  if (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'pdf' || kind === 'code' || kind === 'text') return kind;
+  return 'none';
+}
+
+const CODE_LANGUAGE: Record<string, string> = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+  py: 'python', json: 'json', jsonc: 'json', html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml', svelte: 'xml',
+  css: 'css', scss: 'css', less: 'css', sql: 'sql', sh: 'bash', bash: 'bash', zsh: 'bash', makefile: 'bash',
+  yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini', env: 'ini', '.env': 'ini', properties: 'ini',
+  '.editorconfig': 'ini', go: 'go', rs: 'rust', java: 'java', kt: 'kotlin', kts: 'kotlin', gradle: 'kotlin',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp', md: 'markdown', markdown: 'markdown', dockerfile: 'dockerfile',
+};
+
+/** highlight.js language of a code file ('' = plain text; auto-detection is never used). */
+export function codeLanguage(key: string): string {
+  return CODE_LANGUAGE[extensionOf(key) || baseName(key).toLowerCase()] ?? '';
 }
 
 /**

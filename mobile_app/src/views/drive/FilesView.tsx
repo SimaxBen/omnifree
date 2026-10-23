@@ -17,7 +17,7 @@ type Filter = 'all' | 'image' | 'doc' | 'media';
 const FILTERS: { id: Filter; label: string; kinds: FileKind[] }[] = [
   { id: 'all', label: 'All', kinds: [] },
   { id: 'image', label: 'Photos', kinds: ['image'] },
-  { id: 'doc', label: 'Documents', kinds: ['pdf', 'text', 'doc', 'sheet', 'code'] },
+  { id: 'doc', label: 'Documents', kinds: ['pdf', 'text', 'doc', 'slides', 'sheet', 'code'] },
   { id: 'media', label: 'Audio & video', kinds: ['audio', 'video'] },
 ];
 

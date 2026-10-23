@@ -1,11 +1,56 @@
-import { defineConfig } from 'vite';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { SHORTCUTS, shortcutIcon, shortcutUrl } from './src/lib/launch';
 
+// pdf.js support files (wasm image decoders, standard fonts, CMaps) served from this build under
+// /pdfjs/, never from a CDN (src/lib/preview/pdfjs.ts). Loaded only when a PDF needs them.
+const PDFJS_DIR = join(__dirname, 'node_modules', 'pdfjs-dist');
+const PDFJS_ASSETS: Record<string, (name: string) => boolean> = {
+  wasm: (n) => /^(openjpeg|jbig2|qcms)[\w.]*\.(wasm|js)$/.test(n) && !n.includes('quickjs'),
+  standard_fonts: (n) => !n.startsWith('LICENSE'),
+  cmaps: (n) => n.endsWith('.bcmap'),
+};
+
+function pdfjsAssets(): Plugin {
+  const files = () =>
+    Object.entries(PDFJS_ASSETS).flatMap(([dir, keep]) =>
+      readdirSync(join(PDFJS_DIR, dir))
+        .filter((n) => keep(n) && statSync(join(PDFJS_DIR, dir, n)).isFile())
+        .map((n) => `${dir}/${n}`),
+    );
+  return {
+    name: 'omnifree-pdfjs-assets',
+    configureServer(server) {
+      server.middlewares.use('/pdfjs/', (req, res, next) => {
+        const rel = decodeURIComponent((req.url ?? '').split('?')[0]).replace(/^\/+/, '');
+        if (!files().includes(rel)) return next();
+        res.setHeader('Content-Type', rel.endsWith('.wasm') ? 'application/wasm' : rel.endsWith('.js') ? 'text/javascript' : 'application/octet-stream');
+        res.end(readFileSync(join(PDFJS_DIR, rel)));
+      });
+    },
+    generateBundle() {
+      for (const rel of files()) this.emitFile({ type: 'asset', fileName: `pdfjs/${rel}`, source: readFileSync(join(PDFJS_DIR, rel)) });
+    },
+  };
+}
+
+// Previewers and their libraries are fetched on first use (runtime cache), not precached at install.
+const LAZY_MODULE = /node_modules[\\/](pdfjs-dist|xlsx|mammoth|jszip|highlight\.js|dompurify|@xmldom|bluebird|underscore|lop|dingbat-to-unicode|base64-js|option|pako|lie|readable-stream)[\\/]|[\\/]src[\\/](components[\\/]preview[\\/](PdfViewer|DocPreview|SheetPreview|SlidesPreview|ZipPreview)|lib[\\/]preview[\\/](highlight|pdfjs|sanitize|odt|pptx|zip|ooxml))\./;
+
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        chunkFileNames: (chunk) => (!chunk.isEntry && chunk.moduleIds.some((id) => LAZY_MODULE.test(id)) ? 'assets/lazy/[name]-[hash].js' : 'assets/[name]-[hash].js'),
+      },
+    },
+  },
   plugins: [
     react(),
+    pdfjsAssets(),
     VitePWA({
       registerType: 'prompt',
       injectRegister: false,
@@ -49,6 +94,8 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // Previewer chunks (pdf.js, SheetJS, mammoth, JSZip, highlight.js) and pdf.js data: runtime-cached below.
+        globIgnores: ['**/assets/lazy/**', '**/pdfjs/**'],
         // Web Push handlers (push, notificationclick, pushsubscriptionchange): a static script from public/,
         // pulled into the generated service worker next to the Workbox precache.
         // Android share target (POST /share-target): public/share-sw.js, same mechanism.
@@ -57,6 +104,17 @@ export default defineConfig({
         // The hub API is always live data: never serve it from the service worker cache.
         navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|notify|push|search|saved|share-target|s|d)\b/],
         runtimeCaching: [
+          {
+            // Hashed previewer chunks and the pdf.js worker: immutable, kept once used.
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && (url.pathname.startsWith('/assets/lazy/') || /^\/assets\/pdf\.worker[\w.-]*\.mjs$/.test(url.pathname)),
+            handler: 'CacheFirst',
+            options: { cacheName: 'previewers', expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 90 } },
+          },
+          {
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/pdfjs/'),
+            handler: 'CacheFirst',
+            options: { cacheName: 'pdfjs-data', expiration: { maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 90 } },
+          },
           {
             urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',
             handler: 'StaleWhileRevalidate',

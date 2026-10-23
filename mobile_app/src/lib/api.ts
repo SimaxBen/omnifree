@@ -566,6 +566,11 @@ export class HubClient {
     return this.request('DELETE', driveObjectPath(provider, key));
   }
 
+  /** `POST /drive/transcribe`: the hub reads an audio file from the Drive, transcribes it and saves a note. */
+  driveTranscribe(req: { provider: string; key: string; notebook?: string; language?: string }, signal?: AbortSignal): Promise<{ note: Note; transcript: string }> {
+    return this.request<{ note: Note; transcript: string }>('POST', '/drive/transcribe', { json: req, signal });
+  }
+
   // ------------------------------------------------------------------ cron / schedules
 
   async cronProviders(signal?: AbortSignal): Promise<CronProvider[]> {

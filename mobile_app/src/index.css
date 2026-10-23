@@ -267,3 +267,48 @@ button,
 @media (prefers-reduced-motion: reduce) {
   .shake { animation: none; }
 }
+
+/* ------------------------------------------------------------------ file previews */
+
+/* Word/ODT documents: reading style on the light "paper" (DocPreview). */
+.doc-paper { overflow-wrap: anywhere; }
+.doc-paper > * + * { margin-top: 0.75em; }
+.doc-paper > :first-child { margin-top: 0; }
+.doc-paper h1, .doc-paper h2, .doc-paper h3, .doc-paper h4, .doc-paper h5, .doc-paper h6 {
+  font-family: "Bricolage Grotesque", system-ui, sans-serif; font-weight: 650; line-height: 1.25; margin-top: 1.2em;
+}
+.doc-paper h1 { font-size: 1.55em; }
+.doc-paper h2 { font-size: 1.3em; }
+.doc-paper h3 { font-size: 1.15em; }
+.doc-paper h4, .doc-paper h5, .doc-paper h6 { font-size: 1em; }
+.doc-paper strong, .doc-paper b { font-weight: 700; }
+.doc-paper em, .doc-paper i { font-style: italic; }
+.doc-paper u { text-decoration: underline; }
+.doc-paper a { color: #1f4fbf; text-decoration: underline; }
+.doc-paper ul { list-style: disc; padding-left: 1.4em; }
+.doc-paper ol { list-style: decimal; padding-left: 1.6em; }
+.doc-paper li + li { margin-top: 0.25em; }
+.doc-paper table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.92em; }
+.doc-paper td, .doc-paper th { border: 1px solid #cfcbc0; padding: 0.35em 0.55em; vertical-align: top; min-width: 3em; }
+.doc-paper th { background: #efece3; font-weight: 700; }
+.doc-paper td > p, .doc-paper th > p { margin: 0; }
+.doc-paper img { max-width: 100%; height: auto; margin-left: auto; margin-right: auto; border-radius: 3px; }
+.doc-paper blockquote { border-left: 3px solid #cfcbc0; padding-left: 0.9em; color: #4a4a58; }
+.doc-paper sup, .doc-paper sub { font-size: 0.75em; }
+
+/* Code view: long files render in blocks that the browser skips while off-screen. */
+.code-block { content-visibility: auto; contain-intrinsic-size: auto 4000px; }
+
+/* highlight.js tokens on the night theme (TextPreviews / lib/preview/highlight.ts). */
+.code-view .hljs-comment, .code-view .hljs-quote { color: #6f76a8; font-style: italic; }
+.code-view .hljs-keyword, .code-view .hljs-selector-tag, .code-view .hljs-literal, .code-view .hljs-doctag { color: #ff9ad5; }
+.code-view .hljs-string, .code-view .hljs-regexp, .code-view .hljs-addition, .code-view .hljs-meta .hljs-string { color: #a6e8a0; }
+.code-view .hljs-number, .code-view .hljs-symbol, .code-view .hljs-bullet { color: #ffc24b; }
+.code-view .hljs-title, .code-view .hljs-section, .code-view .hljs-function .hljs-title { color: #8fd3ff; }
+.code-view .hljs-built_in, .code-view .hljs-type, .code-view .hljs-class .hljs-title { color: #8fe6cf; }
+.code-view .hljs-attr, .code-view .hljs-attribute, .code-view .hljs-variable, .code-view .hljs-template-variable, .code-view .hljs-property { color: #ffb0a0; }
+.code-view .hljs-name, .code-view .hljs-tag, .code-view .hljs-selector-id, .code-view .hljs-selector-class { color: #c9b2ff; }
+.code-view .hljs-meta, .code-view .hljs-params { color: #b3b6d8; }
+.code-view .hljs-deletion { color: #ff5c7a; }
+.code-view .hljs-emphasis { font-style: italic; }
+.code-view .hljs-strong { font-weight: 700; }

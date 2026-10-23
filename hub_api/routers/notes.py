@@ -25,7 +25,8 @@ from hub_api.state import HubState, get_state
 
 __all__ = [
     "router", "resolve_due", "resolve_when", "split_time", "normalize_time", "derive_title", "SCHEMA",
-    "TASK_COLUMNS", "TASK_COLUMNS_V3", "ensure_schema", "store_and_transcribe", "roll_over", "task_out", "get_task",
+    "TASK_COLUMNS", "TASK_COLUMNS_V3", "ensure_schema", "store_and_transcribe", "transcribe_audio", "roll_over",
+    "task_out", "get_task", "insert_note", "notes_db",
 ]
 
 log = logging.getLogger("omnifree.hub.notes")
@@ -73,6 +74,9 @@ async def ensure_schema(db: AppDB) -> AppDB:
 
 async def _db(db: AppDB = Depends(get_appdb)) -> AppDB:
     return await ensure_schema(db)
+
+
+notes_db = _db  # dependency for other routers that write notes (POST /drive/transcribe)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -479,6 +483,9 @@ async def _insert_note(
     return _note_out(row)
 
 
+insert_note = _insert_note
+
+
 async def _insert_task(
     db: AppDB,
     *,
@@ -754,13 +761,16 @@ async def store_and_transcribe(
     meta = {"original-filename": file.filename} if file.filename else None
     await state.router.storage_put(key, audio, content_type, meta)
 
-    tr = await state.router.transcribe(
-        TranscriptionRequest(audio=audio, filename=f"{audio_id}.{ext}", language=language or None)
-    )
+    return key, await transcribe_audio(state, audio, f"{audio_id}.{ext}", language)
+
+
+async def transcribe_audio(state: HubState, audio: bytes, filename: str, language: str | None) -> str:
+    """Speech to text through the router's transcription chain; 422 when no speech is heard."""
+    tr = await state.router.transcribe(TranscriptionRequest(audio=audio, filename=filename, language=language or None))
     transcript = (tr.text or "").strip()
     if not transcript:
         raise HTTPException(422, detail="no speech detected in the recording")
-    return key, transcript
+    return transcript
 
 
 _AUDIO_EXT = {
