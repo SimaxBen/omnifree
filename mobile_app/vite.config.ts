@@ -6,8 +6,10 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { SHORTCUTS, shortcutIcon, shortcutUrl } from './src/lib/launch';
 
 // pdf.js support files (wasm image decoders, standard fonts, CMaps) served from this build under
-// /pdfjs/, never from a CDN (src/lib/preview/pdfjs.ts). Loaded only when a PDF needs them.
+// /pdfjs/<version>/, never from a CDN (src/lib/preview/pdfjs.ts). Loaded only when a PDF needs them.
+// The version is in the path: the service worker caches them CacheFirst, so an upgrade must get new URLs.
 const PDFJS_DIR = join(__dirname, 'node_modules', 'pdfjs-dist');
+const PDFJS_VERSION: string = JSON.parse(readFileSync(join(PDFJS_DIR, 'package.json'), 'utf8')).version;
 const PDFJS_ASSETS: Record<string, (name: string) => boolean> = {
   wasm: (n) => /^(openjpeg|jbig2|qcms)[\w.]*\.(wasm|js)$/.test(n) && !n.includes('quickjs'),
   standard_fonts: (n) => !n.startsWith('LICENSE'),
@@ -24,7 +26,7 @@ function pdfjsAssets(): Plugin {
   return {
     name: 'omnifree-pdfjs-assets',
     configureServer(server) {
-      server.middlewares.use('/pdfjs/', (req, res, next) => {
+      server.middlewares.use(`/pdfjs/${PDFJS_VERSION}/`, (req, res, next) => {
         const rel = decodeURIComponent((req.url ?? '').split('?')[0]).replace(/^\/+/, '');
         if (!files().includes(rel)) return next();
         res.setHeader('Content-Type', rel.endsWith('.wasm') ? 'application/wasm' : rel.endsWith('.js') ? 'text/javascript' : 'application/octet-stream');
@@ -32,7 +34,7 @@ function pdfjsAssets(): Plugin {
       });
     },
     generateBundle() {
-      for (const rel of files()) this.emitFile({ type: 'asset', fileName: `pdfjs/${rel}`, source: readFileSync(join(PDFJS_DIR, rel)) });
+      for (const rel of files()) this.emitFile({ type: 'asset', fileName: `pdfjs/${PDFJS_VERSION}/${rel}`, source: readFileSync(join(PDFJS_DIR, rel)) });
     },
   };
 }
@@ -93,9 +95,15 @@ export default defineConfig({
         },
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-        // Previewer chunks (pdf.js, SheetJS, mammoth, JSZip, highlight.js) and pdf.js data: runtime-cached below.
-        globIgnores: ['**/assets/lazy/**', '**/pdfjs/**'],
+        // Previewer chunks (assets/lazy: pdf.js, SheetJS, mammoth, JSZip, highlight.js) and the pdf.js worker
+        // are precached with the app: an index.html served by this service worker must only ever import
+        // chunks of its own build. Runtime-fetching them after a deploy would hit the host's SPA rewrite
+        // (index.html with a 200) for the previous build's hashes. Unchanged hashes are not re-downloaded.
+        globPatterns: ['**/*.{js,mjs,css,html,svg,png,woff2}'],
+        // pdf.js data (CMaps, fonts, wasm; several MB, rarely needed): runtime-cached below under a
+        // versioned path.
+        globIgnores: ['**/pdfjs/**'],
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         // Web Push handlers (push, notificationclick, pushsubscriptionchange): a static script from public/,
         // pulled into the generated service worker next to the Workbox precache.
         // Android share target (POST /share-target): public/share-sw.js, same mechanism.
@@ -105,15 +113,20 @@ export default defineConfig({
         navigateFallbackDenylist: [/^\/(llm|agent|drive|dns|db|plugins|cron|ws|healthz|events|compute|api|notes|tasks|expenses|links|drops|rag|budget|notify|push|search|saved|share-target|s|d)\b/],
         runtimeCaching: [
           {
-            // Hashed previewer chunks and the pdf.js worker: immutable, kept once used.
-            urlPattern: ({ url, sameOrigin }) => sameOrigin && (url.pathname.startsWith('/assets/lazy/') || /^\/assets\/pdf\.worker[\w.-]*\.mjs$/.test(url.pathname)),
-            handler: 'CacheFirst',
-            options: { cacheName: 'previewers', expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 90 } },
-          },
-          {
+            // Versioned path (pdfjs/<version>/): immutable. Only real files are kept: the host answers a
+            // missing path with index.html (SPA rewrite), which must never be cached as a font or wasm.
             urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/pdfjs/'),
             handler: 'CacheFirst',
-            options: { cacheName: 'pdfjs-data', expiration: { maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 90 } },
+            options: {
+              cacheName: 'pdfjs-data',
+              expiration: { maxEntries: 120, maxAgeSeconds: 60 * 60 * 24 * 90 },
+              plugins: [
+                {
+                  cacheWillUpdate: async ({ response }) =>
+                    response && response.status === 200 && !(response.headers.get('content-type') || '').includes('text/html') ? response : null,
+                },
+              ],
+            },
           },
           {
             urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com' || url.origin === 'https://fonts.gstatic.com',

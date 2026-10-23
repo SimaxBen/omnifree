@@ -28,6 +28,22 @@ function fold(s: string): string {
   return out;
 }
 
+/**
+ * Page text with every whitespace run folded to one space (items often end in a space and the
+ * next starts with one, or hold double spaces), plus each folded character's offset in `text`.
+ */
+function collapse(text: string): { hay: string; at: number[] } {
+  let hay = '';
+  const at: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ws = /\s/.test(text[i]);
+    if (ws && hay.endsWith(' ')) continue;
+    hay += ws ? ' ' : text[i];
+    at.push(i);
+  }
+  return { hay: fold(hay), at };
+}
+
 export function findInPages(pages: PdfTextItem[][], query: string, limit = 2000): PdfMatch[] {
   const q = fold(query.trim().replace(/\s+/g, ' '));
   if (!q) return [];
@@ -41,10 +57,11 @@ export function findInPages(pages: PdfTextItem[][], query: string, limit = 2000)
       text += it.str;
       if (it.hasEOL && !/\s$/.test(it.str)) text += ' ';
     }
-    const hay = fold(text.replace(/\s/g, ' '));
-    let at = hay.indexOf(q);
-    while (at >= 0 && out.length < limit) {
-      const end = at + q.length;
+    const { hay, at: map } = collapse(text);
+    let found = hay.indexOf(q);
+    while (found >= 0 && out.length < limit) {
+      const at = map[found];
+      const end = map[found + q.length - 1] + 1;
       const segments: MatchSegment[] = [];
       for (let i = 0; i < items.length; i++) {
         const s = starts[i];
@@ -54,7 +71,7 @@ export function findInPages(pages: PdfTextItem[][], query: string, limit = 2000)
         if (a < b) segments.push({ item: i, start: a - s, end: b - s });
       }
       if (segments.length) out.push({ page: p, segments });
-      at = hay.indexOf(q, end);
+      found = hay.indexOf(q, found + q.length);
     }
   }
   return out;

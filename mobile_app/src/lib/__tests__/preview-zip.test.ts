@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
-import { ZipCapError, extractEntry, listZip, zipFolder, type ZipCaps } from '../preview/zip';
-import { findCentralDirectory, localDataStart, openRemoteZip, parseCentralDirectory } from '../thumbs/zipRange';
+import { ZipCapError, assertInflatesWithin, entryText, extractEntry, listZip, zipFolder, type ZipCaps } from '../preview/zip';
+import { ZipFormatError, findCentralDirectory, localDataStart, openRemoteZip, parseCentralDirectory } from '../thumbs/zipRange';
 
 async function roundTrip(z: JSZip): Promise<JSZip> {
   return JSZip.loadAsync(await z.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
@@ -67,6 +67,36 @@ describe('zip listing', () => {
     await expect(extractEntry(zip, 'liar.bin', 4_000)).rejects.toBeInstanceOf(ZipCapError);
     await expect(extractEntry(zip, 'missing', 4_000)).rejects.toThrow(/not in the archive/);
   });
+  it('opens entries stored with Windows separators by their stored name', async () => {
+    const z = new JSZip();
+    const stored = ['photos', 'trip', 'notes.txt'].join(String.fromCharCode(92)); // backslashes
+    z.file(stored, 'from windows');
+    const zip = await roundTrip(z);
+    const [e] = listZip(zip, CAPS).entries;
+    expect(e.path).toBe('photos/trip/notes.txt');
+    expect(e.zipName).toBe(stored);
+    expect(new TextDecoder().decode(await extractEntry(zip, e.zipName, 4_000))).toBe('from windows');
+  });
+
+  it('checks the real unpacked total before uncapped converters run (lying headers included)', async () => {
+    const z = new JSZip();
+    z.file('word/document.xml', '<w:t>a</w:t>');
+    z.file('word/media/bomb.bin', new Uint8Array(50_000));
+    const zip = await roundTrip(z);
+    await expect(assertInflatesWithin(zip, 100_000)).resolves.toBeUndefined();
+    await expect(assertInflatesWithin(zip, 20_000)).rejects.toBeInstanceOf(ZipCapError);
+    (zip.file('word/media/bomb.bin') as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize = 1;
+    await expect(assertInflatesWithin(zip, 20_000)).rejects.toBeInstanceOf(ZipCapError);
+  });
+
+  it('reads XML parts as text under a cap', async () => {
+    const z = new JSZip();
+    z.file('content.xml', 'x'.repeat(5_000));
+    const zip = await roundTrip(z);
+    expect(await entryText(zip, 'content.xml', 10_000)).toHaveLength(5_000);
+    expect(await entryText(zip, 'missing.xml', 10_000)).toBeNull();
+    await expect(entryText(zip, 'content.xml', 1_000)).rejects.toBeInstanceOf(ZipCapError);
+  });
 });
 
 describe('zip by range', () => {
@@ -97,5 +127,27 @@ describe('zip by range', () => {
     expect(await remote.read('word/document.xml', 100)).toBeNull(); // too large unless partial
     const head = new TextDecoder().decode((await remote.read('word/document.xml', 40, { maxCompressed: 1_000 }))!);
     expect(head).toBe('<w:t>Hello</w:t>'.repeat(3).slice(0, 40));
+  });
+
+  it('ignores an end-of-directory signature planted in the archive comment', async () => {
+    const z = new JSZip();
+    z.file('docProps/thumbnail.jpeg', new Uint8Array([0xff, 0xd8, 9]), { compression: 'STORE' });
+    // A fake EOCD (count 1, size 10, offset 0, comment length 0) inside the comment text.
+    const fake = String.fromCharCode(0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 1, 0, 1, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    const bytes = await z.generateAsync({ type: 'uint8array', comment: `note ${fake} end` });
+    const cd = findCentralDirectory(bytes, bytes.length);
+    expect(cd.count).toBe(2); // docProps/ and the picture, not the fake record's 1
+    const remote = await openRemoteZip(async (s, e) => bytes.slice(s, e + 1).buffer, bytes.length);
+    expect(Array.from((await remote.read('docProps/thumbnail.jpeg', 100))!)).toEqual([0xff, 0xd8, 9]);
+  });
+
+  it('refuses ZIP64 end records instead of misreading them', () => {
+    const eocd = new Uint8Array(22);
+    const v = new DataView(eocd.buffer);
+    v.setUint32(0, 0x06054b50, true);
+    v.setUint16(10, 0xffff, true);
+    v.setUint32(12, 0xffffffff, true);
+    v.setUint32(16, 0xffffffff, true);
+    expect(() => findCentralDirectory(eocd, 5_000_000_000)).toThrow(ZipFormatError);
   });
 });

@@ -3,10 +3,11 @@
 // listed, declared total size, and bytes actually inflated per entry.
 
 import JSZip from 'jszip';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { fileKind } from '../../lib/files';
 import { formatBytes } from '../../lib/format';
 import { errorText } from '../../lib/hub';
+import { useOverlayBack } from '../../lib/overlay';
 import { ZIP_CAPS, extractEntry, listZip, zipFolder, type ZipEntryInfo, type ZipListing } from '../../lib/preview/zip';
 import { memorySource, mimeOf, type PreviewSource } from '../../lib/preview/source';
 import { FileTile } from '../fileTile';
@@ -17,49 +18,9 @@ import { PreviewBody } from './PreviewBody';
 
 export const ZIP_MAX_BYTES = 100 * 1024 * 1024;
 
-/**
- * The Android back gesture closes the nested viewer: one history entry while it is open. Unlike
- * a plain push/pop per effect run, a remount of the effect (React StrictMode) keeps the same entry.
- */
-function useBackCloses(onBack: () => void): () => void {
-  const cb = useRef(onBack);
-  cb.current = onBack;
-  const pushed = useRef(false);
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-    if (!pushed.current) {
-      try {
-        window.history.pushState({ omnifreeOverlay: true }, '', window.location.href);
-        pushed.current = true;
-      } catch {
-        pushed.current = false;
-      }
-    }
-    const onPop = () => {
-      if (!pushed.current) return;
-      pushed.current = false;
-      cb.current();
-    };
-    window.addEventListener('popstate', onPop);
-    return () => {
-      mounted.current = false;
-      window.removeEventListener('popstate', onPop);
-      window.setTimeout(() => {
-        if (mounted.current || !pushed.current) return;
-        pushed.current = false;
-        window.history.back();
-      }, 0);
-    };
-  }, []);
-  return () => {
-    if (pushed.current) window.history.back();
-    else cb.current();
-  };
-}
-
+/** A file opened from the archive. The Android back gesture closes it (only it: overlays stack). */
 function NestedViewer({ entry, src, depth, onBack }: { entry: ZipEntryInfo; src: PreviewSource; depth: number; onBack: () => void }) {
-  const back = useBackCloses(onBack);
+  const back = useOverlayBack(true, onBack);
   return (
     <div className="absolute inset-0 z-10 flex flex-col bg-[#05060f]">
       <div className="flex shrink-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-1 py-1">
@@ -116,7 +77,7 @@ export default function ZipPreview({ src, depth = 0 }: { src: PreviewSource; dep
     setEntryError(null);
     setOpening(entry.path);
     try {
-      const bytes = await extractEntry(zip.zip, entry.path, ZIP_CAPS.maxEntryBytes);
+      const bytes = await extractEntry(zip.zip, entry.zipName, ZIP_CAPS.maxEntryBytes);
       setOpened({ entry, src: memorySource(`${src.id}!${entry.path}`, entry.path, bytes, mimeOf(entry.path)) });
     } catch (err) {
       setEntryError(`${entry.name}: ${errorText(err)}`);

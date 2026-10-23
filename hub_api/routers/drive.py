@@ -223,6 +223,8 @@ async def presign(
 TRANSCRIBE_MAX_BYTES = 25 * 1024 * 1024  # Groq Whisper's upload limit
 TRANSCRIBE_BUDGET_S = 55.0  # the serverless hub stops a request at 60 s
 TRANSCRIBE_DOWNLOAD_S = 25.0
+TRANSCRIBE_STAT_S = 5.0
+TRANSCRIBE_MIN_S = 8.0  # less than this left for Whisper: answer 504 now rather than be cut at 60 s
 
 
 class TranscribeBody(BaseModel):
@@ -264,10 +266,14 @@ async def transcribe_file(
     started = time.monotonic()
     spec_of_kind(state, body.provider, ProviderKind.STORAGE)
     target = normalise_key(body.key)
+    stat_ok = True
     try:
-        meta = await state.router.storage_stat(target, body.provider)
-    except ProviderError:
-        meta = None  # some backends cannot stat; the size is checked after the download instead
+        # Bounded: the whole request (stat + download + Whisper) must fit the serverless 60 s.
+        meta = await asyncio.wait_for(state.router.storage_stat(target, body.provider), TRANSCRIBE_STAT_S)
+    except (ProviderError, asyncio.TimeoutError):
+        meta, stat_ok = None, False  # stat unavailable: the size is checked after the download instead
+    if stat_ok and meta is None:
+        raise HTTPException(404, detail=f"{target!r} is not on {body.provider}")
     if meta is not None and meta.size > TRANSCRIBE_MAX_BYTES:
         raise _too_big(meta.size)
     data: bytes = await with_adapter(state, body.provider, lambda a: a.get(target), timeout_s=TRANSCRIBE_DOWNLOAD_S)
@@ -276,14 +282,15 @@ async def transcribe_file(
     if not data:
         raise HTTPException(422, detail="the file is empty")
     remaining = TRANSCRIBE_BUDGET_S - (time.monotonic() - started)
+    too_long = HTTPException(504, detail="Transcription took too long for one request. Try a shorter recording.")
+    if remaining < TRANSCRIBE_MIN_S:
+        raise too_long  # the download used the budget: never start a Whisper call that would be cut off
     try:
         transcript = await asyncio.wait_for(
-            notes.transcribe_audio(state, data, target.rsplit("/", 1)[-1], body.language), max(remaining, 1.0)
+            notes.transcribe_audio(state, data, target.rsplit("/", 1)[-1], body.language), remaining
         )
     except asyncio.TimeoutError:
-        raise HTTPException(
-            504, detail="Transcription took too long for one request. Try a shorter recording."
-        ) from None
+        raise too_long from None
     title, text = transcript_note(target, body.provider, transcript)
     note = await notes.insert_note(
         db, body=text, title=title, notebook=body.notebook, tags=["transcript"], pinned=False,

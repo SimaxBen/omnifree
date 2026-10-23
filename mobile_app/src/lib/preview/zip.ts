@@ -15,7 +15,10 @@ export interface ZipCaps {
 export const ZIP_CAPS: ZipCaps = { maxEntries: 5000, maxTotalBytes: 2 * 1024 ** 3, maxEntryBytes: 64 * 1024 ** 2 };
 
 export interface ZipEntryInfo {
+  /** Display path: forward slashes, no leading slash. */
   path: string;
+  /** The entry's name as stored in the archive (what JSZip looks it up by). */
+  zipName: string;
   name: string;
   size: number | null;
   compressed: number | null;
@@ -58,7 +61,7 @@ export function listZip(zip: JSZip, caps: ZipCaps = ZIP_CAPS): ZipListing {
     if (size !== null && compressed && size > 10 * 1024 ** 2 && size / compressed > 1000) bomb = true;
     if (entries.length < caps.maxEntries) {
       const path = file.name.replace(/\\/g, '/').replace(/^\/+/, '');
-      entries.push({ path, name: path.split('/').filter(Boolean).pop() ?? path, size, compressed, date: file.date ?? null });
+      entries.push({ path, zipName: file.name, name: path.split('/').filter(Boolean).pop() ?? path, size, compressed, date: file.date ?? null });
     }
   }
   if (total > caps.maxTotalBytes) bomb = true;
@@ -110,11 +113,16 @@ interface ZipStream {
 export function extractEntry(zip: JSZip, path: string, maxBytes: number): Promise<Uint8Array> {
   const file = zip.file(path);
   if (!file) return Promise.reject(new Error(`${path} is not in the archive`));
+  return inflateCapped(file, maxBytes, true).then((out) => out.data!);
+}
+
+/** Streams one entry, failing once more than `maxBytes` come out; keeps the bytes only when `keep`. */
+function inflateCapped(file: JSZip.JSZipObject, maxBytes: number, keep: boolean): Promise<{ data: Uint8Array | null; total: number }> {
   const declared = sizesOf(file).uncompressedSize;
   if (typeof declared === 'number' && declared > maxBytes) {
     return Promise.reject(new ZipCapError(`This file is too large to preview from the archive (${Math.round(declared / 1024 ** 2)} MB).`));
   }
-  return new Promise<Uint8Array>((resolve, reject) => {
+  return new Promise<{ data: Uint8Array | null; total: number }>((resolve, reject) => {
     const chunks: Uint8Array[] = [];
     let total = 0;
     let done = false;
@@ -130,7 +138,7 @@ export function extractEntry(zip: JSZip, path: string, maxBytes: number): Promis
           reject(new ZipCapError('This file inflates past the preview limit (possible zip bomb).'));
           return;
         }
-        chunks.push(chunk);
+        if (keep) chunks.push(chunk);
       })
       .on('error', (err: Error) => {
         if (done) return;
@@ -140,14 +148,42 @@ export function extractEntry(zip: JSZip, path: string, maxBytes: number): Promis
       .on('end', () => {
         if (done) return;
         done = true;
+        if (!keep) {
+          resolve({ data: null, total });
+          return;
+        }
         const out = new Uint8Array(total);
         let at = 0;
         for (const c of chunks) {
           out.set(c, at);
           at += c.length;
         }
-        resolve(out);
+        resolve({ data: out, total });
       })
       .resume();
   });
+}
+
+/** One entry as UTF-8 text, refusing past `maxBytes` inflated (the converters' XML parts). */
+export async function entryText(zip: JSZip, path: string, maxBytes: number): Promise<string | null> {
+  if (!zip.file(path)) return null;
+  return new TextDecoder().decode(await extractEntry(zip, path, maxBytes));
+}
+
+/**
+ * Inflates every entry once, counting, and throws ZipCapError once the archive's real total
+ * passes `maxTotal` (declared sizes are not trusted). For converters that unzip internally
+ * without a cap (mammoth, SheetJS): checked before handing them the file.
+ */
+export async function assertInflatesWithin(zip: JSZip, maxTotal: number): Promise<void> {
+  let left = maxTotal;
+  for (const file of Object.values(zip.files)) {
+    if (file.dir) continue;
+    try {
+      left -= (await inflateCapped(file, left, false)).total;
+    } catch (err) {
+      if (err instanceof ZipCapError) throw new ZipCapError('This file unpacks to an unusual size (possible zip bomb).');
+      throw err;
+    }
+  }
 }

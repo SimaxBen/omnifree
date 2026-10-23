@@ -1,12 +1,18 @@
 // pdf.js, loaded on demand. The worker, wasm decoders, standard fonts and CMaps are served from
-// this app's own build (vite.config.ts copies them to /pdfjs/), never from a CDN.
+// this app's own build (vite.config.ts copies them to /pdfjs/<version>/), never from a CDN. The
+// version is in the path because the service worker keeps those files CacheFirst: an upgraded
+// pdf.js must never be handed the previous version's wasm.
+//
+// Security: pdf.js 6 has no eval path (the old `isEvalSupported` option is gone), no scripting is
+// loaded (no pdf_viewer, the quickjs sandbox is not shipped), XFA is off, and no annotation layer
+// is rendered, so PDF links are never clickable in the app.
 
-import { GlobalWorkerOptions, InvalidPDFException, PasswordException, getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
+import { GlobalWorkerOptions, InvalidPDFException, PDFWorker, PasswordException, getDocument, version, type PDFDocumentProxy } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
-const BASE = `${import.meta.env.BASE_URL}pdfjs/`;
+export const PDFJS_BASE = `${import.meta.env.BASE_URL}pdfjs/${version}/`;
 
 export type PdfOpenError = 'password' | 'wrong-password' | 'invalid' | 'other';
 
@@ -19,15 +25,27 @@ export class PdfError extends Error {
   }
 }
 
-/** Opens a PDF from bytes (a copy is handed to the worker, so `data` stays usable for a retry). */
+let worker: PDFWorker | null = null;
+
+/** One pdf.js worker for the session (viewer and thumbnails): no new worker per file. */
+export function sharedWorker(): PDFWorker {
+  if (!worker || worker.destroyed) worker = new PDFWorker();
+  return worker;
+}
+
+/**
+ * Opens a PDF from bytes. `data` is handed (transferred) to the worker, so it is unusable
+ * afterwards: callers that may retry (wrong password) fetch the bytes again.
+ */
 export async function openPdf(data: ArrayBuffer, password?: string): Promise<PDFDocumentProxy> {
   const task = getDocument({
-    data: new Uint8Array(data.slice(0)),
+    data: new Uint8Array(data),
     password,
+    worker: sharedWorker(),
     enableXfa: false,
-    wasmUrl: `${BASE}wasm/`,
-    standardFontDataUrl: `${BASE}standard_fonts/`,
-    cMapUrl: `${BASE}cmaps/`,
+    wasmUrl: `${PDFJS_BASE}wasm/`,
+    standardFontDataUrl: `${PDFJS_BASE}standard_fonts/`,
+    cMapUrl: `${PDFJS_BASE}cmaps/`,
     cMapPacked: true,
     stopAtErrors: false,
   });

@@ -3,8 +3,11 @@
 
 import type JSZip from 'jszip';
 import { IMAGE_EXT, attrLocal, byLocal, firstLocal, imageMime, parseXml } from './ooxml';
+import { entryText, extractEntry } from './zip';
 
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
+/** Inflated size cap of content.xml / styles.xml (a deflate bomb stops here, not at the phone's memory). */
+export const ODT_XML_MAX = 48 * 1024 * 1024;
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -37,18 +40,16 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export async function odtToHtml(zip: JSZip): Promise<string> {
-  const content = zip.file('content.xml');
-  if (!content) throw new Error('This is not an OpenDocument text (.odt) file.');
-  const doc = parseXml(await content.async('string'));
+export async function odtToHtml(zip: JSZip, xmlMax = ODT_XML_MAX): Promise<string> {
+  const content = await entryText(zip, 'content.xml', xmlMax);
+  if (content === null) throw new Error('This is not an OpenDocument text (.odt) file.');
+  const doc = parseXml(content);
   const styles = readStyles(doc);
-  const stylesFile = zip.file('styles.xml');
-  if (stylesFile) {
-    try {
-      for (const [k, v] of readStyles(parseXml(await stylesFile.async('string')))) if (!styles.has(k)) styles.set(k, v);
-    } catch {
-      // Named styles are optional for a preview.
-    }
+  try {
+    const stylesXml = await entryText(zip, 'styles.xml', xmlMax);
+    if (stylesXml) for (const [k, v] of readStyles(parseXml(stylesXml))) if (!styles.has(k)) styles.set(k, v);
+  } catch {
+    // Named styles are optional for a preview.
   }
 
   const images = new Map<string, string>();
@@ -56,11 +57,15 @@ export async function odtToHtml(zip: JSZip): Promise<string> {
   for (const img of byLocal(doc, 'image')) {
     const href = attrLocal(img, 'href', 'xlink') ?? '';
     if (!href || images.has(href) || !IMAGE_EXT.test(href) || /^[a-z]+:/i.test(href)) continue;
-    const f = zip.file(href.replace(/^\.\//, ''));
-    if (!f) continue;
-    const bytes = await f.async('uint8array');
+    const path = href.replace(/^\.\//, '');
+    if (!zip.file(path)) continue;
+    let bytes: Uint8Array;
+    try {
+      bytes = await extractEntry(zip, path, MAX_IMAGE_BYTES - imageBytes);
+    } catch {
+      break; // the picture budget is spent (or the entry lies about its size)
+    }
     imageBytes += bytes.length;
-    if (imageBytes > MAX_IMAGE_BYTES) break;
     images.set(href, `data:${imageMime(href)};base64,${toBase64(bytes)}`);
   }
 

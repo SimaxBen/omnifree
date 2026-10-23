@@ -94,13 +94,52 @@ def test_transcribe_is_bounded_in_time(app_hub, monkeypatch: pytest.MonkeyPatch)
         await asyncio.sleep(5)
         return "late"
 
-    monkeypatch.setattr(drive_mod, "TRANSCRIBE_BUDGET_S", 0.0)  # budget floor is 1 s
+    monkeypatch.setattr(drive_mod, "TRANSCRIBE_BUDGET_S", 0.4)
+    monkeypatch.setattr(drive_mod, "TRANSCRIBE_MIN_S", 0.05)
     monkeypatch.setattr(notes_mod, "transcribe_audio", slow)
     _put("long.ogg")
     r = app_hub.post("/drive/transcribe", json={"provider": "r2", "key": "long.ogg"})
     assert r.status_code == 504
     assert "too long" in r.json()["detail"]
     assert app_hub.get("/notes").json()["notes"] == []
+
+
+def test_transcribe_never_starts_whisper_without_budget_left(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The download used the budget: 504 right away, Whisper is not called (it would be cut at 60 s).
+    monkeypatch.setattr(drive_mod, "TRANSCRIBE_BUDGET_S", 1.0)
+    monkeypatch.setattr(drive_mod, "TRANSCRIBE_MIN_S", 5.0)
+    _put("long.ogg")
+    fa.TRANSCRIPTS["groq"] = "never"
+    r = app_hub.post("/drive/transcribe", json={"provider": "r2", "key": "long.ogg"})
+    assert r.status_code == 504
+    assert fa.TRANSCRIBE_LOG == []
+
+
+def test_transcribe_missing_file_is_404_without_download(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    downloads: list[str] = []
+    real_get = fakes.FakeStorage.get
+
+    async def counting_get(self, key: str) -> bytes:
+        downloads.append(key)
+        return await real_get(self, key)
+
+    monkeypatch.setattr(fakes.FakeStorage, "get", counting_get)
+    r = app_hub.post("/drive/transcribe", json={"provider": "r2", "key": "gone.ogg"})
+    assert r.status_code == 404
+    assert downloads == []
+
+
+def test_transcribe_stat_that_hangs_does_not_eat_the_budget(app_hub, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def hanging_stat(self, key: str):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(drive_mod, "TRANSCRIBE_STAT_S", 0.05)
+    monkeypatch.setattr(fakes.FakeStorage, "stat", hanging_stat)
+    _put("memo.ogg")
+    fa.TRANSCRIPTS["groq"] = "hi"
+    r = app_hub.post("/drive/transcribe", json={"provider": "r2", "key": "memo.ogg"})
+    assert r.status_code == 201, r.text
+    assert r.json()["transcript"] == "hi"
 
 
 def test_transcript_note_title_and_body() -> None:

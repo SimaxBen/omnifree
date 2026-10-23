@@ -1,5 +1,5 @@
 // HTML from documents (mammoth's .docx output, the .odt converter) is untrusted: DOMPurify with a
-// strict profile. No script, no event handlers, no frames/forms/embeds/SVG/MathML, no inline styles,
+// strict profile. No script, no event handlers, no frames/forms/embeds/SVG/MathML, no inline styles or classes,
 // pictures only as data: images (never fetched from the network), links open outside the app.
 
 import createDOMPurify, { type Config, type DOMPurify } from 'dompurify';
@@ -10,7 +10,9 @@ export const DOC_PURIFY_CONFIG: Config = {
     'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'form', 'input', 'button', 'textarea',
     'select', 'option', 'link', 'meta', 'base', 'svg', 'math', 'video', 'audio', 'source', 'track', 'template', 'noscript',
   ],
-  FORBID_ATTR: ['style', 'srcset', 'action', 'formaction', 'background', 'ping', 'poster'],
+  // `class`: the app's own utility classes (fixed inset-0 z-50, ...) would let a document lay a fake
+  // full-screen layer over the viewer; `name`: DOM clobbering. Neither converter needs them.
+  FORBID_ATTR: ['style', 'class', 'name', 'srcset', 'action', 'formaction', 'background', 'ping', 'poster'],
   ALLOW_DATA_ATTR: false,
   ALLOWED_URI_REGEXP: /^(?:https?:|mailto:|tel:|#|data:image\/(?:png|jpe?g|gif|webp|bmp);base64,)/i,
 };

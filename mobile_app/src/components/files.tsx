@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { baseName, displayName, extensionOf, fileKind } from '../lib/files';
 import { formatBytes } from '../lib/format';
 import { errorText, useHub } from '../lib/hub';
+import { useOverlayBack } from '../lib/overlay';
 import { driveSource, objectUrl } from '../lib/preview/source';
 import { cachedThumb, getThumb, thumbSourceOf, type Thumb } from '../lib/thumbs';
 import type { StoredObject } from '../lib/types';
@@ -39,28 +40,33 @@ export function useObjectUrl(obj: StoredObject | null, enabled = true): { url: s
 
 // ------------------------------------------------------------------ thumbnails
 
-/** True once the element scrolls within `margin` of the viewport (then stays true). */
-function useNear(ref: RefObject<HTMLElement | null>, enabled: boolean, margin = '200px'): boolean {
+/**
+ * `near`: the element is within `margin` of the viewport right now (thumbnail jobs follow it, so a
+ * fast fling never leaves a queue of off-screen tiles ahead of the visible ones); `seen`: it has
+ * been near at least once (then stays true).
+ */
+function useNear(ref: RefObject<HTMLElement | null>, enabled: boolean, margin = '200px'): { near: boolean; seen: boolean } {
   const [near, setNear] = useState(false);
+  const [seen, setSeen] = useState(false);
   useEffect(() => {
-    if (!enabled || near || !ref.current) return undefined;
+    if (!enabled || !ref.current) return undefined;
     if (typeof IntersectionObserver === 'undefined') {
       setNear(true);
+      setSeen(true);
       return undefined;
     }
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setNear(true);
-          io.disconnect();
-        }
+        const on = entries[entries.length - 1].isIntersecting;
+        setNear(on);
+        if (on) setSeen(true);
       },
       { rootMargin: margin },
     );
     io.observe(ref.current);
     return () => io.disconnect();
-  }, [ref, enabled, near, margin]);
-  return near;
+  }, [ref, enabled, margin]);
+  return { near, seen };
 }
 
 /**
@@ -74,7 +80,7 @@ export function FileThumb({ obj, size = 44, className, fill }: { obj: StoredObje
   const generated = thumbSourceOf(obj) !== null;
   const svg = kind === 'image' && extensionOf(obj.key) === 'svg' && obj.size <= 5 * 1024 * 1024;
   const ref = useRef<HTMLSpanElement>(null);
-  const near = useNear(ref, generated || svg);
+  const { near, seen } = useNear(ref, generated || svg);
   const [thumb, setThumb] = useState<Thumb | undefined>(() => cachedThumb(obj));
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -99,7 +105,7 @@ export function FileThumb({ obj, size = 44, className, fill }: { obj: StoredObje
   }, [near, generated, id, client, thumb]);
 
   const direct = svg || (kind === 'image' && thumb?.kind === 'none' && thumb.cors);
-  const { url: directUrl } = useObjectUrl(obj, !!direct && near);
+  const { url: directUrl } = useObjectUrl(obj, !!direct && seen);
   const src = thumb?.kind === 'image' ? thumb.url : direct ? directUrl : null;
   const box = cx('relative block shrink-0 overflow-hidden rounded-[12px]', fill && 'aspect-square w-full', className);
   const style = fill ? undefined : { width: size, height: size };
@@ -176,15 +182,17 @@ export function FileViewer({
   const { client } = useHub();
   const obj = items[index];
   const [dir, setDir] = useState(0);
+  // The Android back gesture closes the viewer (a file opened inside a zip closes first).
+  const close = useOverlayBack(true, onClose);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') close();
       if (e.key === 'ArrowRight' && index < items.length - 1) onIndex(index + 1);
       if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [index, items.length, onClose, onIndex]);
+  }, [index, items.length, close, onIndex]);
   const src = useMemo(() => (obj ? driveSource(client, obj) : null), [client, obj]);
   if (!obj || !src) return null;
   const kind = fileKind(obj.key, obj.content_type);
@@ -200,7 +208,7 @@ export function FileViewer({
   return (
     <div className="backdrop-enter fixed inset-0 z-[45] flex flex-col bg-[#05060f]" role="dialog" aria-modal="true" aria-label={`Preview ${displayName(obj.key)}`}>
       <header className="pt-safe flex shrink-0 items-center gap-1 bg-gradient-to-b from-black/60 to-transparent px-2 pb-2">
-        <IconButton icon="left" label="Close preview" onClick={onClose} />
+        <IconButton icon="left" label="Close preview" onClick={() => close()} />
         <div className="min-w-0 flex-1">
           <FileName objKey={obj.key} />
           <p className="text-[12px] text-ink-400">
@@ -211,7 +219,7 @@ export function FileViewer({
         <IconButton icon="more" label="File actions" onClick={() => onActions(obj)} />
       </header>
       <div key={obj.key} className={cx('relative min-h-0 flex-1', dir > 0 ? 'screen-in-right' : dir < 0 ? 'screen-in-left' : 'screen-in-up')}>
-        <PreviewBody src={src} onSwipe={kind === 'image' ? (d) => step(d) : undefined} onClose={onClose} />
+        <PreviewBody src={src} onSwipe={kind === 'image' ? (d) => step(d) : undefined} onClose={close} />
       </div>
       {items.length > 1 && kind !== 'image' && (
         <div className="pb-safe flex shrink-0 justify-between px-3 py-1">

@@ -46,15 +46,25 @@ export interface PreviewSource {
 // ------------------------------------------------------------------ presigned URLs
 
 const urlCache = new Map<string, { url: string; until: number }>();
+/** Blob URLs (hub fallback) kept at once; older ones are revoked. */
+const BLOB_CACHE_MAX = 8;
+
+function forget(k: string): void {
+  const old = urlCache.get(k);
+  if (old?.url.startsWith('blob:')) URL.revokeObjectURL(old.url);
+  urlCache.delete(k);
+}
 
 /**
  * A URL that serves `obj` without the hub: a presigned GET when the backend supports it (cached
- * for most of its lifetime), else a blob URL downloaded through the hub (small files only).
+ * for most of its lifetime), else a blob URL downloaded through the hub, refused past `blobMax`
+ * bytes (the whole file is downloaded into memory). Expired or surplus blob URLs are revoked.
  */
-export async function objectUrl(client: HubClient, obj: StoredObject, signal?: AbortSignal): Promise<string> {
+export async function objectUrl(client: HubClient, obj: StoredObject, signal?: AbortSignal, blobMax = Infinity): Promise<string> {
   const k = `${obj.backend}/${obj.key}`;
   const hit = urlCache.get(k);
   if (hit && hit.until > Date.now()) return hit.url;
+  if (hit) forget(k);
   try {
     const res = await client.drivePresign(obj.key, obj.backend, signal);
     if (res.url) {
@@ -64,9 +74,13 @@ export async function objectUrl(client: HubClient, obj: StoredObject, signal?: A
   } catch (err) {
     if (!(err instanceof HubError && err.status >= 400 && err.status < 500)) throw err;
   }
+  if (obj.size > blobMax) throw new TooBigError(obj.size, blobMax);
   const blob = await client.driveDownload(obj.key, obj.backend);
   const url = URL.createObjectURL(blob);
+  forget(k); // a concurrent call may have stored one meanwhile
   urlCache.set(k, { url, until: Date.now() + 30 * 60_000 });
+  const blobs = [...urlCache].filter(([, v]) => v.url.startsWith('blob:'));
+  for (const [old] of blobs.slice(0, Math.max(0, blobs.length - BLOB_CACHE_MAX))) forget(old);
   return url;
 }
 
@@ -155,7 +169,7 @@ function clickDownload(href: string, name: string, newTab: boolean): void {
   a.remove();
 }
 
-/** Opens the file in a new tab (the browser or an app then shows or saves it). */
+/** Opens the file in a new tab (the browser or an app then shows or saves it); hub-fallback files are saved. */
 export async function openObjectExternally(client: HubClient, obj: StoredObject): Promise<void> {
   let tab: Window | null = null;
   try {
@@ -165,6 +179,13 @@ export async function openObjectExternally(client: HubClient, obj: StoredObject)
   }
   try {
     const url = await objectUrl(client, obj);
+    if (url.startsWith('blob:')) {
+      // A blob: URL is this app's origin: an HTML or SVG file shown from it would run as the app
+      // (and could read the hub token). Hub-fallback files are always saved, never displayed.
+      tab?.close();
+      saveBytes(await (await fetch(url)).blob(), baseName(obj.key));
+      return;
+    }
     if (tab) {
       tab.opener = null;
       tab.location.href = url;
@@ -193,7 +214,8 @@ export function driveSource(client: HubClient, obj: StoredObject): PreviewSource
     size: obj.size,
     contentType: obj.content_type,
     obj,
-    url: (signal) => objectUrl(client, obj, signal),
+    // Without presigned URLs the file comes through the hub, whose response limit is ~4.5 MB.
+    url: (signal) => objectUrl(client, obj, signal, HUB_READ_LIMIT),
     bytes: (max, signal) => fetchObjectBytes(client, obj, max, signal),
     download: () => openObjectExternally(client, obj),
   };

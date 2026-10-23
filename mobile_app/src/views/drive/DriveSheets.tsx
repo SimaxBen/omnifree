@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { FileThumb, FileName, FileTile, objectUrl } from '../../components/files';
+import { FileThumb, FileName, FileTile } from '../../components/files';
 import { Icon } from '../../components/icons';
 import { QrCode } from '../../components/QrCode';
 import { Sheet, useConfirm } from '../../components/Sheet';
@@ -10,6 +10,7 @@ import { copyText } from '../../lib/dom';
 import { allFolders, fileKind, folderOf, isIndexable, joinKey, sanitizeFileName, sanitizeFolder } from '../../lib/files';
 import { formatBytes, formatDateTime } from '../../lib/format';
 import { errorText, useHub, useHubData } from '../../lib/hub';
+import { openObjectExternally } from '../../lib/preview/source';
 import { useUploads } from '../../lib/uploads';
 import type { Drop, StoredObject } from '../../lib/types';
 
@@ -136,31 +137,14 @@ export function FileActionsSheet({
   const [busy, setBusy] = useState<string | null>(null);
 
   const download = async () => {
-    let tab: Window | null = null;
-    try {
-      tab = window.open('', '_blank');
-    } catch {
-      tab = null;
-    }
+    // Same path as the viewer's "Open externally": a hub-fallback (blob:) file is saved, never shown
+    // from the app's origin. Called before any await, so the tab opens within the tap's gesture.
+    const opening = openObjectExternally(client, obj);
     setBusy('download');
     try {
-      const url = await objectUrl(client, obj);
-      if (tab) {
-        tab.opener = null;
-        tab.location.href = url;
-      } else {
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = obj.key.split('/').pop() || 'download';
-        a.rel = 'noopener';
-        a.target = '_blank';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+      await opening;
       onClose();
     } catch (err) {
-      tab?.close();
       notify(errorText(err), 'error');
     } finally {
       setBusy(null);

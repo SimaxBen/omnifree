@@ -86,7 +86,13 @@ export function ZoomImage({ src, onSwipe }: { src: PreviewSource; onSwipe?: (dir
   const up = (e: ReactPointerEvent) => {
     const g = gesture.current;
     pts.current.delete(e.pointerId);
-    if (pts.current.size > 0) return;
+    if (pts.current.size > 0) {
+      // One finger of a pinch lifted: keep panning from where the other one is now (no jump), and
+      // never read the end of a pinch as a tap.
+      const [rest] = [...pts.current.values()];
+      gesture.current = { dist: 0, scale: t.current.scale, sx: rest.x, sy: rest.y, x: t.current.x, y: t.current.y, t: -Infinity };
+      return;
+    }
     gesture.current = null;
     if (!g) return;
     const dx = e.clientX - g.sx;

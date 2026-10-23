@@ -15,6 +15,7 @@ const MAX_PAGES = 2000;
 const GAP = 12;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
+const NO_MATCHES: PdfMatch[] = [];
 
 interface Size {
   w: number;
@@ -57,11 +58,18 @@ function PdfPage({
   useEffect(() => {
     const el = holder.current;
     if (!active || !el) {
-      // Off-screen: give the canvas memory back.
-      for (const c of Array.from(el?.querySelectorAll('canvas') ?? [])) {
+      // Off-screen: give the canvas memory back, and let pdf.js drop the page's decoded resources.
+      const canvases = Array.from(el?.querySelectorAll('canvas') ?? []);
+      for (const c of canvases) {
         c.width = 0;
         c.height = 0;
         c.remove();
+      }
+      if (canvases.length) {
+        doc.getPage(index + 1).then(
+          (page) => page.cleanup(),
+          () => undefined,
+        );
       }
       return undefined;
     }
@@ -207,20 +215,37 @@ export default function PdfViewer({ src }: { src: PreviewSource }) {
   const [matchIndex, setMatchIndex] = useState(0);
   const [searching, setSearching] = useState<string | null>(null);
 
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
   const open = useCallback(
     async (password?: string) => {
       if (!data) return;
       setOpening(true);
       try {
-        const d = await openPdf(data, password);
+        // openPdf hands the bytes to the worker (no second copy of a large file); a retry with a
+        // password fetches them again.
+        const bytes = data.byteLength ? data : await src.bytes(PDF_MAX_BYTES);
+        const d = await openPdf(bytes, password);
+        if (!alive.current) {
+          // Closed while opening: nobody will destroy this document otherwise.
+          void d.loadingTask.destroy();
+          return;
+        }
         setOpenError(null);
         setDoc(d);
       } catch (err) {
-        setOpenError(err instanceof PdfError ? err : new PdfError('other', String(err)));
+        if (alive.current) setOpenError(err instanceof PdfError ? err : new PdfError('other', String(err)));
       } finally {
-        setOpening(false);
+        if (alive.current) setOpening(false);
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [data],
   );
 
@@ -444,6 +469,16 @@ export default function PdfViewer({ src }: { src: PreviewSource }) {
     scrollToPage(m.page, y);
   };
 
+  const matchesByPage = useMemo(() => {
+    const out = new Map<number, PdfMatch[]>();
+    for (const m of matches ?? []) {
+      const list = out.get(m.page);
+      if (list) list.push(m);
+      else out.set(m.page, [m]);
+    }
+    return out;
+  }, [matches]);
+
   const submitSearch = (e: FormEvent) => {
     e.preventDefault();
     if (matches && matches.length && query.trim()) step(1);
@@ -465,12 +500,62 @@ export default function PdfViewer({ src }: { src: PreviewSource }) {
   if (!doc || !sizes.length) return <Loading label="Opening the PDF" />;
 
   const numPages = Math.min(doc.numPages, MAX_PAGES);
-  const pageMatches = (i: number) => (matches ? matches.filter((m) => m.page === i) : []);
+  const pageMatches = (i: number) => matchesByPage.get(i) ?? NO_MATCHES;
   const currentMatch = matches?.[matchIndex] ?? null;
   return (
     <div className="relative flex h-full flex-col bg-[#1b1d2b]">
+      {/* Viewer, then (search open) the search bar at the bottom: both within thumb reach. */}
+      <div className="relative min-h-0 flex-1">
+        <div ref={scroller} onScroll={onScroll} onClick={onClick} className="h-full overflow-auto overscroll-contain" style={{ touchAction: 'pan-x pan-y' }}>
+          <div ref={content} style={{ width: layout.contentWidth, height: layout.height, position: 'relative' }}>
+            {layout.pages.map((p, i) => (
+              <div key={i} className="absolute left-0 right-0" style={{ top: layout.tops[i], height: p.h }}>
+                {i >= range[0] - 3 && i <= range[1] + 3 ? (
+                  <PdfPage
+                    doc={doc}
+                    index={i}
+                    width={p.w}
+                    height={p.h}
+                    scale={p.scale}
+                    active={i >= range[0] && i <= range[1]}
+                    textItems={texts.get(i)}
+                    matches={pageMatches(i)}
+                    currentMatch={currentMatch}
+                  />
+                ) : (
+                  <div className="mx-auto bg-white/90" style={{ width: p.w, height: p.h }} />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-3">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-ink-900/95 p-1 shadow-lg ring-1 ring-inset ring-ink-700 backdrop-blur">
+            <span className="min-w-[64px] px-2 text-center text-[13px] font-semibold tabular-nums text-ink-100" aria-live="polite">
+              {current + 1} / {numPages}
+            </span>
+            <IconButton icon="search" label="Search in the PDF" onClick={() => setSearchOpen((v) => !v)} className="h-10 w-10" />
+            <button type="button" aria-label="Zoom out" onClick={() => zoomTo(zoom / 1.25)} className="press grid h-10 w-10 place-items-center rounded-full text-[20px] text-ink-200">
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => zoomTo(1)}
+              aria-label="Fit to width"
+              className={cx('press min-h-[40px] rounded-full px-2 text-[12px] tabular-nums', Math.abs(zoom - 1) < 0.01 ? 'text-ink-400' : 'text-signal')}
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button type="button" aria-label="Zoom in" onClick={() => zoomTo(zoom * 1.25)} className="press grid h-10 w-10 place-items-center rounded-full text-[20px] text-ink-200">
+              +
+            </button>
+            <IconButton icon="external" label="Open externally / Download" onClick={() => void src.download()} className="h-10 w-10" />
+          </div>
+        </div>
+      </div>
+      {searching && <p className="shrink-0 bg-ink-900 px-4 py-1 text-[12px] text-ink-400">{searching}</p>}
       {searchOpen && (
-        <form onSubmit={submitSearch} className="flex shrink-0 items-center gap-1 border-b border-ink-800 bg-ink-900 px-2 py-1.5">
+        <form onSubmit={submitSearch} className="flex shrink-0 items-center gap-1 border-t border-ink-800 bg-ink-900 px-2 py-1.5">
           <input
             type="search"
             enterKeyHint="search"
@@ -501,53 +586,6 @@ export default function PdfViewer({ src }: { src: PreviewSource }) {
           />
         </form>
       )}
-      {searching && <p className="shrink-0 bg-ink-900 px-4 pb-1 text-[12px] text-ink-400">{searching}</p>}
-      <div ref={scroller} onScroll={onScroll} onClick={onClick} className="min-h-0 flex-1 overflow-auto overscroll-contain" style={{ touchAction: 'pan-x pan-y' }}>
-        <div ref={content} style={{ width: layout.contentWidth, height: layout.height, position: 'relative' }}>
-          {layout.pages.map((p, i) => (
-            <div key={i} className="absolute left-0 right-0" style={{ top: layout.tops[i], height: p.h }}>
-              {i >= range[0] - 3 && i <= range[1] + 3 ? (
-                <PdfPage
-                  doc={doc}
-                  index={i}
-                  width={p.w}
-                  height={p.h}
-                  scale={p.scale}
-                  active={i >= range[0] && i <= range[1]}
-                  textItems={texts.get(i)}
-                  matches={pageMatches(i)}
-                  currentMatch={currentMatch}
-                />
-              ) : (
-                <div className="mx-auto bg-white/90" style={{ width: p.w, height: p.h }} />
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-3">
-        <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-ink-900/95 p-1 shadow-lg ring-1 ring-inset ring-ink-700 backdrop-blur">
-          <span className="min-w-[64px] px-2 text-center text-[13px] font-semibold tabular-nums text-ink-100" aria-live="polite">
-            {current + 1} / {numPages}
-          </span>
-          <IconButton icon="search" label="Search in the PDF" onClick={() => setSearchOpen((v) => !v)} className="h-10 w-10" />
-          <button type="button" aria-label="Zoom out" onClick={() => zoomTo(zoom / 1.25)} className="press grid h-10 w-10 place-items-center rounded-full text-[20px] text-ink-200">
-            −
-          </button>
-          <button
-            type="button"
-            onClick={() => zoomTo(1)}
-            aria-label="Fit to width"
-            className={cx('press min-h-[40px] rounded-full px-2 text-[12px] tabular-nums', Math.abs(zoom - 1) < 0.01 ? 'text-ink-400' : 'text-signal')}
-          >
-            {Math.round(zoom * 100)}%
-          </button>
-          <button type="button" aria-label="Zoom in" onClick={() => zoomTo(zoom * 1.25)} className="press grid h-10 w-10 place-items-center rounded-full text-[20px] text-ink-200">
-            +
-          </button>
-          <IconButton icon="external" label="Open externally / Download" onClick={() => void src.download()} className="h-10 w-10" />
-        </div>
-      </div>
     </div>
   );
 }

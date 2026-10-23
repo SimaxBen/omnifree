@@ -19,18 +19,30 @@ export const TAIL_BYTES = 22 + 0xffff;
 
 export class ZipFormatError extends Error {}
 
-/** Locates the central directory from the last bytes of a zip of `fileSize` bytes. */
+/**
+ * Locates the central directory from the last bytes of a zip of `fileSize` bytes. The archive
+ * comment (up to 64 KB) may itself contain the EOCD signature: a record whose comment length
+ * reaches exactly the end of the file wins; a plausible one is the fallback (trailing bytes).
+ */
 export function findCentralDirectory(tail: Uint8Array, fileSize: number): { offset: number; size: number; count: number } {
   const v = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
+  let fallback: { offset: number; size: number; count: number } | null = null;
   for (let i = tail.length - 22; i >= 0; i--) {
     if (v.getUint32(i, true) !== EOCD_SIG) continue;
     const count = v.getUint16(i + 10, true);
     const size = v.getUint32(i + 12, true);
     const offset = v.getUint32(i + 16, true);
-    if (offset === 0xffffffff || size === 0xffffffff) throw new ZipFormatError('ZIP64 archives are not read by range');
+    const commentLen = v.getUint16(i + 20, true);
+    const exact = i + 22 + commentLen === tail.length;
+    if (offset === 0xffffffff || size === 0xffffffff || count === 0xffff) {
+      if (exact) throw new ZipFormatError('ZIP64 archives are not read by range');
+      continue;
+    }
     if (offset + size > fileSize) continue; // a stray signature inside the comment
-    return { offset, size, count };
+    if (exact) return { offset, size, count };
+    fallback ??= { offset, size, count };
   }
+  if (fallback) return fallback;
   throw new ZipFormatError('Not a zip file');
 }
 

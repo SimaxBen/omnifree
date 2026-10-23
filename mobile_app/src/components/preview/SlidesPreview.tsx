@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { imageMime } from '../../lib/preview/ooxml';
 import { parsePptx, type PptxDeck } from '../../lib/preview/pptx';
+import { ZipCapError, extractEntry } from '../../lib/preview/zip';
 import type { PreviewSource } from '../../lib/preview/source';
 import { IconButton, cx } from '../ui';
 import { Loading, PreviewError, useSourceBytes } from './common';
@@ -26,11 +27,11 @@ function useZipImages(zip: JSZip | null, paths: string[]): Map<string, string> {
     (async () => {
       const out = new Map<string, string>();
       for (const p of paths) {
-        const f = zip.file(p);
-        if (!f) continue;
-        const bytes = await f.async('uint8array');
+        if (!zip.file(p)) continue;
+        // Capped while inflating: a picture that lies about its size stops at the limit.
+        const bytes = await extractEntry(zip, p, IMAGE_MAX_BYTES).catch(() => null);
         if (!alive) return;
-        if (bytes.length > IMAGE_MAX_BYTES) continue;
+        if (!bytes) continue;
         const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: imageMime(p) }));
         made.push(url);
         out.set(p, url);
@@ -63,7 +64,7 @@ export default function SlidesPreview({ src }: { src: PreviewSource }) {
       .then(async (zip) => ({ zip, deck: await parsePptx(zip) }))
       .then(
         (d) => alive && setDeck(d),
-        (err) => alive && setError(/zip|central directory|end of data/i.test(String(err)) ? "This doesn't look like a valid .pptx file (damaged or password-protected)." : err),
+        (err) => alive && setError(!(err instanceof ZipCapError) && /zip|central directory|end of data/i.test(String(err)) ? "This doesn't look like a valid .pptx file (damaged or password-protected)." : err),
       );
     return () => {
       alive = false;

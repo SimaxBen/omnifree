@@ -110,3 +110,14 @@ export function parseDelimited(text: string, delimiter: Delimiter, maxRows = 100
 export function looksNumeric(v: string): boolean {
   return /^\s*[-+]?(\d{1,3}([ ,. ]\d{3})*|\d+)([.,]\d+)?\s*%?\s*$/.test(v) && /\d/.test(v);
 }
+
+/** A1-style label of grid cell (r, c) in a grid whose first cell sits at sheet (r0, c0). */
+export function cellLabel(r: number, c: number, r0 = 0, c0 = 0): string {
+  return `${colName(c0 + c)}${r0 + r + 1}`;
+}
+
+export function colName(c: number): string {
+  let s = '';
+  for (let n = c + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
+}

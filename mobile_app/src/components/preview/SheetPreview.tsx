@@ -2,18 +2,22 @@
 // grid: sheet tabs, the first 1000 rows x 50 columns, rows virtualised, sticky header row and first
 // column, numbers right-aligned with the file's own number/date formats, tap a cell for its value.
 
+import JSZip from 'jszip';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { read, utils, type CellObject, type WorkBook } from 'xlsx';
 import { copyText } from '../../lib/dom';
 import { extensionOf } from '../../lib/files';
 import { useHub } from '../../lib/hub';
-import { detectDelimiter, looksNumeric, parseDelimited } from '../../lib/preview/delimited';
+import { cellLabel, detectDelimiter, looksNumeric, parseDelimited } from '../../lib/preview/delimited';
 import type { PreviewSource } from '../../lib/preview/source';
+import { assertInflatesWithin } from '../../lib/preview/zip';
 import { Icon } from '../icons';
 import { IconButton, cx } from '../ui';
 import { Loading, PreviewError, decodeText, useSourceBytes } from './common';
 
 export const SHEET_MAX_BYTES = 30 * 1024 * 1024;
+/** Real unpacked size an .xlsx/.ods may reach before SheetJS (which unzips without a cap) gets it. */
+export const SHEET_INFLATE_MAX = 200 * 1024 * 1024;
 const MAX_ROWS = 1000;
 const MAX_COLS = 50;
 const ROW_H = 34;
@@ -35,6 +39,9 @@ interface Grid {
   columns: number;
   totalRows: number;
   totalCols: number;
+  /** Sheet row/column of rows[0][0] (a used range may start at C5): for the cell's A1 label. */
+  r0?: number;
+  c0?: number;
 }
 
 const EMPTY: GridCell = { text: '', numeric: false };
@@ -75,6 +82,8 @@ function sheetGrid(wb: WorkBook, name: string, hidden: boolean): Grid {
     columns: lastCol - range.s.c + 1,
     totalRows: full.e.r - full.s.r + 1,
     totalCols: full.e.c - full.s.c + 1,
+    r0: range.s.r,
+    c0: range.s.c,
   };
 }
 
@@ -91,11 +100,6 @@ function csvGrid(text: string, name: string, ext: string): Grid & { delimiter: s
   return { name, rows, columns, totalRows: parsed.truncated ? rows.length + 1 : rows.length, totalCols: parsed.columns, delimiter };
 }
 
-function colName(c: number): string {
-  let s = '';
-  for (let n = c + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
-  return s;
-}
 
 function GridView({ grid }: { grid: Grid }) {
   const { notify } = useHub();
@@ -180,8 +184,7 @@ function GridView({ grid }: { grid: Grid }) {
         <div className="screen-in-up absolute inset-x-2 bottom-2 z-40 max-h-[45%] overflow-y-auto rounded-card bg-ink-900 p-4 shadow-2xl ring-1 ring-inset ring-ink-700">
           <div className="mb-2 flex items-center gap-2">
             <span className="rounded-md bg-ink-800 px-2 py-0.5 font-mono text-[12px] text-signal">
-              {colName(picked.c)}
-              {picked.r + 1}
+              {cellLabel(picked.r, picked.c, grid.r0, grid.c0)}
             </span>
             <span className="min-w-0 flex-1 truncate text-[12px] text-ink-500">{header[picked.c]?.text && picked.r > 0 ? header[picked.c].text : ''}</span>
             <IconButton
@@ -217,22 +220,32 @@ export default function SheetPreview({ src }: { src: PreviewSource }) {
     setBook(null);
     setError(null);
     setTab(0);
+    let alive = true;
     // Parsing is synchronous: yield a frame so the spinner shows first.
-    const t = window.setTimeout(() => {
+    const t = window.setTimeout(async () => {
       try {
         if (isCsv) {
           const csv = csvGrid(decodeText(data), src.name, ext);
           setBook({ names: [src.name], hidden: [false], wb: null, csv });
           return;
         }
+        const head = new Uint8Array(data, 0, Math.min(4, data.byteLength));
+        if (head[0] === 0x50 && head[1] === 0x4b) {
+          // xlsx/xlsm/xlsb/ods are zips: refuse deflate bombs before SheetJS inflates every part.
+          await assertInflatesWithin(await JSZip.loadAsync(data), SHEET_INFLATE_MAX);
+          if (!alive) return;
+        }
         const wb = read(data, { type: 'array', dense: true, sheetRows: MAX_ROWS, cellFormula: true, cellStyles: false, WTF: false });
         const hidden = wb.SheetNames.map((_, i) => !!wb.Workbook?.Sheets?.[i]?.Hidden);
-        setBook({ names: wb.SheetNames, hidden, wb, csv: null });
+        if (alive) setBook({ names: wb.SheetNames, hidden, wb, csv: null });
       } catch (err) {
-        setError(/password|encrypt/i.test(String(err)) ? 'This spreadsheet is password-protected.' : err);
+        if (alive) setError(/password|encrypt/i.test(String(err)) ? 'This spreadsheet is password-protected.' : err);
       }
     }, 30);
-    return () => window.clearTimeout(t);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
   }, [data, isCsv, ext, src.name]);
 
   const grid = useMemo<Grid | null>(() => {

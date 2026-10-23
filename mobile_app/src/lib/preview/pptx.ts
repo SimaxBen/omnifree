@@ -3,6 +3,7 @@
 
 import type JSZip from 'jszip';
 import { IMAGE_EXT, attrLocal, byLocal, firstLocal, parseXml, readRels, relsPathOf } from './ooxml';
+import { entryText } from './zip';
 
 export interface PptxParagraph {
   text: string;
@@ -26,10 +27,11 @@ export interface PptxDeck {
 }
 
 const MAX_SLIDES = 500;
+/** Inflated size cap of one XML part (a slide is a few KB to a few MB; a deflate bomb stops here). */
+export const PPTX_PART_MAX = 16 * 1024 * 1024;
 
-async function text(zip: JSZip, path: string): Promise<string | null> {
-  const f = zip.file(path);
-  return f ? f.async('string') : null;
+function text(zip: JSZip, path: string): Promise<string | null> {
+  return entryText(zip, path, PPTX_PART_MAX);
 }
 
 function paragraphText(p: Element): string {

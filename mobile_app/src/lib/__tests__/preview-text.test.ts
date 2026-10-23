@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { codeLanguage, fileKind, isTextual, previewerOf } from '../files';
-import { detectDelimiter, looksNumeric, parseDelimited } from '../preview/delimited';
+import { cellLabel, detectDelimiter, looksNumeric, parseDelimited } from '../preview/delimited';
 import { splitHighlighted } from '../preview/lines';
 import { findInPages } from '../preview/pdfSearch';
 
@@ -128,5 +128,28 @@ describe('pdf search', () => {
     ]);
     expect(findInPages(pages, 'mad thank')[0].segments.map((s) => s.item)).toEqual([1, 2]);
     expect(findInPages(pages, '   ')).toEqual([]);
+  });
+
+  it('folds whitespace runs (a space on both sides of an item break, double spaces, tabs)', () => {
+    const pages = [[{ str: 'Total due: ' }, { str: ' 450 MAD' }, { str: 'net  amount\there', hasEOL: true }, { str: ' end' }]];
+    expect(findInPages(pages, 'due: 450')[0].segments).toEqual([
+      { item: 0, start: 6, end: 11 },
+      { item: 1, start: 0, end: 4 },
+    ]);
+    expect(findInPages(pages, 'net amount here')[0].segments).toEqual([{ item: 2, start: 0, end: 16 }]);
+    expect(findInPages(pages, 'here end')[0].segments).toEqual([
+      { item: 2, start: 12, end: 16 },
+      { item: 3, start: 0, end: 4 },
+    ]);
+  });
+});
+
+describe('spreadsheet cell labels', () => {
+  it('labels cells from the sheet origin of the used range', () => {
+    expect(cellLabel(0, 0)).toBe('A1');
+    expect(cellLabel(1, 27)).toBe('AB2');
+    // A used range starting at C5: grid (0, 0) is C5.
+    expect(cellLabel(0, 0, 4, 2)).toBe('C5');
+    expect(cellLabel(3, 1, 4, 2)).toBe('D8');
   });
 });

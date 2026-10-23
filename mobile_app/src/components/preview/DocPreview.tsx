@@ -6,16 +6,20 @@ import mammoth from 'mammoth';
 import { useEffect, useState } from 'react';
 import { odtToHtml } from '../../lib/preview/odt';
 import { sanitizeDocHtml } from '../../lib/preview/sanitize';
+import { ZipCapError, assertInflatesWithin } from '../../lib/preview/zip';
 import type { PreviewSource } from '../../lib/preview/source';
 import { Loading, PreviewError, useSourceBytes } from './common';
 
 export const DOC_MAX_BYTES = 30 * 1024 * 1024;
+/** Real unpacked size a .docx may reach before mammoth (which unzips without a cap) gets it. */
+export const DOC_INFLATE_MAX = 200 * 1024 * 1024;
 
 async function convert(data: ArrayBuffer, format: 'docx' | 'odt'): Promise<{ html: string; warnings: number }> {
   if (format === 'odt') {
     const zip = await JSZip.loadAsync(data);
     return { html: await odtToHtml(zip), warnings: 0 };
   }
+  await assertInflatesWithin(await JSZip.loadAsync(data), DOC_INFLATE_MAX);
   const res = await mammoth.convertToHtml({ arrayBuffer: data }, { ignoreEmptyParagraphs: true, idPrefix: 'doc-' });
   return { html: res.value, warnings: res.messages.filter((m) => m.type === 'warning').length };
 }
@@ -34,7 +38,7 @@ export default function DocPreview({ src, format }: { src: PreviewSource; format
       (err) =>
         alive &&
         setError(
-          /zip|central directory|end of data/i.test(String(err))
+          !(err instanceof ZipCapError) && /zip|central directory|end of data/i.test(String(err))
             ? `This doesn't look like a valid .${format} file (it may be damaged, password-protected or an older format).`
             : err,
         ),

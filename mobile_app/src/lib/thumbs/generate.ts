@@ -9,7 +9,7 @@
 
 import type { HubClient } from '../api';
 import { extensionOf, fileKind } from '../files';
-import { CorsBlockedError, fetchObjectBytes, fetchObjectRange, objectUrl } from '../preview/source';
+import { CorsBlockedError, HUB_READ_LIMIT, fetchObjectBytes, fetchObjectRange, objectUrl } from '../preview/source';
 import type { StoredObject } from '../types';
 import type { ThumbRecord } from './cache';
 import { openRemoteZip, type RangeFetcher } from './zipRange';
@@ -84,7 +84,8 @@ async function imageThumb(client: HubClient, obj: StoredObject, signal: AbortSig
 }
 
 function videoThumb(client: HubClient, obj: StoredObject, signal: AbortSignal): Promise<ThumbRecord> {
-  return objectUrl(client, obj, signal).then(
+  // A backend without presigned URLs would mean downloading the whole video for one frame.
+  return objectUrl(client, obj, signal, HUB_READ_LIMIT).then(
     (url) =>
       new Promise<ThumbRecord>((resolve, reject) => {
         const v = document.createElement('video');
